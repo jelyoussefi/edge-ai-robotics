@@ -82,18 +82,28 @@ services:
     profiles:
       - manual
 
-  # Milestone 2. Kept here so the shape of the stack is visible now.
-  # perception:
-  #   build:
-  #     context: .
-  #     dockerfile: services/perception/Dockerfile
-  #   depends_on:
-  #     - bus
-  #   environment:
-  #     <<: *bus-env
-  #     OV_DEVICE: NPU
-  #   devices:
-  #     - /dev/dri:/dev/dri
-  #     - /dev/accel:/dev/accel
-  #   volumes:
-  #     - /dev/video0:/dev/video0
+  # Perception. Runs one detector per stream. STREAMS selects the config, so
+  # moving from the sample video to four D457 cameras is an env change only.
+  perception:
+    build:
+      context: .
+      dockerfile: services/perception/Dockerfile
+    depends_on:
+      - bus
+    environment:
+      <<: *bus-env
+      PERCEPTION_CONFIG: /config/streams.${STREAMS:-video}.json
+      PERCEPTION_PUBLISH_HZ: "15"
+      LOOP_VIDEO: "1"
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/accel:/dev/accel
+    group_add:
+      - "${RENDER_GID:-993}"
+      - "${VIDEO_GID:-44}"
+    volumes:
+      - ./config:/config:ro
+      - ./assets:/assets:ro
+      - /dev:/dev
+    cpuset: ${PERCEPTION_CPUS:-}
+    restart: unless-stopped

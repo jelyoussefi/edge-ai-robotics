@@ -1,0 +1,9 @@
+[
+  {
+    "source":     "/assets/videos/How_People_Walk.mp4",
+    "model":      "/assets/models/yolov8n/FP16/yolov8n.xml",
+    "device":     "CPU",
+    "confidence": 0.4,
+    "vfov_deg":   50.0
+  }
+]

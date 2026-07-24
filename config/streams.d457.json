@@ -1,0 +1,6 @@
+[
+  { "source": "/dev/video-rs-color-0", "model": "/assets/models/yolov8n/FP16/yolov8n.xml", "device": "NPU", "vfov_deg": 65.0 },
+  { "source": "/dev/video-rs-color-1", "model": "/assets/models/yolov8n/FP16/yolov8n.xml", "device": "GPU", "vfov_deg": 65.0 },
+  { "source": "/dev/video-rs-color-2", "model": "/assets/models/yolov8n/FP16/yolov8n.xml", "device": "GPU", "vfov_deg": 65.0 },
+  { "source": "/dev/video-rs-color-3", "model": "/assets/models/yolov8n/FP16/yolov8n.xml", "device": "CPU", "vfov_deg": 65.0 }
+]

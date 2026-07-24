@@ -30,6 +30,7 @@ BINDINGS = """
   q / e      strafe left / right
   space      stop immediately
   r          reset the robot to its start pose
+  m          toggle manual / auto (auto follows perception)
   ctrl-c     quit
 """
 
@@ -64,6 +65,7 @@ def decay(value: float, amount: float) -> float:
 def main() -> None:
     pub = Publisher()
     vx = vy = wz = 0.0
+    mode = topics.MODE_MANUAL
     running = True
 
     def stop(*_: object) -> None:
@@ -73,8 +75,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    print("Edge AI Robotics — keyboard control")
+    print("Edge AI Robotics - keyboard control")
     print(BINDINGS)
+    pub.send(topics.CMD_MODE, {"mode": mode})
 
     dt = 1.0 / RATE_HZ
     with RawTerminal() as term:
@@ -99,6 +102,10 @@ def main() -> None:
                 elif key == "r":
                     pub.send(topics.CMD_VEL, {"vx": 0.0, "vy": 0.0, "wz": 0.0, "reset": True})
                     vx = vy = wz = 0.0
+                elif key == "m":
+                    mode = topics.MODE_AUTO if mode == topics.MODE_MANUAL else topics.MODE_MANUAL
+                    vx = vy = wz = 0.0
+                    pub.send(topics.CMD_MODE, {"mode": mode})
                 elif key == "\x03":
                     running = False
 
@@ -107,7 +114,7 @@ def main() -> None:
 
             pub.send(topics.CMD_VEL, {"vx": vx, "vy": vy, "wz": wz, "stamp": time.time()})
 
-            sys.stdout.write(f"\r  vx {vx:+.2f}  vy {vy:+.2f}  wz {wz:+.2f}   ")
+            sys.stdout.write(f"\r  [{mode:6}]  vx {vx:+.2f}  vy {vy:+.2f}  wz {wz:+.2f}   ")
             sys.stdout.flush()
 
             time.sleep(max(0.0, dt - (time.perf_counter() - loop_start)))

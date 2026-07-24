@@ -20,9 +20,22 @@ ROBOT_STATE = "robot.state"
 #   {"physics_hz": float, "rtf": float, "jitter_p99_us": float, "policy_ms": float}
 SIM_TELEMETRY = "sim.telemetry"
 
-# Milestone 2, perception -> sim.
-#   {"people": [{"id": int, "xyz": [float, float, float]}], "stamp": float}
+# perception -> sim. People are ordered nearest first.
+#   {"people": [{"cx": float, "cy": float, "height": float, "score": float,
+#                "range_m": float, "camera": int}],
+#    "streams": [{"camera": int, "fps": float, "infer_ms": float, "device": str}],
+#    "stamp": float}
+#
+# cx and cy are normalised 0..1 across the frame. range_m is a monocular
+# estimate until the D457 depth stream replaces it in milestone 3.
 PERCEPTION_PEOPLE = "perception.people"
+
+# teleop -> sim. Which source of commands the simulator should obey.
+#   {"mode": "manual" | "auto"}
+CMD_MODE = "cmd.mode"
+
+MODE_MANUAL = "manual"
+MODE_AUTO = "auto"
 
 # Velocity limits applied to whatever teleop sends, so a held key cannot ask
 # the policy for something it was never trained on.

@@ -19,6 +19,7 @@ import numpy as np
 from edgebot import topics
 from edgebot.bus import Publisher, Subscriber
 
+from behaviours import ReactiveBehaviour
 from controllers import make_controller
 
 log = logging.getLogger("sim")
@@ -55,9 +56,12 @@ class Sim:
         mujoco.mj_forward(self.model, self.data)
 
         self.controller = make_controller(self.model, self.data)
+        self.behaviour = ReactiveBehaviour()
         self.pub = Publisher()
-        self.sub = Subscriber([topics.CMD_VEL])
+        self.sub = Subscriber([topics.CMD_VEL, topics.CMD_MODE, topics.PERCEPTION_PEOPLE])
+        self.teleop_cmd = np.zeros(3)
         self.cmd = np.zeros(3)
+        self.mode = topics.MODE_MANUAL
         self.running = True
 
         self._steps_per_control = max(1, int(PHYSICS_HZ / CONTROL_HZ))
@@ -69,18 +73,47 @@ class Sim:
     def _stop(self, *_: object) -> None:
         self.running = False
 
-    def _poll_command(self) -> None:
-        msg = self.sub.drain()
-        if msg is None:
-            return
-        _, payload = msg
+    def _poll_bus(self) -> None:
+        """Consume every pending message, then decide which command to obey.
+
+        All three topics share one subscriber, so this drains rather than
+        conflates: a mode change must not be dropped just because a velocity
+        command arrived after it.
+        """
+        while (msg := self.sub.recv(0)) is not None:
+            topic, payload = msg
+            if topic == topics.CMD_VEL:
+                self.teleop_cmd = np.array(
+                    [payload.get("vx", 0.0), payload.get("vy", 0.0), payload.get("wz", 0.0)]
+                )
+                if payload.get("reset"):
+                    self._reset()
+            elif topic == topics.CMD_MODE:
+                new_mode = payload.get("mode", topics.MODE_MANUAL)
+                if new_mode != self.mode:
+                    log.info("mode -> %s", new_mode)
+                    self.mode = new_mode
+            elif topic == topics.PERCEPTION_PEOPLE:
+                self.behaviour.observe(payload)
+
+        raw = self.behaviour.command(time.time()) if self.mode == topics.MODE_AUTO else self.teleop_cmd
         self.cmd = np.array(
             [
-                np.clip(payload.get("vx", 0.0), -topics.MAX_VX, topics.MAX_VX),
-                np.clip(payload.get("vy", 0.0), -topics.MAX_VY, topics.MAX_VY),
-                np.clip(payload.get("wz", 0.0), -topics.MAX_WZ, topics.MAX_WZ),
+                np.clip(raw[0], -topics.MAX_VX, topics.MAX_VX),
+                np.clip(raw[1], -topics.MAX_VY, topics.MAX_VY),
+                np.clip(raw[2], -topics.MAX_WZ, topics.MAX_WZ),
             ]
         )
+
+    def _reset(self) -> None:
+        """Return the robot to its start pose without restarting the service."""
+        if self.model.nkey:
+            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+        else:
+            mujoco.mj_resetData(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)
+        self.controller = make_controller(self.model, self.data)
+        log.info("reset to start pose")
 
     def _fallen(self) -> bool:
         return bool(self.data.qpos[2] < FALLEN_HEIGHT)
@@ -98,7 +131,7 @@ class Sim:
 
         while self.running:
             if step % self._steps_per_control == 0:
-                self._poll_command()
+                self._poll_bus()
                 t0 = time.perf_counter()
                 self.controller.update(self.cmd, self.data)
                 policy_ms = (time.perf_counter() - t0) * 1e3
@@ -141,6 +174,8 @@ class Sim:
                         "rtf": float(achieved_hz * dt),
                         "jitter_p99_us": float(np.percentile(jitter[:min(step, len(jitter))], 99)),
                         "policy_ms": policy_ms,
+                        "mode": self.mode,
+                        **self.behaviour.status(),
                     },
                 )
                 last_report = now

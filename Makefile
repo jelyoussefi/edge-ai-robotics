@@ -21,14 +21,22 @@ VIDEO_GID  := $(shell getent group video  2>/dev/null | cut -d: -f3)
 # CPU set for the physics loop. Leave empty to let the scheduler decide, or set
 # to isolated cores, e.g. `make run SIM_CPUS=8-11`.
 SIM_CPUS ?=
+PERCEPTION_CPUS ?=
 
-export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS
+# Which stream config perception uses: video (sample mp4), single, or d457.
+STREAMS ?= video
+
+# Path to a local edge-ai-suites checkout, if you have one. Saves a clone.
+SUITE ?=
+
+export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS
 
 # Stamp files: build/fetch re-run only when their inputs actually change,
 # never just because make was invoked again.
 STAMP_DIR    := .make
 IMAGES_STAMP := $(STAMP_DIR)/images
 MODELS_STAMP := $(STAMP_DIR)/models
+ASSETS_STAMP := $(STAMP_DIR)/assets
 XHOST_STAMP  := $(STAMP_DIR)/xhost
 
 MENAGERIE    := models/mujoco_menagerie
@@ -41,7 +49,7 @@ REQ_FILES    := $(shell find services -type f -name 'requirements.txt' 2>/dev/nu
 #----------------------------------------------------------------------------------------------------------------------
 default: run
 
-.PHONY: help build models run up down restart teleop logs ps shell check lint test format clean distclean
+.PHONY: help build models assets run up down restart teleop perception logs ps shell check lint test format clean distclean
 
 help:
 	@$(call msg, Edge AI Robotics - available commands)
@@ -54,13 +62,16 @@ help:
 	@echo "  make ps         Show container status"
 	@echo "  make shell      Open a shell inside a service      [S=sim]"
 	@echo "  make models     Fetch the MuJoCo Menagerie robot models"
+	@echo "  make assets     Fetch the sample video and export YOLOv8n to OpenVINO IR"
+	@echo "  make perception Start perception only        [STREAMS=video|single|d457]"
 	@echo "  make check      Run lint, type-check and tests"
 	@echo "  make format     Auto-format the source"
 	@echo "  make clean      Remove build stamps and containers"
 	@echo "  make distclean  Also remove images and downloaded models"
 	@echo ""
-	@echo "  Configuration:  ROBOT=$(ROBOT)  POLICY=$(POLICY)  SIM_CPUS=$(SIM_CPUS)"
+	@echo "  Configuration:  ROBOT=$(ROBOT)  POLICY=$(POLICY)  STREAMS=$(STREAMS)"
 	@echo "  Robots:         g1 h1 t1        Policies: kinematic rl"
+	@echo "  Streams:        video (sample mp4, no cameras needed), single, d457"
 
 # Robot meshes are large and separately licensed, so they are fetched rather
 # than vendored. The stamp file (not the directory) is the target, so a shallow
@@ -72,6 +83,16 @@ $(MODELS_STAMP): scripts/fetch_models.sh
 	@touch $@
 
 models: $(MODELS_STAMP)
+
+# Sample video and the YOLOv8n IR. Separate from robot models because these are
+# the ones you need before the cameras work, and the ones you can demo on.
+$(ASSETS_STAMP): scripts/fetch_assets.sh
+	@$(call msg, Fetching perception assets ...)
+	@mkdir -p $(STAMP_DIR)
+	@bash scripts/fetch_assets.sh $(SUITE)
+	@touch $@
+
+assets: $(ASSETS_STAMP)
 
 # Generate .env once, on first use. It is a real file target, so it is created
 # only when missing — never on every run.
@@ -86,7 +107,7 @@ $(IMAGES_STAMP): .env $(DOCKERFILES) $(REQ_FILES) $(SRC_FILES)
 	@$(COMPOSE) build
 	@touch $@
 
-build: $(MODELS_STAMP) $(IMAGES_STAMP)
+build: $(MODELS_STAMP) $(ASSETS_STAMP) $(IMAGES_STAMP)
 
 # The viewer draws on the host X display, so the local user has to be allowed
 # through once per login session.
@@ -98,9 +119,10 @@ $(XHOST_STAMP):
 
 run: build $(XHOST_STAMP)
 	@$(call msg, Starting the stack - robot $(ROBOT), policy $(POLICY) ...)
-	@echo "  The humanoid opens on $(DISPLAY). Run 'make teleop' in a second terminal to drive it."
-	@$(COMPOSE) up -d bus sim viewer
-	@$(COMPOSE) logs -f sim viewer
+	@echo "  The humanoid opens on $(DISPLAY). Run 'make teleop' in a second terminal."
+	@echo "  Press 'm' in teleop to hand control to perception (STREAMS=$(STREAMS))."
+	@$(COMPOSE) up -d bus sim viewer perception
+	@$(COMPOSE) logs -f sim viewer perception
 
 up: run
 
@@ -115,6 +137,12 @@ restart: down run
 teleop: $(IMAGES_STAMP)
 	@$(call msg, Keyboard control - W/S walk, A/D turn, Q/E strafe, space stop, Ctrl-C quit)
 	@$(COMPOSE) run --rm teleop
+
+# Perception on its own, for tuning without the physics running.
+perception: $(ASSETS_STAMP) $(IMAGES_STAMP)
+	@$(call msg, Starting perception only - streams $(STREAMS) ...)
+	@$(COMPOSE) up -d bus
+	@$(COMPOSE) up perception
 
 logs:
 	@$(COMPOSE) logs -f $(S)
@@ -148,7 +176,7 @@ clean:
 distclean: clean
 	@$(call msg, Removing images and downloaded models ...)
 	@$(COMPOSE) down --rmi local --volumes 2>/dev/null || true
-	@rm -rf $(MENAGERIE)
+	@rm -rf $(MENAGERIE) assets
 	@echo "  Note: .env and anything under policies/ is yours and was left untouched."
 
 #----------------------------------------------------------------------------------------------------------------------

@@ -9,8 +9,9 @@ A single-board robotics demonstrator running on Intel Core Ultra Mobile Processo
 (Series 3). One board carries perception, policy, physics and rendering at the
 same time, with the workload split across CPU, GPU and NPU.
 
-Milestone 1, in this repository, is a simulated humanoid driven from the
-keyboard. Cameras and language control arrive in later milestones.
+Milestone 2, in this repository, is a simulated humanoid that reacts to people
+seen by real camera streams. It runs against a sample video out of the box, so
+nothing waits on camera bring-up.
 
 ## Requirements
 
@@ -24,8 +25,8 @@ keyboard. Cameras and language control arrive in later milestones.
 ```bash
 git clone <this-repo> edge-ai-robotics
 cd edge-ai-robotics
-make build       # fetch robot models, build the four images
-make run         # bring the stack up, humanoid appears on the display
+make build       # fetch models and assets, build the five images
+make run         # humanoid appears on the display, perception starts on video
 ```
 
 Then, in a second terminal:
@@ -34,6 +35,10 @@ Then, in a second terminal:
 make teleop
 ```
 
+Press `m` to hand control to perception. The humanoid then turns to face the
+nearest detected person and backs away if they come within 1.5 m. Press `m`
+again to take the keyboard back.
+
 | Key     | Action                 |
 |---------|------------------------|
 | `w` `s` | walk forward, backward |
@@ -41,6 +46,7 @@ make teleop
 | `q` `e` | strafe left, right     |
 | space   | stop                   |
 | `r`     | reset to start pose    |
+| `m`     | toggle manual / auto   |
 
 `make help` lists everything else.
 
@@ -52,7 +58,27 @@ Override on the command line or in `.env`:
 make run ROBOT=h1              # unitree_h1 instead of unitree_g1
 make run POLICY=rl             # trained policy instead of the kinematic gait
 make run SIM_CPUS=8-11         # pin physics to isolated cores
+make run STREAMS=single        # one detector instead of four, for bring-up
+make run STREAMS=d457          # four real cameras instead of the sample video
+make perception STREAMS=video  # perception alone, no physics, for tuning
 ```
+
+### Perception streams
+
+`config/streams.*.json` uses the same shape as the Robotics AI Suite
+multicam-demo config, one entry per stream:
+
+```json
+{ "source": "/assets/videos/How_People_Walk.mp4",
+  "model":  "/assets/models/yolov8n/FP16/yolov8n.xml",
+  "device": "NPU", "confidence": 0.4, "vfov_deg": 50.0 }
+```
+
+`source` is anything OpenCV can open, so moving from the sample video to four
+D457 cameras means changing four strings. `device` is passed straight to
+OpenVINO, so the four streams can be spread across NPU, GPU and CPU to show
+all three engines working at once. If a device is missing the detector logs a
+warning and falls back to CPU rather than failing.
 
 ## Architecture
 
@@ -67,10 +93,11 @@ teleop  ──cmd.vel──▶  bus  ──cmd.vel──▶  sim  ──robot.st
 
 | Service  | Does                                  | Uses            |
 |----------|---------------------------------------|-----------------|
-| `bus`    | XSUB/XPUB broker, the only binder     | nothing         |
-| `sim`    | MuJoCo physics and the controller     | CPU, NPU for RL |
-| `viewer` | draws the scene on the display        | iGPU via X11    |
-| `teleop` | keyboard to velocity command          | a terminal      |
+| `bus`        | XSUB/XPUB broker, the only binder | nothing            |
+| `sim`        | MuJoCo physics, controller, behaviour | CPU, NPU for RL |
+| `viewer`     | draws the scene on the display    | iGPU via X11       |
+| `teleop`     | keyboard to velocity command      | a terminal         |
+| `perception` | detects people on N streams       | NPU, GPU, CPU      |
 
 The simulator never renders and the viewer never steps physics. That separation
 is what lets the physics loop be pinned to isolated cores without a frame drop
@@ -103,10 +130,10 @@ vendor's robot appearing in Intel material.
 
 | Milestone | Scope                                                    |
 |-----------|----------------------------------------------------------|
-| M1        | Humanoid in simulation, keyboard control                 |
+| M1        | Humanoid in simulation, keyboard control (done)          |
+| M2        | Person detection on N streams, robot reacts (done)       |
 | M1.5      | RL locomotion policy on the NPU, real balance            |
-| M2        | D457 perception, person detection, robot reacts to a human |
-| M3        | Four cameras, fused point cloud rendered into the scene  |
+| M3        | Real depth from D457, fused point cloud in the scene     |
 | M4        | Language commands grounded against the live scene        |
 | M5        | Telemetry overlay showing CPU, GPU and NPU concurrently  |
 
@@ -123,9 +150,33 @@ Makefile resolved to a real group id.
 **Robot stands still.** Confirm teleop is publishing with
 `make logs S=sim`, and that both containers resolve `bus`.
 
+**Robot ignores people in auto mode.** Check `make logs S=perception` shows a
+non-zero person count. If detections are arriving but the robot does not move,
+the mode never switched: `sim` logs `mode -> auto` when it does.
+
+**Perception falls back to CPU.** The log line names the device it got. For NPU
+check the driver is installed and `/dev/accel` exists on the host; for GPU check
+`/dev/dri` and that `RENDER_GID` resolved.
+
+**Range estimates look wrong.** `range_m` is monocular, derived from apparent
+person height assuming someone standing and fully in frame. It is an estimate,
+not a measurement. Set `vfov_deg` per stream to match the real lens, and expect
+it to be wrong for seated or partly occluded people until M3 brings real depth.
+
 **Physics slower than real time.** Check `rtf` in the telemetry. Below 1.0 means
 the box is not keeping up. Reduce `PHYSICS_HZ` or pin `SIM_CPUS`.
+
+## Tests
+
+```bash
+python3 tests/test_postprocess.py   # letterbox round trip, NMS, range estimate
+python3 tests/test_behaviour.py     # gaze symmetry, retreat saturation, staleness
+```
+
+Both stub their dependencies, so they run without OpenVINO, MuJoCo or hardware.
 
 ## Licence
 
 Apache-2.0. Robot models and trained policies are covered by their own licences.
+The sample video is Apache-2.0 from the Intel Robotics AI Suite multicam-demo
+component, fetched by `make assets` rather than vendored.

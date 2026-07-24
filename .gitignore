@@ -1,0 +1,12 @@
+.make/
+.env
+models/mujoco_menagerie/
+policies/*.xml
+policies/*.bin
+policies/*.onnx
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+assets/

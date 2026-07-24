@@ -1,0 +1,30 @@
+[
+  {
+    "source":     "/assets/videos/How_People_Walk.mp4",
+    "model":      "/assets/models/yolov8n/FP16/yolov8n.xml",
+    "device":     "NPU",
+    "confidence": 0.4,
+    "vfov_deg":   50.0
+  },
+  {
+    "source":     "/assets/videos/How_People_Walk.mp4",
+    "model":      "/assets/models/yolov8n/FP16/yolov8n.xml",
+    "device":     "GPU",
+    "confidence": 0.4,
+    "vfov_deg":   50.0
+  },
+  {
+    "source":     "/assets/videos/How_People_Walk.mp4",
+    "model":      "/assets/models/yolov8n/FP16/yolov8n.xml",
+    "device":     "GPU",
+    "confidence": 0.4,
+    "vfov_deg":   50.0
+  },
+  {
+    "source":     "/assets/videos/How_People_Walk.mp4",
+    "model":      "/assets/models/yolov8n/FP16/yolov8n.xml",
+    "device":     "CPU",
+    "confidence": 0.4,
+    "vfov_deg":   50.0
+  }
+]
