@@ -54,9 +54,22 @@ if [ -f "$ASSETS/models/yolov8n/FP16/yolov8n.xml" ]; then
     echo "  YOLOv8n IR already present, skipping."
 else
     echo "  Exporting YOLOv8n to OpenVINO IR (runs in a container, nothing installed on the host) ..."
-    docker run --rm -v "$(pwd)/$ASSETS/models:/out" -w /tmp python:3.12-slim bash -c '
+    echo "  This pulls PyTorch, so expect a few GB and a few minutes on first run."
+    # HTTP_PROXY and friends are forwarded without values, so they pass through
+    # from the host when set and are simply absent when not.
+    docker run --rm \
+        -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+        -e http_proxy -e https_proxy -e no_proxy \
+        -e YOLO_CONFIG_DIR=/tmp/yolo \
+        -e DEBIAN_FRONTEND=noninteractive \
+        -v "$(pwd)/$ASSETS/models:/out" -w /tmp python:3.12-slim bash -c '
         set -e
-        pip install --no-cache-dir --quiet "ultralytics==8.3.0" "openvino==2025.3.0" "numpy<2.0"
+        # Ultralytics depends on opencv-python, which needs libGL and libglib
+        # at import time. The slim image ships neither, so cv2 fails to load
+        # and the ultralytics import dies before export ever starts.
+        apt-get update -qq 2>/dev/null
+        apt-get install -y -qq --no-install-recommends libgl1 libglib2.0-0 >/dev/null 2>&1
+        pip install --no-cache-dir --quiet "ultralytics>=8.3.0,<9" "openvino>=2025.0" "numpy<2.0"
         python - <<PY
 from ultralytics import YOLO
 m = YOLO("yolov8n.pt")
