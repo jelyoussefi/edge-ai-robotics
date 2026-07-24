@@ -1,0 +1,99 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+name: edge-ai-robotics
+
+x-bus-env: &bus-env
+  BUS_PUB: tcp://bus:5555
+  BUS_SUB: tcp://bus:5556
+  PYTHONUNBUFFERED: "1"
+
+services:
+
+  # Message broker. Every other service connects here, so adding perception
+  # later needs no change to sim, viewer or teleop.
+  bus:
+    build:
+      context: .
+      dockerfile: services/bus/Dockerfile
+    environment: *bus-env
+    expose:
+      - "5555"
+      - "5556"
+    restart: unless-stopped
+
+  # Physics. CPU only — MuJoCo's solver does not use the GPU, which is what
+  # leaves the iGPU free for rendering and, later, perception.
+  sim:
+    build:
+      context: .
+      dockerfile: services/sim/Dockerfile
+    depends_on:
+      - bus
+    environment:
+      <<: *bus-env
+      ROBOT: ${ROBOT:-g1}
+      POLICY: ${POLICY:-kinematic}
+      PHYSICS_HZ: "1000"
+      CONTROL_HZ: "50"
+      PUBLISH_HZ: "60"
+      POLICY_PATH: /policies/${ROBOT:-g1}_locomotion.xml
+      OV_DEVICE: NPU
+    volumes:
+      - ./models:/models:ro
+      - ./policies:/policies:ro
+    cpuset: ${SIM_CPUS:-}
+    restart: unless-stopped
+
+  # Rendering to the TV. Needs the host X socket and the Intel iGPU.
+  viewer:
+    build:
+      context: .
+      dockerfile: services/viewer/Dockerfile
+    depends_on:
+      - bus
+    environment:
+      <<: *bus-env
+      ROBOT: ${ROBOT:-g1}
+      DISPLAY: ${DISPLAY:-:0}
+      MUJOCO_GL: glx
+      LIBVA_DRIVER_NAME: iHD
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-993}"
+      - "${VIDEO_GID:-44}"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./models:/models:ro
+    restart: unless-stopped
+
+  # Keyboard control. Not started by `up` — it needs a terminal, so it runs
+  # via `make teleop` (docker compose run) instead.
+  teleop:
+    build:
+      context: .
+      dockerfile: services/teleop/Dockerfile
+    depends_on:
+      - bus
+    environment: *bus-env
+    stdin_open: true
+    tty: true
+    profiles:
+      - manual
+
+  # Milestone 2. Kept here so the shape of the stack is visible now.
+  # perception:
+  #   build:
+  #     context: .
+  #     dockerfile: services/perception/Dockerfile
+  #   depends_on:
+  #     - bus
+  #   environment:
+  #     <<: *bus-env
+  #     OV_DEVICE: NPU
+  #   devices:
+  #     - /dev/dri:/dev/dri
+  #     - /dev/accel:/dev/accel
+  #   volumes:
+  #     - /dev/video0:/dev/video0
