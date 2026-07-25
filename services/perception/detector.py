@@ -1,10 +1,14 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
-"""YOLOv8 person detection on OpenVINO.
+"""YOLO11 object detection on OpenVINO, with depth from a RealSense frame.
 
-Deliberately small. The preprocessing, async queue depth and device string all
-follow the pattern used by the Robotics AI Suite multicam-demo, so a model that
-runs there runs here unchanged.
+Two responsibilities kept separate:
+  - the YOLO part says WHAT is in the frame and WHERE in the image (a box)
+  - the depth part says HOW FAR that box is, read from the aligned depth image
+
+The YOLO11 output tensor has the same [1, 4+nc, anchors] layout as YOLOv8, so
+the decode below is unchanged from the v8 version. Only the exported weights
+differ. The letterbox round trip and NMS are covered by tests/test_postprocess.
 """
 
 from __future__ import annotations
@@ -18,22 +22,43 @@ import openvino as ov
 
 log = logging.getLogger("detector")
 
-PERSON_CLASS_ID = 0  # COCO
-PERSON_HEIGHT_M = 1.70  # assumed, only used for the monocular range estimate
+# COCO classes worth avoiding. Kept broad on purpose: a mobile robot should
+# steer around chairs and bags, not only people. Empty set means keep all.
+OBSTACLE_CLASSES = {
+    0,   # person
+    24,  # backpack
+    26,  # handbag
+    28,  # suitcase
+    56,  # chair
+    57,  # couch
+    59,  # bed
+    60,  # dining table
+    39,  # bottle
+    41,  # cup
+    63,  # laptop
+    73,  # book
+}
+
+# Distance returned when depth is genuinely unknown (video source, or the
+# depth pixels in the box were all invalid). The behaviour treats this as far.
+UNKNOWN_RANGE = float("inf")
 
 
 @dataclass
-class Detection:
-    cx: float  # box centre, normalised 0..1 across the frame
+class Obstacle:
+    cx: float          # box centre, normalised 0..1 across the frame
     cy: float
-    width: float  # normalised
+    width: float       # normalised
     height: float
     score: float
-    range_m: float  # rough, see estimate_range
+    range_m: float     # measured from aligned depth, or inf if unknown
+    bearing_deg: float # +right / -left of camera centre, from HFOV
+    class_id: int
+    measured: bool     # True if range_m came from real depth
 
 
 class Detector:
-    """Single-stream detector. One instance per camera."""
+    """One detector. Runs YOLO on the color image, samples depth per box."""
 
     def __init__(self, model_path: str, device: str, conf: float = 0.4, nms: float = 0.45) -> None:
         self.conf = conf
@@ -54,7 +79,6 @@ class Detector:
         log.info("%s compiled for %s, input %dx%d", model_path, device, self.net_w, self.net_h)
 
     def _letterbox(self, frame: np.ndarray) -> tuple[np.ndarray, float, int, int]:
-        """Resize preserving aspect ratio, pad to the network input size."""
         h, w = frame.shape[:2]
         scale = min(self.net_w / w, self.net_h / h)
         new_w, new_h = int(round(w * scale)), int(round(h * scale))
@@ -68,36 +92,54 @@ class Detector:
         return blob, scale, pad_x, pad_y
 
     @staticmethod
-    def estimate_range(box_height_px: float, frame_height_px: int, vfov_deg: float) -> float:
-        """Rough distance from apparent person height.
+    def _sample_depth(depth: np.ndarray, scale: float, x1: int, y1: int, x2: int, y2: int) -> float:
+        """Median valid depth over the central region of a box, in metres.
 
-        Pinhole, assuming the person is standing and fully in frame. This is an
-        estimate, not a measurement: it is wrong for a seated or partly occluded
-        person. Milestone 3 replaces it with actual depth from the D457.
+        A central patch avoids the box edges, which straddle the object border
+        and pick up background depth. Median rejects the salt-and-pepper zero
+        pixels the sensor leaves on edges and dark surfaces. Returns inf if no
+        valid depth remains.
         """
-        if box_height_px <= 1:
-            return 0.0
-        focal_px = frame_height_px / (2.0 * np.tan(np.radians(vfov_deg) / 2.0))
-        return float(PERSON_HEIGHT_M * focal_px / box_height_px)
+        h, w = depth.shape
+        # Shrink to the middle half of the box.
+        bw, bh = x2 - x1, y2 - y1
+        sx1 = max(0, int(x1 + 0.25 * bw))
+        sy1 = max(0, int(y1 + 0.25 * bh))
+        sx2 = min(w, int(x2 - 0.25 * bw))
+        sy2 = min(h, int(y2 - 0.25 * bh))
+        if sx2 <= sx1 or sy2 <= sy1:
+            return UNKNOWN_RANGE
 
-    def infer(self, frame: np.ndarray, vfov_deg: float = 65.0) -> list[Detection]:
-        frame_h, frame_w = frame.shape[:2]
-        blob, scale, pad_x, pad_y = self._letterbox(frame)
+        patch = depth[sy1:sy2, sx1:sx2]
+        valid = patch[patch > 0]
+        if valid.size == 0:
+            return UNKNOWN_RANGE
+        return float(np.median(valid) * scale)
+
+    def infer(self, frame) -> list[Obstacle]:
+        """frame is an rs_source.Frame. Uses frame.color for detection and
+        frame.depth (if present) for distance."""
+        color = frame.color
+        frame_h, frame_w = color.shape[:2]
+        blob, scale, pad_x, pad_y = self._letterbox(color)
 
         raw = self.compiled([blob])[self.output_port]
 
-        # YOLOv8 emits [1, 4 + num_classes, num_anchors]. Transpose so each row
-        # is one candidate box.
-        preds = np.squeeze(raw).T
-        scores = preds[:, 4 + PERSON_CLASS_ID]
+        preds = np.squeeze(raw).T  # [anchors, 4+nc]
+        class_scores = preds[:, 4:]
+        class_ids = np.argmax(class_scores, axis=1)
+        scores = class_scores[np.arange(len(class_ids)), class_ids]
+
         keep = scores > self.conf
+        if OBSTACLE_CLASSES:
+            keep &= np.isin(class_ids, list(OBSTACLE_CLASSES))
         if not np.any(keep):
             return []
 
         boxes_xywh = preds[keep, :4]
         scores = scores[keep]
+        class_ids = class_ids[keep]
 
-        # Centre form to corner form, undo the letterbox.
         x, y, w, h = boxes_xywh.T
         boxes_xyxy = np.stack(
             [
@@ -118,20 +160,37 @@ class Detector:
         if len(idx) == 0:
             return []
 
-        results: list[Detection] = []
+        hfov = frame.intrinsics["hfov_deg"] if frame.intrinsics else 65.0
+
+        results: list[Obstacle] = []
         for i in np.asarray(idx).reshape(-1):
-            x1, y1, x2, y2 = boxes_xyxy[i]
-            box_h = max(1.0, y2 - y1)
+            x1, y1, x2, y2 = [int(round(v)) for v in boxes_xyxy[i]]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame_w, x2), min(frame_h, y2)
+
+            cx_norm = ((x1 + x2) / 2) / frame_w
+            bearing = (cx_norm - 0.5) * hfov  # + right, - left
+
+            if frame.has_depth:
+                rng = self._sample_depth(frame.depth, frame.depth_scale, x1, y1, x2, y2)
+                measured = rng != UNKNOWN_RANGE
+            else:
+                rng = UNKNOWN_RANGE
+                measured = False
+
             results.append(
-                Detection(
-                    cx=float(((x1 + x2) / 2) / frame_w),
+                Obstacle(
+                    cx=cx_norm,
                     cy=float(((y1 + y2) / 2) / frame_h),
                     width=float((x2 - x1) / frame_w),
-                    height=float(box_h / frame_h),
+                    height=float((y2 - y1) / frame_h),
                     score=float(scores[i]),
-                    range_m=self.estimate_range(box_h, frame_h, vfov_deg),
+                    range_m=rng,
+                    bearing_deg=float(bearing),
+                    class_id=int(class_ids[i]),
+                    measured=measured,
                 )
             )
 
-        results.sort(key=lambda d: d.range_m)
+        results.sort(key=lambda o: o.range_m)
         return results

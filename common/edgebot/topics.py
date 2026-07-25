@@ -30,6 +30,19 @@ SIM_TELEMETRY = "sim.telemetry"
 # estimate until the D457 depth stream replaces it in milestone 3.
 PERCEPTION_PEOPLE = "perception.people"
 
+# perception -> sim. Measured obstacles, nearest first. Supersedes the M2
+# people topic; the schema is a superset so consumers can migrate.
+#   {"obstacles": [{"cx": float, "cy": float, "height": float, "score": float,
+#                   "range_m": float | null, "bearing_deg": float,
+#                   "class_id": int, "measured": bool, "camera": int}],
+#    "streams": [{"camera": int, "fps": float, "infer_ms": float,
+#                 "device": str, "depth": bool}],
+#    "stamp": float}
+#
+# range_m is metres from aligned depth, or null when depth is unavailable.
+# bearing_deg is + to the robot's right, from the camera HFOV.
+PERCEPTION_OBSTACLES = "perception.obstacles"
+
 # teleop -> sim. Which source of commands the simulator should obey.
 #   {"mode": "manual" | "auto"}
 CMD_MODE = "cmd.mode"

@@ -26,6 +26,8 @@ SCENES = {
     "g1": "/models/mujoco_menagerie/unitree_g1/scene.xml",
     "h1": "/models/mujoco_menagerie/unitree_h1/scene.xml",
     "t1": "/models/mujoco_menagerie/booster_t1/scene.xml",
+    # 29-DoF G1 matching the RL walker policy, fetched by make policy.
+    "g1_walker": "/models/g1_walker/scene.xml",
 }
 
 # Camera follows the base with a fixed offset rather than tracking rigidly,

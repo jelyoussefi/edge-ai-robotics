@@ -6,7 +6,7 @@
 #
 #   1. A sample pedestrian video, so the pipeline can be developed and demoed
 #      before the D457 cameras are working.
-#   2. A YOLOv8n model exported to OpenVINO IR.
+#   2. A YOLO11n model exported to OpenVINO IR.
 #
 # The video comes from the Intel Robotics AI Suite multicam-demo component
 # (Apache-2.0). If a local checkout is available, pass its path:
@@ -48,12 +48,12 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 2. YOLOv8n as OpenVINO IR
+# 2. YOLO11n as OpenVINO IR
 # ----------------------------------------------------------------------------
-if [ -f "$ASSETS/models/yolov8n/FP16/yolov8n.xml" ]; then
-    echo "  YOLOv8n IR already present, skipping."
+if [ -f "$ASSETS/models/yolo11n/FP16/yolo11n.xml" ]; then
+    echo "  YOLO11n IR already present, skipping."
 else
-    echo "  Exporting YOLOv8n to OpenVINO IR (runs in a container, nothing installed on the host) ..."
+    echo "  Exporting YOLO11n to OpenVINO IR (runs in a container, nothing installed on the host) ..."
     echo "  This pulls PyTorch, so expect a few GB and a few minutes on first run."
     # HTTP_PROXY and friends are forwarded without values, so they pass through
     # from the host when set and are simply absent when not.
@@ -72,11 +72,11 @@ else
         pip install --no-cache-dir --quiet "ultralytics>=8.3.0,<9" "openvino>=2025.0" "numpy<2.0"
         python - <<PY
 from ultralytics import YOLO
-m = YOLO("yolov8n.pt")
+m = YOLO("yolo11n.pt")
 m.export(format="openvino", half=True, imgsz=640)
 PY
-        mkdir -p /out/yolov8n/FP16
-        cp yolov8n_openvino_model/* /out/yolov8n/FP16/
+        mkdir -p /out/yolo11n/FP16
+        cp yolo11n_openvino_model/* /out/yolo11n/FP16/
     '
 fi
 

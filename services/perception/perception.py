@@ -20,11 +20,11 @@ import threading
 import time
 from collections import deque
 
-import cv2
 from edgebot import topics
 from edgebot.bus import Publisher
 
 from detector import Detector
+from rs_source import open_source
 
 log = logging.getLogger("perception")
 
@@ -43,40 +43,38 @@ class Stream(threading.Thread):
     def __init__(self, index: int, spec: dict) -> None:
         super().__init__(daemon=True)
         self.index = index
-        self.source = spec["source"]
-        self.vfov = float(spec.get("vfov_deg", 65.0))
+        self.spec = spec
         self.detector = Detector(
             spec["model"],
             spec.get("device", "CPU"),
             conf=float(spec.get("confidence", 0.4)),
         )
-        self.people: list[dict] = []
+        self.obstacles: list[dict] = []
         self.fps = 0.0
         self.infer_ms = 0.0
+        self.has_depth = False
         self.running = True
         self._buf: deque = deque(maxlen=1)
         self._ready = threading.Event()
         self._lock = threading.Lock()
 
     def _reader(self) -> None:
-        cap = cv2.VideoCapture(self.source)
-        if not cap.isOpened():
-            log.error("stream %d: cannot open %s", self.index, self.source)
+        try:
+            source = open_source(self.spec)
+        except Exception as exc:  # noqa: BLE001 - want the reason in the log
+            log.error("stream %d: cannot open source: %s", self.index, exc)
             self.running = False
             return
-        log.info("stream %d: reading %s", self.index, self.source)
 
         while self.running:
-            ok, frame = cap.read()
-            if not ok:
-                if LOOP_VIDEO and cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
+            frame = source.read()
+            if frame is None:
                 log.warning("stream %d: source ended", self.index)
                 break
+            self.has_depth = frame.has_depth
             self._buf.append(frame)
             self._ready.set()
-        cap.release()
+        source.close()
 
     def run(self) -> None:
         threading.Thread(target=self._reader, daemon=True).start()
@@ -92,17 +90,20 @@ class Stream(threading.Thread):
             frame = self._buf[-1]
 
             t0 = time.perf_counter()
-            detections = self.detector.infer(frame, self.vfov)
+            detections = self.detector.infer(frame)
             infer_ms = (time.perf_counter() - t0) * 1e3
 
             with self._lock:
-                self.people = [
+                self.obstacles = [
                     {
                         "cx": d.cx,
                         "cy": d.cy,
                         "height": d.height,
                         "score": d.score,
-                        "range_m": d.range_m,
+                        "range_m": d.range_m if d.measured else None,
+                        "bearing_deg": d.bearing_deg,
+                        "class_id": d.class_id,
+                        "measured": d.measured,
                         "camera": self.index,
                     }
                     for d in detections
@@ -114,7 +115,7 @@ class Stream(threading.Thread):
 
     def snapshot(self) -> tuple[list[dict], float, float]:
         with self._lock:
-            return list(self.people), self.fps, self.infer_ms
+            return list(self.obstacles), self.fps, self.infer_ms
 
     def stop(self) -> None:
         self.running = False
@@ -154,24 +155,32 @@ def main() -> None:
     while running:
         loop_start = time.perf_counter()
 
-        people: list[dict] = []
+        obstacles: list[dict] = []
         per_stream = []
         for s in streams:
             found, fps, infer_ms = s.snapshot()
-            people.extend(found)
-            per_stream.append({"camera": s.index, "fps": fps, "infer_ms": infer_ms, "device": s.detector.device})
+            obstacles.extend(found)
+            per_stream.append(
+                {"camera": s.index, "fps": fps, "infer_ms": infer_ms,
+                 "device": s.detector.device, "depth": s.has_depth}
+            )
 
-        # Nearest first, so a consumer can just take people[0].
-        people.sort(key=lambda p: p["range_m"])
+        # Nearest first; unknown range (None) sorts last.
+        obstacles.sort(key=lambda o: o["range_m"] if o["range_m"] is not None else float("inf"))
 
         pub.send(
-            topics.PERCEPTION_PEOPLE,
-            {"people": people, "streams": per_stream, "stamp": time.time()},
+            topics.PERCEPTION_OBSTACLES,
+            {"obstacles": obstacles, "streams": per_stream, "stamp": time.time()},
         )
 
         if time.perf_counter() - last_log >= 5.0:
-            summary = ", ".join(f"cam{p['camera']} {p['fps']:.1f}fps/{p['infer_ms']:.0f}ms" for p in per_stream)
-            log.info("%d person(s) | %s", len(people), summary)
+            nearest = next((o["range_m"] for o in obstacles if o["range_m"] is not None), None)
+            near_str = f"{nearest:.2f}m" if nearest is not None else "n/a"
+            summary = ", ".join(
+                f"cam{p['camera']} {p['fps']:.1f}fps/{p['infer_ms']:.0f}ms{'/D' if p['depth'] else ''}"
+                for p in per_stream
+            )
+            log.info("%d obstacle(s), nearest %s | %s", len(obstacles), near_str, summary)
             last_log = time.perf_counter()
 
         time.sleep(max(0.0, dt - (time.perf_counter() - loop_start)))
