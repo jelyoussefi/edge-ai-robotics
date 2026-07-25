@@ -9,9 +9,10 @@ A single-board robotics demonstrator running on Intel Core Ultra Mobile Processo
 (Series 3). One board carries perception, policy, physics and rendering at the
 same time, with the workload split across CPU, GPU and NPU.
 
-Milestone 2, in this repository, is a simulated humanoid that reacts to people
-seen by real camera streams. It runs against a sample video out of the box, so
-nothing waits on camera bring-up.
+Milestone 3, in this repository, is a simulated humanoid that walks forward and
+steers around real obstacles measured by a D457 depth camera. Distance comes
+from the camera's aligned depth stream, not an estimate. It still runs on a
+sample video when no camera is attached, with distance reported as unknown.
 
 ## Requirements
 
@@ -35,9 +36,10 @@ Then, in a second terminal:
 make teleop
 ```
 
-Press `m` to hand control to perception. The humanoid then turns to face the
-nearest detected person and backs away if they come within 1.5 m. Press `m`
-again to take the keyboard back.
+Press `m` to hand control to perception. The humanoid then cruises forward and
+steers around whatever the camera sees, pushing away from the nearest obstacles
+and slowing when something is dead ahead. Press `m` again to take the keyboard
+back.
 
 | Key     | Action                 |
 |---------|------------------------|
@@ -60,25 +62,31 @@ make run POLICY=rl             # trained policy instead of the kinematic gait
 make run SIM_CPUS=8-11         # pin physics to isolated cores
 make run STREAMS=single        # one detector instead of four, for bring-up
 make run STREAMS=d457          # four real cameras instead of the sample video
+make run POLICY=rl ROBOT=g1_walker  # real balancing and walking
 make perception STREAMS=video  # perception alone, no physics, for tuning
 ```
 
 ### Perception streams
 
-`config/streams.*.json` uses the same shape as the Robotics AI Suite
-multicam-demo config, one entry per stream:
+`config/streams.*.json` selects the source. A RealSense entry opens the D457
+over pyrealsense2 with aligned depth:
 
 ```json
-{ "source": "/assets/videos/How_People_Walk.mp4",
-  "model":  "/assets/models/yolov8n/FP16/yolov8n.xml",
-  "device": "NPU", "confidence": 0.4, "vfov_deg": 50.0 }
+{ "type": "realsense", "serial": null, "width": 848, "height": 480, "fps": 30,
+  "model": "/assets/models/yolo11n/FP16/yolo11n.xml", "device": "NPU" }
 ```
 
-`source` is anything OpenCV can open, so moving from the sample video to four
-D457 cameras means changing four strings. `device` is passed straight to
-OpenVINO, so the four streams can be spread across NPU, GPU and CPU to show
-all three engines working at once. If a device is missing the detector logs a
-warning and falls back to CPU rather than failing.
+A video entry opens a file with no depth, for development:
+
+```json
+{ "source": "/assets/videos/How_People_Walk.mp4", "loop": true,
+  "model": "/assets/models/yolo11n/FP16/yolo11n.xml", "device": "CPU" }
+```
+
+`serial` null takes the first camera found. `device` goes straight to OpenVINO
+(NPU, GPU or CPU); a missing device logs a warning and falls back to CPU. The
+detector reads a median depth from the centre of each box, so distance is a real
+measurement when depth is present and reported as unknown otherwise.
 
 ## Architecture
 
@@ -97,7 +105,7 @@ teleop  ──cmd.vel──▶  bus  ──cmd.vel──▶  sim  ──robot.st
 | `sim`        | MuJoCo physics, controller, behaviour | CPU, NPU for RL |
 | `viewer`     | draws the scene on the display    | iGPU via X11       |
 | `teleop`     | keyboard to velocity command      | a terminal         |
-| `perception` | detects people on N streams       | NPU, GPU, CPU      |
+| `perception` | detects and ranges obstacles      | NPU/GPU/CPU, D457  |
 
 The simulator never renders and the viewer never steps physics. That separation
 is what lets the physics loop be pinned to isolated cores without a frame drop
@@ -109,15 +117,30 @@ ever perturbing it.
 cycle on the legs. It cannot fall over and needs no trained weights. Use it to
 get the stack running and to have something that always works on demo day.
 
-`POLICY=rl` runs a trained velocity-tracking policy through OpenVINO on the NPU
-and lets the physics decide the outcome. This is the version worth showing, and
-the one that takes real work.
+`POLICY=rl` runs a trained velocity-tracking policy through OpenVINO and lets
+the physics decide the outcome. The robot genuinely balances: bad commands make
+it stumble, and it falls over if it loses its footing. This is the version worth
+showing.
 
-To use it, export a policy to `policies/g1_locomotion.xml` (OpenVINO IR) or
-`.onnx`. The observation layout in `services/sim/controllers.py` must match the
-one the policy was trained with, field for field and scale for scale. A mismatch
-produces a robot that falls over immediately with no useful error message, and
-it is by far the most common cause of a bad first run.
+```bash
+make policy                        # fetch the walker policy and its G1 model
+make run POLICY=rl ROBOT=g1_walker # walk for real
+make teleop                        # W/S/A/D to drive it
+```
+
+The policy is the G1 walker from the LuckyRobots challenge (see
+`policies/g1_walker/PROVENANCE.md`). Its observation layout, joint order, action
+scaling, armature and 200 Hz control rate are all taken from that policy's own
+runner and verified, not guessed. `RLController` maps the policy's joints onto
+the loaded model by name, so it stays correct even though the model's DoF order
+differs from the policy's.
+
+Two things in that path are load-bearing, and each one silently drops the robot
+if wrong: the physics runs at 200 Hz because the PD gains are tuned for it, and
+per-joint armature (rotor inertia) is applied because the policy was trained
+with it. Both are handled automatically when `POLICY=rl`. If you bring your own
+policy, `tests/test_policy_contract.py` and `tests/test_walk_integration.py`
+check the contract and that the robot actually walks.
 
 ## Robot models
 
@@ -131,8 +154,8 @@ vendor's robot appearing in Intel material.
 | Milestone | Scope                                                    |
 |-----------|----------------------------------------------------------|
 | M1        | Humanoid in simulation, keyboard control (done)          |
+| M1.5      | RL locomotion policy, real balance and walking (done)    |
 | M2        | Person detection on N streams, robot reacts (done)       |
-| M1.5      | RL locomotion policy on the NPU, real balance            |
 | M3        | Real depth from D457, fused point cloud in the scene     |
 | M4        | Language commands grounded against the live scene        |
 | M5        | Telemetry overlay showing CPU, GPU and NPU concurrently  |
@@ -158,10 +181,17 @@ the mode never switched: `sim` logs `mode -> auto` when it does.
 check the driver is installed and `/dev/accel` exists on the host; for GPU check
 `/dev/dri` and that `RENDER_GID` resolved.
 
-**Range estimates look wrong.** `range_m` is monocular, derived from apparent
-person height assuming someone standing and fully in frame. It is an estimate,
-not a measurement. Set `vfov_deg` per stream to match the real lens, and expect
-it to be wrong for seated or partly occluded people until M3 brings real depth.
+**Distances look wrong.** `range_m` is now the median depth over the centre of
+each box, in metres, from the D457 aligned depth stream. If it reads unknown for
+everything, depth is not arriving: check the camera is in a mode that streams
+depth and that the container sees it (`make logs S=perception` shows `/D` per
+stream when depth is present). On a video source distance is always unknown by
+design.
+
+**Robot drives into a symmetric obstacle.** Expected. The avoider is a
+potential field with no map, so a symmetric wall cancels the sideways push and
+traps it in a local minimum. It brakes rather than colliding hard. Real path
+planning around this is a later milestone.
 
 **Physics slower than real time.** Check `rtf` in the telemetry. Below 1.0 means
 the box is not keeping up. Reduce `PHYSICS_HZ` or pin `SIM_CPUS`.
@@ -169,11 +199,14 @@ the box is not keeping up. Reduce `PHYSICS_HZ` or pin `SIM_CPUS`.
 ## Tests
 
 ```bash
-python3 tests/test_postprocess.py   # letterbox round trip, NMS, range estimate
-python3 tests/test_behaviour.py     # gaze symmetry, retreat saturation, staleness
+python3 tests/test_postprocess.py   # YOLO decode, multi-class NMS, bearing, depth
+python3 tests/test_depth.py         # depth sampling: central patch, median, invalids
+python3 tests/test_avoid.py         # avoidance: steer, brake, saturate, staleness
+python3 tests/test_behaviour.py     # M2 reactive behaviour (still present)
 ```
 
-Both stub their dependencies, so they run without OpenVINO, MuJoCo or hardware.
+All four stub their dependencies, so they run without OpenVINO, MuJoCo, a camera
+or a display.
 
 ## Licence
 

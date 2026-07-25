@@ -37,7 +37,7 @@ services:
       PHYSICS_HZ: "1000"
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"
-      POLICY_PATH: /policies/${ROBOT:-g1}_locomotion.xml
+      POLICY_PATH: /policies/g1_walker/walker.onnx
       OV_DEVICE: NPU
     volumes:
       - ./models:/models:ro
@@ -104,6 +104,9 @@ services:
     volumes:
       - ./config:/config:ro
       - ./assets:/assets:ro
+      # RealSense (D457) is reached over USB through /dev/bus/usb, and the v4l2
+      # nodes appear under /dev/video*. Binding /dev covers both; the container
+      # is not privileged.
       - /dev:/dev
     cpuset: ${PERCEPTION_CPUS:-}
     restart: unless-stopped

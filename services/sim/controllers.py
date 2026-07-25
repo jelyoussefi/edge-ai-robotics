@@ -95,71 +95,159 @@ class KinematicController:
 
 
 class RLController:
-    """Velocity-tracking locomotion policy executed with OpenVINO.
+    """Velocity-tracking locomotion policy through OpenVINO.
 
-    The observation layout below must match the one the policy was trained
-    with, field for field and scale for scale. This is the single most common
-    reason a downloaded checkpoint produces a robot that falls over instantly.
-    Check it against the training config before blaming the physics.
+    Wraps a policy exported from the LuckyRobots G1 challenge (see
+    policies/g1_walker/PROVENANCE.md). The observation layout, joint order and
+    action scaling below are taken from that policy's own runner, not guessed.
+    Three things in here are load-bearing and each one, if wrong, produces a
+    robot that falls over on the first step with no useful error:
+
+      1. Observation field order and framing must match exactly. The policy
+         wants base-frame linear and angular velocity, base-frame projected
+         gravity, then joint pos/vel/last-action/command.
+      2. Joint order is the policy's own and differs from the loaded model's,
+         so everything is mapped by joint NAME, never by index.
+      3. Observations are fed raw. Normalization is baked into the ONNX graph.
     """
 
-    ANG_VEL_SCALE = 0.25
-    DOF_POS_SCALE = 1.0
-    DOF_VEL_SCALE = 0.05
-    ACTION_SCALE = 0.25
+    # The policy's PD gains and armature are tuned for 200 Hz physics. Running
+    # the loop faster makes the same gains too stiff and the robot falls.
+    physics_hz = 200.0
 
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        import json
+
         import openvino as ov
 
-        if not POLICY_PATH or not os.path.exists(POLICY_PATH):
+        meta_path = os.path.join(os.path.dirname(POLICY_PATH), "walker_meta.json")
+        if not os.path.exists(POLICY_PATH) or not os.path.exists(meta_path):
             raise SystemExit(
-                f"POLICY=rl but no checkpoint at {POLICY_PATH!r}. "
-                "Export one to policies/ or start with POLICY=kinematic."
+                f"POLICY=rl needs {POLICY_PATH} and walker_meta.json beside it. "
+                "Run 'make policy' to fetch them, or start with POLICY=kinematic."
+            )
+
+        meta = json.load(open(meta_path))
+        self.joint_names: list[str] = meta["joint_names"]
+        self.default_pos = np.asarray(meta["default_joint_pos"], dtype=np.float32)
+        self.action_scales = np.asarray(meta["action_scales"], dtype=np.float32)
+        self.n = len(self.joint_names)
+
+        # Map the policy's joint order onto the loaded model, by name. If the
+        # model is missing a joint the policy drives, that is fatal and worth
+        # saying loudly rather than silently misaligning the vector.
+        self.qpos_adr = np.empty(self.n, dtype=np.int32)
+        self.qvel_adr = np.empty(self.n, dtype=np.int32)
+        self.act_id = np.empty(self.n, dtype=np.int32)
+        missing = []
+        for i, name in enumerate(self.joint_names):
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            if jid < 0 or aid < 0:
+                missing.append(name)
+                continue
+            self.qpos_adr[i] = model.jnt_qposadr[jid]
+            self.qvel_adr[i] = model.jnt_dofadr[jid]
+            self.act_id[i] = aid
+        if missing:
+            raise SystemExit(
+                f"model is missing {len(missing)} joint(s) the policy drives: "
+                f"{missing[:5]}{'...' if len(missing) > 5 else ''}. "
+                "This policy targets a 29-DoF G1; check ROBOT matches."
             )
 
         self.model = model
-        self.nu = model.nu
-        self.default_q = data.qpos[7:].copy()
-        self.last_action = np.zeros(self.nu, dtype=np.float32)
-        self.target = self.default_q.copy()
+        self.last_action = np.zeros(self.n, dtype=np.float32)
+        self.target = self.default_pos.copy()
+
+        driven = set(int(a) for a in self.act_id)
+        undriven = [a for a in range(model.nu) if a not in driven]
+        self._undriven = np.asarray(undriven, dtype=np.int32) if undriven else None
+
+        self._apply_armature(model)
 
         core = ov.Core()
         log.info("compiling %s for %s", POLICY_PATH, OV_DEVICE)
         try:
-            self.net = core.compile_model(POLICY_PATH, OV_DEVICE)
+            compiled = core.compile_model(POLICY_PATH, OV_DEVICE)
         except Exception:
             log.warning("%s unavailable, falling back to CPU", OV_DEVICE)
-            self.net = core.compile_model(POLICY_PATH, "CPU")
-        self.out = self.net.output(0)
+            compiled = core.compile_model(POLICY_PATH, "CPU")
+        self.net = compiled
+        self.out_port = compiled.output(0)
+
+    # Rotor inertia the policy was trained with. Without it the joints respond
+    # differently and the robot falls even holding a correct pose. Keyed by
+    # joint name because the model's DoF order is not the policy's order.
+    _ARMATURE = {
+        "5020": 0.00360972,
+        "7520_14": 0.01017752,
+        "7520_22": 0.02510192,
+        "4010": 0.00425000,
+        "2x5020": 0.00721945,
+    }
+
+    def _apply_armature(self, model: mujoco.MjModel) -> None:
+        for name in self.joint_names:
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            dof = model.jnt_dofadr[jid]
+            if "elbow" in name or "shoulder" in name or "wrist_roll" in name:
+                val = self._ARMATURE["5020"]
+            elif "hip_pitch" in name or "hip_yaw" in name or name == "waist_yaw_joint":
+                val = self._ARMATURE["7520_14"]
+            elif "hip_roll" in name or "knee" in name:
+                val = self._ARMATURE["7520_22"]
+            elif "wrist_pitch" in name or "wrist_yaw" in name:
+                val = self._ARMATURE["4010"]
+            elif "ankle" in name or name in ("waist_pitch_joint", "waist_roll_joint"):
+                val = self._ARMATURE["2x5020"]
+            else:
+                val = self._ARMATURE["5020"]
+            model.dof_armature[dof] = val
+
+    def stand(self, data: mujoco.MjData) -> None:
+        """Place the robot at its default standing pose. Call before stepping."""
+        data.qpos[self.qpos_adr] = self.default_pos
+        data.qpos[0:3] = [0.0, 0.0, 0.76]
+        data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+        data.qvel[:] = 0.0
+        self.last_action[:] = 0.0
+        self.target = self.default_pos.copy()
+        mujoco.mj_forward(self.model, data)
+
+    @staticmethod
+    def _quat_rotate_inverse(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        w = quat[0]
+        xyz = quat[1:]
+        t = np.cross(xyz, vec) * 2.0
+        return vec - w * t + np.cross(xyz, t)
 
     def _observation(self, cmd: np.ndarray, data: mujoco.MjData) -> np.ndarray:
-        quat = data.qpos[3:7]
-        rot = np.zeros(9)
-        mujoco.mju_quat2Mat(rot, quat)
-        rot = rot.reshape(3, 3)
+        quat = data.qpos[3:7].astype(np.float32)
 
-        base_ang_vel = rot.T @ data.qvel[3:6]
-        projected_gravity = rot.T @ np.array([0.0, 0.0, -1.0])
+        lin_vel = self._quat_rotate_inverse(quat, data.qvel[0:3].astype(np.float32))
+        ang_vel = data.qvel[3:6].astype(np.float32)
+        proj_gravity = self._quat_rotate_inverse(quat, np.array([0.0, 0.0, -1.0], np.float32))
+
+        joint_pos = data.qpos[self.qpos_adr].astype(np.float32) - self.default_pos
+        joint_vel = data.qvel[self.qvel_adr].astype(np.float32)
 
         obs = np.concatenate(
-            [
-                base_ang_vel * self.ANG_VEL_SCALE,
-                projected_gravity,
-                cmd,
-                (data.qpos[7:] - self.default_q) * self.DOF_POS_SCALE,
-                data.qvel[6:] * self.DOF_VEL_SCALE,
-                self.last_action,
-            ]
+            [lin_vel, ang_vel, proj_gravity, joint_pos, joint_vel, self.last_action, cmd.astype(np.float32)]
         )
-        return obs.astype(np.float32)[None, :]
+        return obs[None, :].astype(np.float32)
 
     def update(self, cmd: np.ndarray, data: mujoco.MjData) -> None:
-        action = self.net(self._observation(cmd, data))[self.out].reshape(-1)
-        self.last_action = action
-        self.target = self.default_q + action * self.ACTION_SCALE
+        action = self.net(self._observation(cmd, data))[self.out_port].reshape(-1)
+        self.last_action = action.astype(np.float32)
+        self.target = self.default_pos + action * self.action_scales
 
     def apply(self, data: mujoco.MjData) -> None:
-        data.ctrl[:] = self.target[: self.nu]
+        data.ctrl[self.act_id] = self.target
+        # Actuators the policy does not drive (hands) are held at zero so they
+        # hang neutrally instead of flopping and perturbing balance.
+        if self._undriven is not None:
+            data.ctrl[self._undriven] = 0.0
 
 
 def make_controller(model: mujoco.MjModel, data: mujoco.MjData):

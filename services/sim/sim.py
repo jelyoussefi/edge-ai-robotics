@@ -19,7 +19,7 @@ import numpy as np
 from edgebot import topics
 from edgebot.bus import Publisher, Subscriber
 
-from behaviours import ReactiveBehaviour
+from behaviours import AvoidBehaviour
 from controllers import make_controller
 
 log = logging.getLogger("sim")
@@ -33,6 +33,8 @@ SCENES = {
     "g1": "/models/mujoco_menagerie/unitree_g1/scene.xml",
     "h1": "/models/mujoco_menagerie/unitree_h1/scene.xml",
     "t1": "/models/mujoco_menagerie/booster_t1/scene.xml",
+    # 29-DoF G1 matching the RL walker policy, fetched by make policy.
+    "g1_walker": "/models/g1_walker/scene.xml",
 }
 
 # Below this base height the robot has clearly gone over. Used only to report
@@ -48,24 +50,37 @@ class Sim:
 
         log.info("loading %s", scene)
         self.model = mujoco.MjModel.from_xml_path(scene)
-        self.model.opt.timestep = 1.0 / PHYSICS_HZ
         self.data = mujoco.MjData(self.model)
-        if self.model.nkey:
-            # Menagerie scenes ship a "home" keyframe with the robot standing.
-            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
-        mujoco.mj_forward(self.model, self.data)
 
         self.controller = make_controller(self.model, self.data)
-        self.behaviour = ReactiveBehaviour()
+
+        # A controller may require a specific physics rate (the RL policy's
+        # gains and armature are tuned for one) and its own standing pose. Honor
+        # those before anything steps, falling back to the configured defaults.
+        physics_hz = getattr(self.controller, "physics_hz", None) or PHYSICS_HZ
+        self.model.opt.timestep = 1.0 / physics_hz
+        self.physics_hz = physics_hz
+
+        if hasattr(self.controller, "stand"):
+            self.controller.stand(self.data)
+        elif self.model.nkey:
+            # Menagerie scenes ship a "home" keyframe with the robot standing.
+            mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+            mujoco.mj_forward(self.model, self.data)
+        else:
+            mujoco.mj_forward(self.model, self.data)
+
+        self.behaviour = AvoidBehaviour()
         self.pub = Publisher()
-        self.sub = Subscriber([topics.CMD_VEL, topics.CMD_MODE, topics.PERCEPTION_PEOPLE])
+        self.sub = Subscriber([topics.CMD_VEL, topics.CMD_MODE, topics.PERCEPTION_OBSTACLES])
         self.teleop_cmd = np.zeros(3)
         self.cmd = np.zeros(3)
         self.mode = topics.MODE_MANUAL
         self.running = True
 
-        self._steps_per_control = max(1, int(PHYSICS_HZ / CONTROL_HZ))
-        self._steps_per_publish = max(1, int(PHYSICS_HZ / PUBLISH_HZ))
+        self._steps_per_control = max(1, int(physics_hz / CONTROL_HZ))
+        self._steps_per_publish = max(1, int(physics_hz / PUBLISH_HZ))
+        log.info("physics %.0f Hz, control %.0f Hz", physics_hz, CONTROL_HZ)
 
         signal.signal(signal.SIGTERM, self._stop)
         signal.signal(signal.SIGINT, self._stop)
@@ -93,7 +108,7 @@ class Sim:
                 if new_mode != self.mode:
                     log.info("mode -> %s", new_mode)
                     self.mode = new_mode
-            elif topic == topics.PERCEPTION_PEOPLE:
+            elif topic == topics.PERCEPTION_OBSTACLES:
                 self.behaviour.observe(payload)
 
         raw = self.behaviour.command(time.time()) if self.mode == topics.MODE_AUTO else self.teleop_cmd

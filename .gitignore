@@ -10,3 +10,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 assets/
+models/g1_walker/
+policies/g1_walker/walker.onnx
+policies/g1_walker/walker.onnx.data
+policies/g1_walker/walker_meta.json
