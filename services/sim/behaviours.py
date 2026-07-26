@@ -14,6 +14,8 @@ controller decides *how to move the joints to get there*.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 # Below this the robot backs away, above it the robot holds position.
@@ -88,61 +90,101 @@ FORWARD_BRAKE = 1.0
 AVOID_STALE_S = 0.7
 UNKNOWN_ASSUMED_M = INFLUENCE_M  # unknown depth -> far but noted
 
+# Patrol: walk a fixed distance, turn about-face, walk back, repeat. Distance is
+# integrated from the commanded forward speed, so no map is needed. The turn is
+# a fixed in-place yaw for a set duration.
+PATROL_LEG_M = float(os.environ.get("PATROL_LEG_M", "2.5"))
+PATROL_TURN_S = float(os.environ.get("PATROL_TURN_S", "2.0"))
+PATROL_TURN_WZ = float(os.environ.get("PATROL_TURN_WZ", "1.6"))
+
 
 class AvoidBehaviour:
-    """Potential-field avoider. Drives forward, steers around measured obstacles.
+    """Autonomous patrol with reactive obstacle avoidance.
 
-    No map, no memory: a symmetric wall can trap it in a local minimum. That is
-    the accepted limit of a reactive demo and the line real navigation crosses.
+    The robot walks forward along a leg, turns about-face at the end, walks back,
+    and repeats, patrolling between the near (camera) edge and the far edge. When
+    an obstacle comes within influence range it brakes and steers around it with
+    a potential field; the patrol resumes once the path is clear.
+
+    No map, no memory: distance is integrated from the commanded speed, so a
+    sustained obstacle push can stretch a leg. Accepted limit of a reactive demo.
 
     Frame: +x forward, +y left, wz yaw (+ turns left). Obstacle bearing is
     degrees, + to the robot's right.
     """
 
+    WALK = "walk"
+    TURN = "turn"
+
     def __init__(self) -> None:
         self.obstacles: list[dict] = []
         self.stamp = 0.0
         self._closest = _math.inf
+        self._state = self.WALK
+        self._leg_travelled = 0.0
+        self._turn_elapsed = 0.0
+        self._last_t = None
 
     def observe(self, payload: dict) -> None:
         self.obstacles = payload.get("obstacles", payload.get("people", []))
         self.stamp = payload.get("stamp", 0.0)
 
-    def command(self, now: float) -> np.ndarray:
+    def _avoidance(self, now: float):
         if (now - self.stamp) > AVOID_STALE_S:
-            self._closest = _math.inf
-            return np.zeros(3)
-
+            return np.array([CRUISE_VX, 0.0, 0.0]), _math.inf
         push = np.zeros(2)
         closest = _math.inf
-
         for obs in self.obstacles:
             rng = obs.get("range_m", _math.inf)
             if rng is None or not _math.isfinite(rng):
-                rng = UNKNOWN_ASSUMED_M
+                # No depth: estimate proximity from apparent size. A tall box
+                # fills more of the frame, so treat it as closer. height is the
+                # box height as a fraction of the frame (0..1).
+                h = obs.get("height", 0.0)
+                # h~0.8 (very close) -> ~DANGER_M; h~0.1 (far) -> ~INFLUENCE_M.
+                rng = INFLUENCE_M - (INFLUENCE_M - DANGER_M) * float(np.clip(h / 0.8, 0.0, 1.0))
             if rng > INFLUENCE_M:
                 continue
             closest = min(closest, rng)
-
             clamped = max(rng, DANGER_M)
             strength = (INFLUENCE_M - clamped) / (INFLUENCE_M - DANGER_M)
             strength = float(np.clip(strength, 0.0, 1.0)) ** 2
-
             bearing = _math.radians(obs.get("bearing_deg", 0.0))
             obs_dir = np.array([_math.cos(bearing), -_math.sin(bearing)])
             push -= obs_dir * strength
-
-        self._closest = closest
         if closest == _math.inf:
-            return np.array([CRUISE_VX, 0.0, 0.0])
-
+            return np.array([CRUISE_VX, 0.0, 0.0]), closest
         push *= REPULSION_GAIN
         wz = float(np.clip(STEER_GAIN * push[1], -1.0, 1.0))
         head_on = max(0.0, -push[0])
         vx = CRUISE_VX * float(np.clip(1.0 - FORWARD_BRAKE * head_on, 0.0, 1.0))
-        return np.array([vx, 0.0, wz])
+        return np.array([vx, 0.0, wz]), closest
+
+    def command(self, now: float) -> np.ndarray:
+        dt = 0.0 if self._last_t is None else max(0.0, now - self._last_t)
+        self._last_t = now
+
+        if self._state == self.TURN:
+            self._turn_elapsed += dt
+            self._closest = _math.inf
+            if self._turn_elapsed >= PATROL_TURN_S:
+                self._state = self.WALK
+                self._leg_travelled = 0.0
+                return np.zeros(3)
+            return np.array([0.0, 0.0, PATROL_TURN_WZ])
+
+        cmd, closest = self._avoidance(now)
+        self._closest = closest
+        self._leg_travelled += max(0.0, cmd[0]) * dt
+        if self._leg_travelled >= PATROL_LEG_M:
+            self._state = self.TURN
+            self._turn_elapsed = 0.0
+            return np.zeros(3)
+        return cmd
 
     def status(self) -> dict:
-        if not _math.isfinite(self._closest):
-            return {"avoiding": False}
-        return {"avoiding": True, "closest_m": round(self._closest, 2)}
+        st = {"state": self._state, "leg_m": round(self._leg_travelled, 2)}
+        st["avoiding"] = bool(_math.isfinite(self._closest))
+        if st["avoiding"]:
+            st["closest_m"] = round(self._closest, 2)
+        return st

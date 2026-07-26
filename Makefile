@@ -29,7 +29,18 @@ STREAMS ?= video
 # Path to a local edge-ai-suites checkout, if you have one. Saves a clone.
 SUITE ?=
 
-export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS
+# BACKDROP=1 renders the robot over the live camera instead of the plain
+# viewer. It selects the compositing viewer and turns on the frame publisher.
+BACKDROP ?=
+ifeq ($(BACKDROP),1)
+VIEWER_MODE := backdrop
+BACKDROP_CAMERA := 0
+else
+VIEWER_MODE :=
+BACKDROP_CAMERA := -1
+endif
+
+export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS VIEWER_MODE BACKDROP_CAMERA
 
 # Stamp files: build/fetch re-run only when their inputs actually change,
 # never just because make was invoked again.
@@ -38,7 +49,6 @@ IMAGES_STAMP := $(STAMP_DIR)/images
 MODELS_STAMP := $(STAMP_DIR)/models
 ASSETS_STAMP := $(STAMP_DIR)/assets
 POLICY_STAMP := $(STAMP_DIR)/policy
-XHOST_STAMP  := $(STAMP_DIR)/xhost
 
 MENAGERIE    := models/mujoco_menagerie
 DOCKERFILES  := $(shell find services -name Dockerfile 2>/dev/null)
@@ -74,7 +84,8 @@ help:
 	@echo "  Configuration:  ROBOT=$(ROBOT)  POLICY=$(POLICY)  STREAMS=$(STREAMS)"
 	@echo "  Robots:         g1 h1 t1 g1_walker    Policies: kinematic rl"
 	@echo "  For real walking: make run POLICY=rl ROBOT=g1_walker"
-	@echo "  Streams:        video (sample mp4, no cameras needed), single, d457"
+	@echo "  Streams:        video (sample mp4, no cameras needed), single, d457, d455"
+	@echo "  Backdrop:       make run BACKDROP=1 STREAMS=d455  (robot over live camera)"
 
 # Robot meshes are large and separately licensed, so they are fetched rather
 # than vendored. The stamp file (not the directory) is the target, so a shallow
@@ -127,15 +138,8 @@ else
 build: $(MODELS_STAMP) $(ASSETS_STAMP) $(IMAGES_STAMP)
 endif
 
-# The viewer draws on the host X display, so the local user has to be allowed
-# through once per login session.
-$(XHOST_STAMP):
-	@$(call msg, Granting the viewer access to the X display ...)
-	@mkdir -p $(STAMP_DIR)
-	@xhost +local:root > /dev/null 2>&1 || echo "  xhost not available — skipping (Wayland or headless?)"
-	@touch $@
-
-run: build $(XHOST_STAMP)
+run: build
+	@xhost +local:root > /dev/null 2>&1 || true
 ifeq ($(POLICY),rl)
 	@if [ "$(ROBOT)" != "g1_walker" ]; then 		echo "  NOTE: POLICY=rl needs the 29-DoF walker model. Using ROBOT=g1_walker."; 	fi
 endif

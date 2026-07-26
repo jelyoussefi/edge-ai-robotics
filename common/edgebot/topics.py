@@ -43,6 +43,13 @@ PERCEPTION_PEOPLE = "perception.people"
 # bearing_deg is + to the robot's right, from the camera HFOV.
 PERCEPTION_OBSTACLES = "perception.obstacles"
 
+# perception -> viewer. The colour frame of one stream, JPEG-encoded, for use
+# as a live backdrop behind the robot. Kept separate from the obstacle topic so
+# a viewer can subscribe to pixels without the detector payload, and so the
+# heavy frame can run at its own rate.
+#   {"jpeg": bytes, "w": int, "h": int, "camera": int, "stamp": float}
+CAMERA_FRAME = "camera.frame"
+
 # teleop -> sim. Which source of commands the simulator should obey.
 #   {"mode": "manual" | "auto"}
 CMD_MODE = "cmd.mode"

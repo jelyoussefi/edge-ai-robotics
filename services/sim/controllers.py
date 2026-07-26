@@ -42,7 +42,9 @@ class KinematicController:
         self.home = data.qpos.copy()
         self.phase = 0.0
         self.cmd = np.zeros(3)
-        self.yaw = 0.0
+        # Initial heading in radians. Set START_YAW to face the robot away
+        # from the camera (its back to us) at launch. pi = 180 deg.
+        self.yaw = float(__import__('os').environ.get('START_YAW', '0.0'))
         self.joint_ids = self._swing_joints(model)
 
     @staticmethod

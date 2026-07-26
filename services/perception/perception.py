@@ -20,6 +20,8 @@ import threading
 import time
 from collections import deque
 
+import cv2
+
 from edgebot import topics
 from edgebot.bus import Publisher
 
@@ -31,6 +33,10 @@ log = logging.getLogger("perception")
 CONFIG_PATH = os.environ.get("PERCEPTION_CONFIG", "/config/streams.json")
 PUBLISH_HZ = float(os.environ.get("PERCEPTION_PUBLISH_HZ", "15"))
 LOOP_VIDEO = os.environ.get("LOOP_VIDEO", "1") == "1"
+# Publish the colour frame of this stream as a backdrop, or -1 to disable.
+BACKDROP_CAMERA = int(os.environ.get("BACKDROP_CAMERA", "0"))
+BACKDROP_HZ = float(os.environ.get("BACKDROP_HZ", "15"))
+BACKDROP_WIDTH = int(os.environ.get("BACKDROP_WIDTH", "1280"))
 
 
 class Stream(threading.Thread):
@@ -50,6 +56,7 @@ class Stream(threading.Thread):
             conf=float(spec.get("confidence", 0.4)),
         )
         self.obstacles: list[dict] = []
+        self.latest_color = None  # BGR frame for the backdrop
         self.fps = 0.0
         self.infer_ms = 0.0
         self.has_depth = False
@@ -94,6 +101,10 @@ class Stream(threading.Thread):
             infer_ms = (time.perf_counter() - t0) * 1e3
 
             with self._lock:
+                # Copy, don't reference: pyrealsense reuses the same underlying
+                # buffer for every frame, so storing the reference would make the
+                # backdrop freeze on the first frame. The copy is a snapshot.
+                self.latest_color = frame.color.copy()
                 self.obstacles = [
                     {
                         "cx": d.cx,
@@ -116,6 +127,10 @@ class Stream(threading.Thread):
     def snapshot(self) -> tuple[list[dict], float, float]:
         with self._lock:
             return list(self.obstacles), self.fps, self.infer_ms
+
+    def color_frame(self):
+        with self._lock:
+            return None if self.latest_color is None else self.latest_color
 
     def stop(self) -> None:
         self.running = False
@@ -151,6 +166,9 @@ def main() -> None:
 
     dt = 1.0 / PUBLISH_HZ
     last_log = time.perf_counter()
+    last_backdrop = 0.0
+    backdrop_dt = 1.0 / BACKDROP_HZ if BACKDROP_HZ > 0 else 0.0
+    backdrop_count = 0
 
     while running:
         loop_start = time.perf_counter()
@@ -173,6 +191,27 @@ def main() -> None:
             {"obstacles": obstacles, "streams": per_stream, "stamp": time.time()},
         )
 
+        # Backdrop: publish one stream's colour frame as JPEG, at its own rate.
+        now = time.perf_counter()
+        if backdrop_dt and BACKDROP_CAMERA >= 0 and (now - last_backdrop) >= backdrop_dt:
+            if 0 <= BACKDROP_CAMERA < len(streams):
+                color = streams[BACKDROP_CAMERA].color_frame()
+                if color is not None:
+                    h0, w0 = color.shape[:2]
+                    if w0 > BACKDROP_WIDTH:
+                        scale = BACKDROP_WIDTH / w0
+                        color = cv2.resize(color, (BACKDROP_WIDTH, int(h0 * scale)))
+                    ok, buf = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                    if ok:
+                        h1, w1 = color.shape[:2]
+                        pub.send(
+                            topics.CAMERA_FRAME,
+                            {"jpeg": buf.tobytes(), "w": w1, "h": h1,
+                             "camera": BACKDROP_CAMERA, "stamp": time.time()},
+                        )
+                        backdrop_count += 1
+            last_backdrop = now
+
         if time.perf_counter() - last_log >= 5.0:
             nearest = next((o["range_m"] for o in obstacles if o["range_m"] is not None), None)
             near_str = f"{nearest:.2f}m" if nearest is not None else "n/a"
@@ -180,7 +219,8 @@ def main() -> None:
                 f"cam{p['camera']} {p['fps']:.1f}fps/{p['infer_ms']:.0f}ms{'/D' if p['depth'] else ''}"
                 for p in per_stream
             )
-            log.info("%d obstacle(s), nearest %s | %s", len(obstacles), near_str, summary)
+            log.info("%d obstacle(s), nearest %s | %s | backdrop sent %d",
+                     len(obstacles), near_str, summary, backdrop_count)
             last_log = time.perf_counter()
 
         time.sleep(max(0.0, dt - (time.perf_counter() - loop_start)))

@@ -41,7 +41,16 @@ class Frame:
 class RealSenseSource:
     """Aligned color + depth from a D457 (or any RealSense) over pyrealsense2."""
 
-    def __init__(self, serial: str | None, width: int, height: int, fps: int) -> None:
+    def __init__(
+        self,
+        serial: str | None,
+        width: int,
+        height: int,
+        fps: int,
+        depth_width: int | None = None,
+        depth_height: int | None = None,
+        depth_fps: int | None = None,
+    ) -> None:
         import pyrealsense2 as rs
 
         self._rs = rs
@@ -49,8 +58,16 @@ class RealSenseSource:
         config = rs.config()
         if serial:
             config.enable_device(serial)
+
+        # Colour drives the backdrop, so it may be high resolution. Depth is
+        # aligned to colour afterwards, so it need not match: it runs at its own
+        # resolution (default 848x480@30), which avoids the D455's inability to
+        # run both sensors at 720p together. Alignment maps depth onto colour.
+        dw = depth_width or 848
+        dh = depth_height or 480
+        dfps = depth_fps or 30
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
-        config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+        config.enable_stream(rs.stream.depth, dw, dh, rs.format.z16, dfps)
 
         profile = self.pipeline.start(config)
 
@@ -88,8 +105,10 @@ class RealSenseSource:
         if not color or not depth:
             return None
         return Frame(
-            np.asanyarray(color.get_data()),
-            np.asanyarray(depth.get_data()),
+            # Copy out of pyrealsense's recycled buffers immediately, so no
+            # frame shares memory that the next wait_for_frames() overwrites.
+            np.asanyarray(color.get_data()).copy(),
+            np.asanyarray(depth.get_data()).copy(),
             self.depth_scale,
             self.intrinsics,
         )
@@ -142,5 +161,8 @@ def open_source(spec: dict):
             int(spec.get("width", 848)),
             int(spec.get("height", 480)),
             int(spec.get("fps", 30)),
+            depth_width=spec.get("depth_width"),
+            depth_height=spec.get("depth_height"),
+            depth_fps=spec.get("depth_fps"),
         )
     return VideoSource(spec["source"], loop=spec.get("loop", True))

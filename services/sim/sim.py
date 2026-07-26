@@ -75,7 +75,7 @@ class Sim:
         self.sub = Subscriber([topics.CMD_VEL, topics.CMD_MODE, topics.PERCEPTION_OBSTACLES])
         self.teleop_cmd = np.zeros(3)
         self.cmd = np.zeros(3)
-        self.mode = topics.MODE_MANUAL
+        self.mode = os.environ.get("START_MODE", topics.MODE_AUTO)
         self.running = True
 
         self._steps_per_control = max(1, int(physics_hz / CONTROL_HZ))

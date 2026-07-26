@@ -1,4 +1,5 @@
 mujoco==3.2.7
 numpy==1.26.4
+opencv-python-headless==4.10.0.84
 pyzmq==26.2.0
 msgpack==1.1.0
