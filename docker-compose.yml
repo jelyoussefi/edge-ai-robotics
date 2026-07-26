@@ -58,6 +58,9 @@ services:
       DISPLAY: ${DISPLAY:-:0}
       MUJOCO_GL: glx
       LIBVA_DRIVER_NAME: iHD
+      VIEWER_MODE: ${VIEWER_MODE:-}
+      INTEL_FORCE_PROBE: "0xb080"
+      XDG_RUNTIME_DIR: /tmp/runtime-viewer
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -90,11 +93,17 @@ services:
       dockerfile: services/perception/Dockerfile
     depends_on:
       - bus
+    # RealSense over USB needs privileged access. librealsense claims and
+    # resets the USB device, which mounting the device nodes alone does not
+    # permit — this is the SDK's own documented requirement for Docker.
+    privileged: true
     environment:
       <<: *bus-env
       PERCEPTION_CONFIG: /config/streams.${STREAMS:-video}.json
       PERCEPTION_PUBLISH_HZ: "15"
       LOOP_VIDEO: "1"
+      BACKDROP_CAMERA: ${BACKDROP_CAMERA:--1}
+      BACKDROP_HZ: "15"
     devices:
       - /dev/dri:/dev/dri
       - /dev/accel:/dev/accel
@@ -104,9 +113,10 @@ services:
     volumes:
       - ./config:/config:ro
       - ./assets:/assets:ro
-      # RealSense (D457) is reached over USB through /dev/bus/usb, and the v4l2
-      # nodes appear under /dev/video*. Binding /dev covers both; the container
-      # is not privileged.
+      # RealSense over USB: the SDK needs the raw USB bus (/dev/bus/usb), not
+      # just the v4l2 nodes under /dev/video*. Binding /dev exposes both, and
+      # /dev/bus/usb is called out explicitly so the dependency is obvious.
       - /dev:/dev
+      - /dev/bus/usb:/dev/bus/usb
     cpuset: ${PERCEPTION_CPUS:-}
     restart: unless-stopped
