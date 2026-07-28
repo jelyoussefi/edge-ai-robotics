@@ -11,6 +11,10 @@ from __future__ import annotations
 # teleop -> sim. Velocity command in the robot's own frame.
 #   {"vx": float m/s, "vy": float m/s, "wz": float rad/s, "stamp": float}
 CMD_VEL = "cmd.vel"
+# Command to reset the robot to its start pose (triggered by 'z' in the compositor).
+CMD_RESET = "cmd.reset"
+# Manual turn nudge from the operator: {"wz": +right / -left} (from ./, keys).
+CMD_TURN = "cmd.turn"
 
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
@@ -62,3 +66,25 @@ MODE_AUTO = "auto"
 MAX_VX = 0.8
 MAX_VY = 0.4
 MAX_WZ = 1.0
+
+# perception -> central processor. Pure detections: bounding box, confidence,
+# and class label only. No distance (the central processor has the depth and
+# computes distance itself).
+#   {"detections": [{"cx": float, "cy": float, "w": float, "h": float,
+#                    "score": float, "class_id": int}],
+#    "t": float}
+# cx, cy, w, h are normalised 0..1 across the frame. "t" echoes the capture
+# timestamp of the RGB frame these detections were computed on, so the compositor
+# can pair each detection set with the matching depth frame.
+DETECTIONS = "perception.detections"
+
+# source -> compositor, perception. RGB colour frame, JPEG-encoded, with the
+# capture timestamp so consumers can align it with the matching depth frame and
+# detections.
+#   {"jpeg": bytes, "w": int, "h": int, "t": float}
+CAMERA_RGB = "camera.rgb"
+
+# source -> compositor. Depth frame as raw uint16 millimetres (or the sensor's
+# native Z16), with the SAME capture timestamp as the RGB frame it pairs with.
+#   {"depth": bytes, "w": int, "h": int, "scale": float, "t": float}
+CAMERA_DEPTH = "camera.depth"

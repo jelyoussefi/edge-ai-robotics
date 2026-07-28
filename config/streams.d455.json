@@ -1,15 +1,15 @@
 [
-  {
-    "type": "realsense",
-    "serial": "220422301817",
-    "width": 640,
-    "height": 480,
-    "fps": 30,
-    "model": "/assets/models/yolo11n/FP16/yolo11n.xml",
-    "device": "CPU",
-    "confidence": 0.4,
-    "depth_width": 640,
-    "depth_height": 480,
-    "depth_fps": 30
-  }
+    {
+        "type": "realsense",
+        "serial": "220422301817",
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+        "model": "/assets/models/yolo11m/FP16/yolo11m.xml",
+        "device": "NPU",
+        "confidence": 0.25,
+        "depth_width": 640,
+        "depth_height": 480,
+        "depth_fps": 30
+    }
 ]

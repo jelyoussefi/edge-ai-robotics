@@ -48,12 +48,14 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-# 2. YOLO11n as OpenVINO IR
+# 2. YOLO as OpenVINO IR (model chosen via YOLO_MODEL, default yolo11m for
+#    better detection of small/distant objects; yolo11n is faster if needed).
 # ----------------------------------------------------------------------------
-if [ -f "$ASSETS/models/yolo11n/FP16/yolo11n.xml" ]; then
-    echo "  YOLO11n IR already present, skipping."
+YOLO_MODEL="${YOLO_MODEL:-yolo11m}"
+if [ -f "$ASSETS/models/$YOLO_MODEL/FP16/$YOLO_MODEL.xml" ]; then
+    echo "  $YOLO_MODEL IR already present, skipping."
 else
-    echo "  Exporting YOLO11n to OpenVINO IR (runs in a container, nothing installed on the host) ..."
+    echo "  Exporting $YOLO_MODEL to OpenVINO IR (runs in a container, nothing installed on the host) ..."
     echo "  This pulls PyTorch, so expect a few GB and a few minutes on first run."
     # HTTP_PROXY and friends are forwarded without values, so they pass through
     # from the host when set and are simply absent when not.
@@ -62,6 +64,7 @@ else
         -e http_proxy -e https_proxy -e no_proxy \
         -e YOLO_CONFIG_DIR=/tmp/yolo \
         -e DEBIAN_FRONTEND=noninteractive \
+        -e YOLO_MODEL="$YOLO_MODEL" \
         -v "$(pwd)/$ASSETS/models:/out" -w /tmp python:3.12-slim bash -c '
         set -e
         # Ultralytics depends on opencv-python, which needs libGL and libglib
@@ -71,12 +74,14 @@ else
         apt-get install -y -qq --no-install-recommends libgl1 libglib2.0-0 >/dev/null 2>&1
         pip install --no-cache-dir --quiet "ultralytics>=8.3.0,<9" "openvino>=2025.0" "numpy<2.0"
         python - <<PY
+import os
 from ultralytics import YOLO
-m = YOLO("yolo11n.pt")
+name = os.environ["YOLO_MODEL"]
+m = YOLO(f"{name}.pt")
 m.export(format="openvino", half=True, imgsz=640)
 PY
-        mkdir -p /out/yolo11n/FP16
-        cp yolo11n_openvino_model/* /out/yolo11n/FP16/
+        mkdir -p /out/$YOLO_MODEL/FP16
+        cp ${YOLO_MODEL}_openvino_model/* /out/$YOLO_MODEL/FP16/
     '
 fi
 

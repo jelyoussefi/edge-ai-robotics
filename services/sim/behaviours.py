@@ -81,8 +81,8 @@ class ReactiveBehaviour:
 
 import math as _math
 
-INFLUENCE_M = 2.5   # obstacles beyond this are ignored
-DANGER_M = 0.5      # full repulsion at this range, clamped closer
+INFLUENCE_M = 0.4   # obstacles beyond this are ignored (react only when very close)
+DANGER_M = 0.1      # full repulsion at this range, clamped closer
 CRUISE_VX = 0.45    # forward speed on a clear path
 REPULSION_GAIN = 1.2
 STEER_GAIN = 1.4
@@ -96,6 +96,14 @@ UNKNOWN_ASSUMED_M = INFLUENCE_M  # unknown depth -> far but noted
 PATROL_LEG_M = float(os.environ.get("PATROL_LEG_M", "2.5"))
 PATROL_TURN_S = float(os.environ.get("PATROL_TURN_S", "2.0"))
 PATROL_TURN_WZ = float(os.environ.get("PATROL_TURN_WZ", "1.6"))
+
+# Distance minimale à la caméra sous laquelle le robot ne descend jamais. Devant
+# cette limite se trouve la zone morte (non passante) : trop proche, le robot
+# déborderait du cadre et le sol n'y est pas visible. La patrouille est donc
+# bornée entre PATROL_MIN_DISTANCE (côté caméra) et PATROL_MIN_DISTANCE +
+# PATROL_LEG_M (côté éloigné). Voir la calibration pour choisir cette valeur :
+# à hauteur caméra 1.5 m, le sol n'apparaît qu'à ~2.7 m, d'où ce défaut.
+PATROL_MIN_DISTANCE = float(os.environ.get("PATROL_MIN_DISTANCE", "2.7"))
 
 
 class AvoidBehaviour:
@@ -124,6 +132,11 @@ class AvoidBehaviour:
         self._leg_travelled = 0.0
         self._turn_elapsed = 0.0
         self._last_t = None
+        # Distance courante à la caméra. Le robot démarre au bord de la zone
+        # morte et s'éloigne. Le sens alterne à chaque demi-tour : +1 s'éloigne
+        # de la caméra, -1 revient vers elle.
+        self._camera_dist = PATROL_MIN_DISTANCE
+        self._direction = 1.0
 
     def observe(self, payload: dict) -> None:
         self.obstacles = payload.get("obstacles", payload.get("people", []))
@@ -170,20 +183,35 @@ class AvoidBehaviour:
             if self._turn_elapsed >= PATROL_TURN_S:
                 self._state = self.WALK
                 self._leg_travelled = 0.0
+                # Un demi-tour a été effectué : le robot repart dans l'autre sens.
+                self._direction = -self._direction
                 return np.zeros(3)
             return np.array([0.0, 0.0, PATROL_TURN_WZ])
 
         cmd, closest = self._avoidance(now)
         self._closest = closest
-        self._leg_travelled += max(0.0, cmd[0]) * dt
-        if self._leg_travelled >= PATROL_LEG_M:
+        step = max(0.0, cmd[0]) * dt
+        self._leg_travelled += step
+        # La distance à la caméra évolue selon le sens de marche. Le robot avance
+        # toujours devant lui (cmd[0] >= 0) ; c'est son orientation, encodée par
+        # _direction, qui dit s'il s'éloigne ou se rapproche de la caméra.
+        self._camera_dist += self._direction * step
+
+        # Bornes de distance strictes: le robot oscille entre PATROL_MIN_DISTANCE
+        # (près, face caméra) et max_dist (loin, dos caméra). Demi-tour à chaque
+        # borne. Cohérent et sans dérive.
+        max_dist = PATROL_MIN_DISTANCE + PATROL_LEG_M
+        near_edge = self._direction < 0 and self._camera_dist <= PATROL_MIN_DISTANCE
+        far_edge = self._direction > 0 and self._camera_dist >= max_dist
+        if near_edge or far_edge:
             self._state = self.TURN
             self._turn_elapsed = 0.0
             return np.zeros(3)
         return cmd
 
     def status(self) -> dict:
-        st = {"state": self._state, "leg_m": round(self._leg_travelled, 2)}
+        st = {"state": self._state, "leg_m": round(self._leg_travelled, 2),
+              "camera_dist_m": round(self._camera_dist, 2)}
         st["avoiding"] = bool(_math.isfinite(self._closest))
         if st["avoiding"]:
             st["closest_m"] = round(self._closest, 2)

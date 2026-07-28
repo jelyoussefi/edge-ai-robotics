@@ -25,7 +25,11 @@ class Publisher:
     def __init__(self, addr: str = BUS_PUB) -> None:
         self._ctx = zmq.Context.instance()
         self._sock = self._ctx.socket(zmq.PUB)
-        self._sock.setsockopt(zmq.SNDHWM, 16)
+        # A send buffer of only 16 messages is far too small once large camera
+        # frames (tens of KB, 15/s) share the socket with small telemetry: the
+        # buffer fills and NOBLOCK then silently drops every frame after the
+        # first, so a subscriber sees one frozen image. Give it real headroom.
+        self._sock.setsockopt(zmq.SNDHWM, 256)
         self._sock.connect(addr)
 
     def send(self, topic: str, payload: dict[str, Any]) -> None:
@@ -45,10 +49,15 @@ class Subscriber:
     poll it without ever stalling the loop.
     """
 
-    def __init__(self, topics: Iterable[str], addr: str = BUS_SUB) -> None:
+    def __init__(self, topics: Iterable[str], addr: str = BUS_SUB,
+                 rcvhwm: int = 256) -> None:
         self._ctx = zmq.Context.instance()
         self._sock = self._ctx.socket(zmq.SUB)
-        self._sock.setsockopt(zmq.RCVHWM, 16)
+        # A low receive high-water mark makes ZeroMQ drop the OLDEST queued
+        # messages when the buffer is full, so a slow consumer of a high-rate
+        # stream (camera frames) naturally keeps the freshest frames instead of
+        # falling behind on a growing backlog. Small messages use the default.
+        self._sock.setsockopt(zmq.RCVHWM, rcvhwm)
         self._sock.setsockopt(zmq.CONFLATE, 0)
         for topic in topics:
             self._sock.setsockopt(zmq.SUBSCRIBE, topic.encode())

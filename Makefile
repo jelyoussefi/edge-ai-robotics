@@ -13,7 +13,7 @@ POLICY   ?= kinematic
 COMPOSE  ?= docker compose
 DISPLAY  ?= :0
 
-# The render group id differs per distribution; the viewer needs it to reach
+# The render group id differs per distribution; the compositor needs it to reach
 # /dev/dri on the host. Resolved here so compose does not have to guess.
 RENDER_GID := $(shell getent group render 2>/dev/null | cut -d: -f3)
 VIDEO_GID  := $(shell getent group video  2>/dev/null | cut -d: -f3)
@@ -30,7 +30,7 @@ STREAMS ?= video
 SUITE ?=
 
 # BACKDROP=1 renders the robot over the live camera instead of the plain
-# viewer. It selects the compositing viewer and turns on the frame publisher.
+# compositor. Kept for compatibility; the compositor runs by default now.
 BACKDROP ?=
 ifeq ($(BACKDROP),1)
 VIEWER_MODE := backdrop
@@ -40,7 +40,7 @@ VIEWER_MODE :=
 BACKDROP_CAMERA := -1
 endif
 
-export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS VIEWER_MODE BACKDROP_CAMERA
+export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS VIEWER_MODE BACKDROP_CAMERA SHOW_DEPTH
 
 # Stamp files: build/fetch re-run only when their inputs actually change,
 # never just because make was invoked again.
@@ -60,13 +60,13 @@ REQ_FILES    := $(shell find services -type f -name 'requirements.txt' 2>/dev/nu
 #----------------------------------------------------------------------------------------------------------------------
 default: run
 
-.PHONY: help build models assets policy run up down restart teleop perception logs ps shell check lint test format clean distclean
+.PHONY: help build models assets policy run up down restart perception calibrate logs ps shell check lint test format clean distclean
 
 help:
 	@$(call msg, Edge AI Robotics - available commands)
 	@echo "  make build      Fetch robot models and build every container image"
-	@echo "  make run        Bring the stack up and open the viewer (default)"
-	@echo "  make teleop     Attach the keyboard controller in this terminal"
+	@echo "  make run        Bring the stack up and open the compositor (default)"
+	@echo "  make     Attach the keyboard controller in this terminal"
 	@echo "  make down       Stop the stack"
 	@echo "  make restart    Restart the stack"
 	@echo "  make logs       Follow the logs of every service   [S=sim]"
@@ -76,6 +76,8 @@ help:
 	@echo "  make assets     Fetch the sample video and export YOLOv8n to OpenVINO IR"
 	@echo "  make policy     Fetch the G1 walker RL policy and its matching model"
 	@echo "  make perception Start perception only        [STREAMS=video|single|d457]"
+	@echo "  make calibrate  Calibrate camera pose for robot placement  HEIGHT=1.20"
+	@echo "  make     Fix the MuJoCo size (1280x720)  [WIN_W= WIN_H=]"
 	@echo "  make check      Run lint, type-check and tests"
 	@echo "  make format     Auto-format the source"
 	@echo "  make clean      Remove build stamps and containers"
@@ -144,10 +146,8 @@ ifeq ($(POLICY),rl)
 	@if [ "$(ROBOT)" != "g1_walker" ]; then 		echo "  NOTE: POLICY=rl needs the 29-DoF walker model. Using ROBOT=g1_walker."; 	fi
 endif
 	@$(call msg, Starting the stack - robot $(ROBOT), policy $(POLICY) ...)
-	@echo "  The humanoid opens on $(DISPLAY). Run 'make teleop' in a second terminal."
-	@echo "  Press 'm' in teleop to hand control to perception (STREAMS=$(STREAMS))."
-	@$(COMPOSE) up -d bus sim viewer perception
-	@$(COMPOSE) logs -f sim viewer perception
+	@$(COMPOSE) up -d bus source sim compositor perception recorder
+	@$(COMPOSE) logs -f source sim compositor perception recorder
 
 up: run
 
@@ -157,13 +157,13 @@ down:
 
 restart: down run
 
-# Interactive, so it runs in the foreground with a tty attached rather than as
-# a compose service.
-teleop: $(IMAGES_STAMP)
-	@$(call msg, Keyboard control - W/S walk, A/D turn, Q/E strafe, space stop, Ctrl-C quit)
-	@$(COMPOSE) run --rm teleop
-
 # Perception on its own, for tuning without the physics running.
+# Calibre la pose de la caméra pour le placement du robot (option B).
+# HEIGHT = hauteur mesurée de la caméra au sol, en mètres (obligatoire).
+calibrate:
+	@test -n "$(HEIGHT)" || (echo "Usage: make calibrate HEIGHT=1.20 (hauteur caméra en m)"; exit 1)
+	@python3 scripts/calibrate_camera.py --height $(HEIGHT) $(if $(SERIAL),--serial $(SERIAL),)
+
 perception: $(ASSETS_STAMP) $(IMAGES_STAMP)
 	@$(call msg, Starting perception only - streams $(STREAMS) ...)
 	@$(COMPOSE) up -d bus

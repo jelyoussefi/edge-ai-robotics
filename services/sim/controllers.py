@@ -24,7 +24,7 @@ log = logging.getLogger("controllers")
 
 POLICY = os.environ.get("POLICY", "kinematic")
 POLICY_PATH = os.environ.get("POLICY_PATH", "")
-OV_DEVICE = os.environ.get("OV_DEVICE", "NPU")
+OV_DEVICE = os.environ.get("OV_DEVICE", "GPU")
 
 
 class KinematicController:
@@ -69,6 +69,12 @@ class KinematicController:
 
     def update(self, cmd: np.ndarray, data: mujoco.MjData) -> None:
         self.cmd = cmd
+
+    def reset(self, data: mujoco.MjData) -> None:
+        """Clear accumulated heading and gait phase for a clean restart."""
+        self.phase = 0.0
+        self.yaw = float(__import__("os").environ.get("START_YAW", "0.0"))
+        self.cmd = np.zeros(3)
 
     def apply(self, data: mujoco.MjData) -> None:
         dt = self.model.opt.timestep

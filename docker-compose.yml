@@ -11,7 +11,6 @@ x-bus-env: &bus-env
 services:
 
   # Message broker. Every other service connects here, so adding perception
-  # later needs no change to sim, viewer or teleop.
   bus:
     build:
       context: .
@@ -38,7 +37,12 @@ services:
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"
       POLICY_PATH: /policies/g1_walker/walker.onnx
-      OV_DEVICE: NPU
+      OV_DEVICE: ${OV_DEVICE:-GPU}
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-993}"
+      - "${VIDEO_GID:-44}"
     volumes:
       - ./models:/models:ro
       - ./policies:/policies:ro
@@ -46,21 +50,42 @@ services:
     restart: unless-stopped
 
   # Rendering to the TV. Needs the host X socket and the Intel iGPU.
-  viewer:
+  # Source. The single camera owner: reads RGB + depth and broadcasts each on
+  # its own bus channel with a shared timestamp. Needs the privileged USB access
+  # librealsense requires.
+  source:
     build:
       context: .
-      dockerfile: services/viewer/Dockerfile
+      dockerfile: services/source/Dockerfile
     depends_on:
       - bus
+    privileged: true
+    environment:
+      <<: *bus-env
+      SOURCE_CONFIG: /config/streams.${STREAMS:-d455}.json
+    volumes:
+      - ./config:/config:ro
+      - /dev:/dev
+      - /dev/bus/usb:/dev/bus/usb
+    restart: unless-stopped
+
+  compositor:
+    build:
+      context: .
+      dockerfile: services/compositor/Dockerfile
+    depends_on:
+      - bus
+      - source
+    # No camera: the compositor receives RGB + depth from the source over the
+    # bus. It only needs the GPU for rendering and the display.
     environment:
       <<: *bus-env
       ROBOT: ${ROBOT:-g1}
       DISPLAY: ${DISPLAY:-:0}
       MUJOCO_GL: glx
       LIBVA_DRIVER_NAME: iHD
-      VIEWER_MODE: ${VIEWER_MODE:-}
       INTEL_FORCE_PROBE: "0xb080"
-      XDG_RUNTIME_DIR: /tmp/runtime-viewer
+      XDG_RUNTIME_DIR: /tmp/runtime-compositor
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -69,41 +94,20 @@ services:
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./models:/models:ro
+      - ./config:/config:ro
     restart: unless-stopped
 
-  # Keyboard control. Not started by `up` — it needs a terminal, so it runs
-  # via `make teleop` (docker compose run) instead.
-  teleop:
-    build:
-      context: .
-      dockerfile: services/teleop/Dockerfile
-    depends_on:
-      - bus
-    environment: *bus-env
-    stdin_open: true
-    tty: true
-    profiles:
-      - manual
-
-  # Perception. Runs one detector per stream. STREAMS selects the config, so
-  # moving from the sample video to four D457 cameras is an env change only.
+  # Perception. Receives camera frames from the compositor over the bus and runs
+  # detection; it no longer opens the camera itself.
   perception:
     build:
       context: .
       dockerfile: services/perception/Dockerfile
     depends_on:
       - bus
-    # RealSense over USB needs privileged access. librealsense claims and
-    # resets the USB device, which mounting the device nodes alone does not
-    # permit — this is the SDK's own documented requirement for Docker.
-    privileged: true
     environment:
       <<: *bus-env
-      PERCEPTION_CONFIG: /config/streams.${STREAMS:-video}.json
-      PERCEPTION_PUBLISH_HZ: "15"
-      LOOP_VIDEO: "1"
-      BACKDROP_CAMERA: ${BACKDROP_CAMERA:--1}
-      BACKDROP_HZ: "15"
+      PERCEPTION_CONFIG: /config/streams.${STREAMS:-d455}.json
     devices:
       - /dev/dri:/dev/dri
       - /dev/accel:/dev/accel
@@ -113,10 +117,23 @@ services:
     volumes:
       - ./config:/config:ro
       - ./assets:/assets:ro
-      # RealSense over USB: the SDK needs the raw USB bus (/dev/bus/usb), not
-      # just the v4l2 nodes under /dev/video*. Binding /dev exposes both, and
-      # /dev/bus/usb is called out explicitly so the dependency is obvious.
-      - /dev:/dev
-      - /dev/bus/usb:/dev/bus/usb
     cpuset: ${PERCEPTION_CPUS:-}
+    restart: unless-stopped
+
+  # Recorder. Persists calibration and runtime telemetry to a SQLite file on a
+  # mounted volume. Passive: subscribes only to small messages, never the camera.
+  recorder:
+    build:
+      context: .
+      dockerfile: services/recorder/Dockerfile
+    depends_on:
+      - bus
+    environment:
+      <<: *bus-env
+      ROBOT: ${ROBOT:-g1}
+      RECORDER_DB: /data/edgebot.sqlite
+      RECORD_HZ: "3"
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
     restart: unless-stopped

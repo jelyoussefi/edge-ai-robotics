@@ -72,10 +72,11 @@ class Sim:
 
         self.behaviour = AvoidBehaviour()
         self.pub = Publisher()
-        self.sub = Subscriber([topics.CMD_VEL, topics.CMD_MODE, topics.PERCEPTION_OBSTACLES])
-        self.teleop_cmd = np.zeros(3)
+        # Sim only listens to perception now; the robot always patrols
+        # autonomously and avoids obstacles. No manual/teleop mode.
+        self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN])
         self.cmd = np.zeros(3)
-        self.mode = os.environ.get("START_MODE", topics.MODE_AUTO)
+        self._manual_turn = 0.0  # pending operator yaw (radians), applied per frame
         self.running = True
 
         self._steps_per_control = max(1, int(physics_hz / CONTROL_HZ))
@@ -89,29 +90,29 @@ class Sim:
         self.running = False
 
     def _poll_bus(self) -> None:
-        """Consume every pending message, then decide which command to obey.
-
-        All three topics share one subscriber, so this drains rather than
-        conflates: a mode change must not be dropped just because a velocity
-        command arrived after it.
-        """
+        """Consume perception messages, then compute the patrol command."""
         while (msg := self.sub.recv(0)) is not None:
             topic, payload = msg
-            if topic == topics.CMD_VEL:
-                self.teleop_cmd = np.array(
-                    [payload.get("vx", 0.0), payload.get("vy", 0.0), payload.get("wz", 0.0)]
-                )
-                if payload.get("reset"):
-                    self._reset()
-            elif topic == topics.CMD_MODE:
-                new_mode = payload.get("mode", topics.MODE_MANUAL)
-                if new_mode != self.mode:
-                    log.info("mode -> %s", new_mode)
-                    self.mode = new_mode
-            elif topic == topics.PERCEPTION_OBSTACLES:
+            if topic == topics.PERCEPTION_OBSTACLES:
                 self.behaviour.observe(payload)
+            elif topic == topics.CMD_RESET:
+                # Compositor asked (via 'z') to send the robot back to its start
+                # pose. Reset physics and the patrol behaviour together.
+                self._reset()
+                self.behaviour = AvoidBehaviour()
+            elif topic == topics.CMD_TURN:
+                # Operator turn nudge (l/r keys). Accumulate a yaw offset in radians
+                # that is applied on top of the patrol command over a few frames.
+                self._manual_turn += float(payload.get("wz", 0.0))
 
-        raw = self.behaviour.command(time.time()) if self.mode == topics.MODE_AUTO else self.teleop_cmd
+        raw = self.behaviour.command(time.time())
+
+        # Gentle recentering: if the robot has drifted off the camera axis (y!=0),
+        # add a small yaw correction that curves it back toward y=0, so it stays
+        # in the fixed camera's view during a long demo. Only while walking (not
+        # turning), and capped so it never overpowers the gait or looks abrupt.
+        raw = self._recenter(raw)
+
         self.cmd = np.array(
             [
                 np.clip(raw[0], -topics.MAX_VX, topics.MAX_VX),
@@ -120,6 +121,49 @@ class Sim:
             ]
         )
 
+    def _apply_manual_turn(self, dt: float) -> None:
+        """Rotate the robot's heading by any pending operator turn, smoothly.
+
+        Applied a slice per physics step so a 5 deg nudge sweeps over a fraction
+        of a second instead of snapping, which keeps the walker balanced.
+        """
+        if abs(self._manual_turn) < 1e-4:
+            return
+        # Take a capped slice of the pending turn this step.
+        rate = np.radians(120.0)  # deg/s sweep speed
+        step = float(np.clip(self._manual_turn, -rate * dt, rate * dt))
+        self._manual_turn -= step
+        # Rotate the base quaternion about z by 'step'.
+        qw, qx, qy, qz = (float(self.data.qpos[3]), float(self.data.qpos[4]),
+                          float(self.data.qpos[5]), float(self.data.qpos[6]))
+        h = step / 2.0
+        cw, sw = np.cos(h), np.sin(h)
+        # Quaternion multiply: q_turn (about z) * q_current.
+        self.data.qpos[3] = cw * qw - sw * qz
+        self.data.qpos[4] = cw * qx - sw * qy
+        self.data.qpos[5] = cw * qy + sw * qx
+        self.data.qpos[6] = cw * qz + sw * qw
+
+    def _recenter(self, raw: np.ndarray) -> np.ndarray:
+        """Add a small yaw term steering the robot back to the camera axis y=0."""
+        # Only correct when moving forward (walking), not during an in-place turn.
+        if raw[0] <= 0.05:
+            return raw
+        y = float(self.data.qpos[1])
+        # Robot heading from the base quaternion (yaw around z).
+        qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
+        yaw = 2.0 * np.arctan2(qz, qw)
+        # Desired: reduce |y|. Steer toward the axis: if y>0 (left), turn right.
+        # Blend the lateral error and current heading so it curves smoothly back.
+        DEADBAND = 0.15   # metres; ignore small offsets
+        GAIN = 0.8
+        if abs(y) < DEADBAND:
+            return raw
+        # Target heading points back toward the axis, damped by how far off we are.
+        target_yaw = -np.clip(y * GAIN, -0.6, 0.6)  # radians, toward y=0
+        correction = float(np.clip((target_yaw - yaw) * 0.5, -0.4, 0.4))
+        return np.array([raw[0], raw[1], raw[2] + correction])
+
     def _reset(self) -> None:
         """Return the robot to its start pose without restarting the service."""
         if self.model.nkey:
@@ -127,7 +171,12 @@ class Sim:
         else:
             mujoco.mj_resetData(self.model, self.data)
         mujoco.mj_forward(self.model, self.data)
-        self.controller = make_controller(self.model, self.data)
+        # Reset the controller's internal state in place instead of recreating it,
+        # which would recompile the policy (slow, and can stall the reset).
+        if hasattr(self.controller, "reset"):
+            self.controller.reset(self.data)
+        if hasattr(self.controller, "stand"):
+            self.controller.stand(self.data)
         log.info("reset to start pose")
 
     def _fallen(self) -> bool:
@@ -152,6 +201,7 @@ class Sim:
                 policy_ms = (time.perf_counter() - t0) * 1e3
 
             self.controller.apply(self.data)
+            self._apply_manual_turn(dt)
             mujoco.mj_step(self.model, self.data)
 
             if step % self._steps_per_publish == 0:
@@ -189,7 +239,6 @@ class Sim:
                         "rtf": float(achieved_hz * dt),
                         "jitter_p99_us": float(np.percentile(jitter[:min(step, len(jitter))], 99)),
                         "policy_ms": policy_ms,
-                        "mode": self.mode,
                         **self.behaviour.status(),
                     },
                 )

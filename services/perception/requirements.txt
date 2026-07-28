@@ -1,4 +1,4 @@
-openvino==2025.3.0
+openvino==2026.2.0
 opencv-python-headless==4.10.0.84
 numpy<2.0
 pyzmq==26.2.0
