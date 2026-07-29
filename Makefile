@@ -1,131 +1,63 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
+#
+# The demo has exactly one configuration: a RealSense D455, a Unitree G1 driven
+# by the RL walking policy, and GPU composition onto the live camera. That is
+# stated in docker-compose.yml rather than passed on the command line, so
+# `make run` is the whole interface.
 
-#----------------------------------------------------------------------------------------------------------------------
-# Flags
-#----------------------------------------------------------------------------------------------------------------------
-SHELL := /bin/bash
-CURRENT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
-
-# Configuration — override on the command line, e.g. `make run ROBOT=h1 POLICY=rl`.
-ROBOT    ?= g1
-POLICY   ?= kinematic
-COMPOSE  ?= docker compose
-DISPLAY  ?= :0
+SHELL   := /bin/bash
+COMPOSE ?= docker compose
+DISPLAY ?= :0
 
 # The render group id differs per distribution; the compositor needs it to reach
 # /dev/dri on the host. Resolved here so compose does not have to guess.
 RENDER_GID := $(shell getent group render 2>/dev/null | cut -d: -f3)
 VIDEO_GID  := $(shell getent group video  2>/dev/null | cut -d: -f3)
+export DISPLAY RENDER_GID VIDEO_GID
 
-# CPU set for the physics loop. Leave empty to let the scheduler decide, or set
-# to isolated cores, e.g. `make run SIM_CPUS=8-11`.
-SIM_CPUS ?=
-PERCEPTION_CPUS ?=
-
-# Which stream config perception uses: video (sample mp4), single, or d457.
-STREAMS ?= video
-
-# Path to a local edge-ai-suites checkout, if you have one. Saves a clone.
-SUITE ?=
-
-# BACKDROP=1 renders the robot over the live camera instead of the plain
-# compositor. Kept for compatibility; the compositor runs by default now.
-BACKDROP ?=
-ifeq ($(BACKDROP),1)
-VIEWER_MODE := backdrop
-BACKDROP_CAMERA := 0
-else
-VIEWER_MODE :=
-BACKDROP_CAMERA := -1
-endif
-
-export ROBOT POLICY DISPLAY RENDER_GID VIDEO_GID SIM_CPUS PERCEPTION_CPUS STREAMS VIEWER_MODE BACKDROP_CAMERA SHOW_DEPTH
-
-# Stamp files: build/fetch re-run only when their inputs actually change,
-# never just because make was invoked again.
+# Stamp files: fetch and build re-run only when their inputs change, never just
+# because make was invoked again.
 STAMP_DIR    := .make
 IMAGES_STAMP := $(STAMP_DIR)/images
-MODELS_STAMP := $(STAMP_DIR)/models
 ASSETS_STAMP := $(STAMP_DIR)/assets
 POLICY_STAMP := $(STAMP_DIR)/policy
 
-MENAGERIE    := models/mujoco_menagerie
-DOCKERFILES  := $(shell find services -name Dockerfile 2>/dev/null)
-SRC_FILES    := $(shell find services common -type f -name '*.py' 2>/dev/null)
-REQ_FILES    := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
+DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
+SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
+REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-#----------------------------------------------------------------------------------------------------------------------
-# Targets
-#----------------------------------------------------------------------------------------------------------------------
+.PHONY: default help build run down restart calibrate logs ps shell clean distclean
 default: run
 
-.PHONY: help build models assets policy run up down restart perception calibrate logs ps shell check lint test format clean distclean
-
 help:
-	@$(call msg, Edge AI Robotics - available commands)
-	@echo "  make build      Fetch robot models and build every container image"
-	@echo "  make run        Bring the stack up and open the compositor (default)"
-	@echo "  make     Attach the keyboard controller in this terminal"
+	@$(call msg, Edge AI Robotics)
+	@echo "  make run        Stop anything running, build if needed, start the demo"
 	@echo "  make down       Stop the stack"
-	@echo "  make restart    Restart the stack"
-	@echo "  make logs       Follow the logs of every service   [S=sim]"
-	@echo "  make ps         Show container status"
-	@echo "  make shell      Open a shell inside a service      [S=sim]"
-	@echo "  make models     Fetch the MuJoCo Menagerie robot models"
-	@echo "  make assets     Fetch the sample video and export YOLOv8n to OpenVINO IR"
-	@echo "  make policy     Fetch the G1 walker RL policy and its matching model"
-	@echo "  make perception Start perception only        [STREAMS=video|single|d457]"
-	@echo "  make calibrate  Calibrate camera pose for robot placement  HEIGHT=1.20"
-	@echo "  make     Fix the MuJoCo size (1280x720)  [WIN_W= WIN_H=]"
-	@echo "  make check      Run lint, type-check and tests"
-	@echo "  make format     Auto-format the source"
-	@echo "  make clean      Remove build stamps and containers"
-	@echo "  make distclean  Also remove images and downloaded models"
+	@echo "  make restart    Same as run"
+	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
+	@echo "  make logs       Follow the logs                            [S=compositor]"
+	@echo "  make ps         Container status"
+	@echo "  make shell      Shell inside a service                     [S=sim]"
+	@echo "  make clean      Remove containers and build stamps"
+	@echo "  make distclean  Also remove images and fetched assets"
 	@echo ""
-	@echo "  Configuration:  ROBOT=$(ROBOT)  POLICY=$(POLICY)  STREAMS=$(STREAMS)"
-	@echo "  Robots:         g1 h1 t1 g1_walker    Policies: kinematic rl"
-	@echo "  For real walking: make run POLICY=rl ROBOT=g1_walker"
-	@echo "  Streams:        video (sample mp4, no cameras needed), single, d457, d455"
-	@echo "  Backdrop:       make run BACKDROP=1 STREAMS=d455  (robot over live camera)"
+	@echo "  In the compositor window:  f  floor overlay   z  reset the robot   q  quit"
 
-# Robot meshes are large and separately licensed, so they are fetched rather
-# than vendored. The stamp file (not the directory) is the target, so a shallow
-# pull does not re-trigger the clone.
-$(MODELS_STAMP): scripts/fetch_models.sh
-	@$(call msg, Fetching robot models ...)
-	@mkdir -p $(STAMP_DIR)
-	@bash scripts/fetch_models.sh
-	@touch $@
-
-models: $(MODELS_STAMP)
-
-# Sample video and the YOLOv8n IR. Separate from robot models because these are
-# the ones you need before the cameras work, and the ones you can demo on.
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)
 	@mkdir -p $(STAMP_DIR)
-	@bash scripts/fetch_assets.sh $(SUITE)
+	@bash scripts/fetch_assets.sh
 	@touch $@
 
-assets: $(ASSETS_STAMP)
-
-# The RL locomotion policy and the 29-DoF G1 model it was trained for. Both come
-# from the same source so they stay in lockstep. Needed only for POLICY=rl.
 $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
-	@$(call msg, Fetching the G1 walker policy and model ...)
+	@$(call msg, Fetching the G1 walker model and policy ...)
 	@mkdir -p $(STAMP_DIR)
-	@bash scripts/fetch_policy.sh $(SUITE)
+	@bash scripts/fetch_policy.sh
 	@touch $@
 
-policy: $(POLICY_STAMP)
-
-# Generate .env once, on first use. It is a real file target, so it is created
-# only when missing — never on every run.
 .env:
-	@$(call msg, Creating .env from .env.example ...)
 	@cp .env.example .env
-	@echo "  Created .env — review it before the first run."
 
 $(IMAGES_STAMP): .env $(DOCKERFILES) $(REQ_FILES) $(SRC_FILES)
 	@$(call msg, Building container images ...)
@@ -133,41 +65,29 @@ $(IMAGES_STAMP): .env $(DOCKERFILES) $(REQ_FILES) $(SRC_FILES)
 	@$(COMPOSE) build
 	@touch $@
 
-# Fetch the RL policy as part of build only when POLICY=rl is selected.
-ifeq ($(POLICY),rl)
-build: $(MODELS_STAMP) $(ASSETS_STAMP) $(POLICY_STAMP) $(IMAGES_STAMP)
-else
-build: $(MODELS_STAMP) $(ASSETS_STAMP) $(IMAGES_STAMP)
-endif
+build: $(ASSETS_STAMP) $(POLICY_STAMP) $(IMAGES_STAMP)
 
-run: build
+# Always stop first: a container left over from a previous run holds the
+# RealSense device, and the next start then fails on a busy V4L2 ioctl.
+run: down build
 	@xhost +local:root > /dev/null 2>&1 || true
-ifeq ($(POLICY),rl)
-	@if [ "$(ROBOT)" != "g1_walker" ]; then 		echo "  NOTE: POLICY=rl needs the 29-DoF walker model. Using ROBOT=g1_walker."; 	fi
-endif
-	@$(call msg, Starting the stack - robot $(ROBOT), policy $(POLICY) ...)
-	@$(COMPOSE) up -d bus source sim compositor perception recorder
+	@$(call msg, Starting the demo ...)
+	@$(COMPOSE) up -d
 	@$(COMPOSE) logs -f source sim compositor perception recorder
 
-up: run
-
 down:
-	@$(call msg, Stopping the stack ...)
-	@$(COMPOSE) down
+	@$(COMPOSE) down --remove-orphans 2>/dev/null || true
 
-restart: down run
+restart: run
 
-# Perception on its own, for tuning without the physics running.
-# Calibre la pose de la caméra pour le placement du robot (option B).
-# HEIGHT = hauteur mesurée de la caméra au sol, en mètres (obligatoire).
-calibrate:
-	@test -n "$(HEIGHT)" || (echo "Usage: make calibrate HEIGHT=1.20 (hauteur caméra en m)"; exit 1)
-	@python3 scripts/calibrate_camera.py --height $(HEIGHT) $(if $(SERIAL),--serial $(SERIAL),)
-
-perception: $(ASSETS_STAMP) $(IMAGES_STAMP)
-	@$(call msg, Starting perception only - streams $(STREAMS) ...)
-	@$(COMPOSE) up -d bus
-	@$(COMPOSE) up perception
+# Runs inside the source container, the one that owns the camera, so the same
+# RealSense settings and filters apply as during the demo. Floor pixels are
+# tinted red so the pose can be checked before it is written.
+calibrate: $(IMAGES_STAMP) down
+	@test -n "$(HEIGHT)" || (echo "Usage: make calibrate HEIGHT=1.50   (camera height in metres)"; exit 1)
+	@xhost +local:root > /dev/null 2>&1 || true
+	@$(call msg, Camera calibration - floor shown in red ...)
+	@$(COMPOSE) run --rm --no-deps source python3 /app/calibrate.py --height $(HEIGHT)
 
 logs:
 	@$(COMPOSE) logs -f $(S)
@@ -176,41 +96,20 @@ ps:
 	@$(COMPOSE) ps
 
 shell:
-	@$(COMPOSE) exec $(or $(S),sim) /bin/bash
+	@$(COMPOSE) exec $(or $(S),compositor) /bin/bash
 
-check: $(IMAGES_STAMP)
-	@$(call msg, Running lint, type-check and tests ...)
-	@$(COMPOSE) run --rm --no-deps sim python -m ruff check /opt/edgebot /app
-	@$(COMPOSE) run --rm --no-deps sim python -m mypy --ignore-missing-imports /app
-	@$(COMPOSE) run --rm --no-deps sim python -m pytest -q /app
-
-lint: $(IMAGES_STAMP)
-	@$(COMPOSE) run --rm --no-deps sim python -m ruff check /opt/edgebot /app
-
-test: $(IMAGES_STAMP)
-	@$(COMPOSE) run --rm --no-deps sim python -m pytest -q /app
-
-format: $(IMAGES_STAMP)
-	@$(COMPOSE) run --rm --no-deps sim python -m ruff format /opt/edgebot /app
-
-clean:
-	@$(call msg, Removing containers and build stamps ...)
-	@$(COMPOSE) down --remove-orphans 2>/dev/null || true
+clean: down
 	@rm -rf $(STAMP_DIR)
 
 distclean: clean
-	@$(call msg, Removing images and downloaded models ...)
 	@$(COMPOSE) down --rmi local --volumes 2>/dev/null || true
-	@rm -rf $(MENAGERIE) assets models/g1_walker policies/g1_walker/walker.onnx policies/g1_walker/walker.onnx.data policies/g1_walker/walker_meta.json
-	@echo "  Note: .env and anything under policies/ is yours and was left untouched."
+	@rm -rf assets models/g1_walker policies/g1_walker/walker.onnx \
+	        policies/g1_walker/walker.onnx.data policies/g1_walker/walker_meta.json
 
-#----------------------------------------------------------------------------------------------------------------------
-# Helper Functions
-#----------------------------------------------------------------------------------------------------------------------
 define msg
 	tput setaf 2 && \
-	for i in $(shell seq 1 118); do echo -n "-"; done; echo "" && \
+	for i in $(shell seq 1 100); do echo -n "-"; done; echo "" && \
 	echo "         "$1 && \
-	for i in $(shell seq 1 118); do echo -n "-"; done; echo "" && \
+	for i in $(shell seq 1 100); do echo -n "-"; done; echo "" && \
 	tput sgr0
 endef

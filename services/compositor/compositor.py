@@ -27,12 +27,762 @@ import os
 import time
 
 import cv2
+import glfw
 import mujoco
 import numpy as np
+from OpenGL import GL
 from edgebot import topics
 from edgebot.bus import Publisher, Subscriber
 
+
 log = logging.getLogger("compositor")
+
+
+# ---------------------------------------------------------------------------
+# GPU composition: offscreen robot render, camera textures, one shader pass.
+# ---------------------------------------------------------------------------
+def configure_model_for_offscreen(model: mujoco.MjModel, scale: int,
+                                  width: int, height: int) -> None:
+    """Size the offscreen buffer to scale*resolution with MSAA disabled.
+
+    Called before mjr_makeContext. MuJoCo would otherwise resolve edges against
+    its black background (MSAA), reintroducing the fringe; offsamples=0 keeps the
+    edges sharp so the composition shader can resolve them against the camera.
+    """
+    model.vis.global_.offwidth = width * scale
+    model.vis.global_.offheight = height * scale
+    model.vis.quality.offsamples = 0  # no MSAA: shader does the anti-aliasing
+
+
+# GLSL: a full-screen triangle, no vertex buffer needed (gl_VertexID trick).
+_VERT = """
+#version 330 core
+out vec2 uv;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    uv = p;                      // 0..1 across the screen
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+
+# GLSL: composite robot over camera with per-subsample depth occlusion.
+# robot_col/robot_depth are the 2x MuJoCo render; cam_col/cam_depth the D455.
+# For each output pixel we look at a 2x2 block of the high-res robot render (the
+# 4 subsamples). Each subsample contributes the robot colour where the robot is
+# in front of the camera depth, otherwise the camera colour. Averaging the 4
+# gives anti-aliased edges blended with the real scene, never with black.
+_FRAG = """
+#version 330 core
+in vec2 uv;
+out vec4 frag;
+
+uniform sampler2D robot_col;    // 2x MuJoCo colour
+uniform sampler2D robot_depth;  // 2x MuJoCo depth (0..1, non-linear)
+uniform sampler2D cam_col;      // D455 colour (BGR uploaded; swizzled below)
+uniform sampler2D cam_depth;    // D455 depth in metres (R32F)
+
+uniform vec2  out_size;         // output resolution (1x)
+uniform float depth_bias_m;     // robot wins if robot_z < cam_z - bias
+uniform float znear;            // MuJoCo projection near
+uniform float zfar;             // MuJoCo projection far
+
+// Floor overlay ('f'): tint pixels whose measured depth matches the expected
+// floor depth (computed from camera geometry) so the operator sees the ground.
+uniform int   show_floor;       // 0/1
+uniform float cam_height;       // camera height above the floor (m)
+uniform float cam_pitch;        // downward tilt (rad)
+uniform float fx_i;             // intrinsics at camera resolution
+uniform float fy_i;
+uniform float ppx_i;
+uniform float ppy_i;
+uniform vec2  cam_res;          // camera colour/depth resolution (w,h)
+uniform float floor_tol;        // tolerance (m) for floor match
+uniform float floor_alpha;      // overlay strength, 0..1
+uniform float floor_tol_rel;    // legacy, kept for the depth criterion
+uniform float floor_h_tol;      // |height above ground| gate, metres
+
+// Convert MuJoCo's non-linear depth-buffer value to a metric eye-space depth.
+float linearize(float d) {
+    float z_ndc = d * 2.0 - 1.0;
+    return (2.0 * znear * zfar) / (zfar + znear - z_ndc * (zfar - znear));
+}
+
+// Expected floor depth Z for the camera pixel at uv (perpendicular depth), from
+// the ground-plane geometry. Returns a large value where there is no floor.
+float expected_floor_z(vec2 cuv) {
+    // cuv is already in image convention (v = 0 at the top row), the same one
+    // floor.py uses, so no further flip here.
+    float u = cuv.x * cam_res.x;
+    float v = cuv.y * cam_res.y;
+    float x = (u - ppx_i) / fx_i;
+    float y = (v - ppy_i) / fy_i;
+    float cp = cos(cam_pitch), sp = sin(cam_pitch);
+    float world_dir_z = y * (-cp) + 1.0 * (-sp);
+    if (world_dir_z >= 0.0) return 1e9;
+    return -cam_height / world_dir_z;
+}
+
+void main() {
+    vec2 texel = 1.0 / (out_size * 2.0);   // one high-res subsample step
+    vec3 acc = vec3(0.0);
+    // The camera frame is uploaded straight from numpy, whose row 0 is the TOP
+    // of the image, while GL texel row 0 is the BOTTOM. Flip v when sampling it
+    // so the camera comes out upright in both present() and the readback, and
+    // so it matches the row convention expected_floor_z() uses.
+    vec2 cuv = vec2(uv.x, 1.0 - uv.y);
+    // Camera colour at this output pixel. The frame is uploaded as RAW BGR
+    // bytes declared as GL_RGB: this Mesa PTL driver silently drops BGR
+    // uploads (no error, no write), so the channel swap is done here instead.
+    vec3 cam_rgb = texture(cam_col, cuv).bgr;
+    float cam_z = texture(cam_depth, cuv).r;        // metres (0 = no data)
+
+    for (int dy = 0; dy < 2; ++dy) {
+        for (int dx = 0; dx < 2; ++dx) {
+            vec2 suv = uv + vec2(float(dx), float(dy)) * texel;
+            vec4 rc = texture(robot_col, suv);
+            float rd = texture(robot_depth, suv).r;
+            // Detect the robot by its rendered colour: MuJoCo clears the offscreen
+            // background to black, so any non-black pixel is the robot. This is
+            // robust even if the depth blit is unavailable. Occlusion by the real
+            // scene still applies when we have a valid robot depth (< 1).
+            float lum = max(rc.r, max(rc.g, rc.b));
+            bool drawn = lum > 0.02;
+            float robot_z = linearize(rd);
+            bool depth_valid = rd > 0.0 && rd < 0.9999;
+            bool occluded = depth_valid && (cam_z > 0.0) && (robot_z > cam_z + depth_bias_m);
+            acc += (drawn && !occluded) ? rc.rgb : cam_rgb;
+        }
+    }
+    vec3 col = acc * 0.25;
+
+    // Floor overlay: blend red where the measured depth matches expected floor.
+    if (show_floor == 1 && cam_z > 0.0) {
+        float ez = expected_floor_z(cuv);
+        // Height criterion: reconstruct the point behind this pixel and ask how
+        // far above the ground plane it sits. Only the vertical component of the
+        // ray matters; with no camera roll the horizontal angle is parallel to
+        // the floor. A single height gate is correct at every distance, because
+        // it maps to a depth tolerance of floor_h_tol / |world_dir_z|, which
+        // widens with distance on its own.
+        float yv = (cuv.y * cam_res.y - ppy_i) / fy_i;
+        float world_dir_z = -yv * cos(cam_pitch) - sin(cam_pitch);
+        float height = cam_height + cam_z * world_dir_z;
+        if (world_dir_z < -1e-3 && abs(height) < floor_h_tol) {
+            col = mix(col, vec3(1.0, 0.0, 0.0), floor_alpha);
+        }
+    }
+    frag = vec4(col, 1.0);
+}
+"""
+
+
+def _restore_gl_state() -> None:
+    """Put the GL state back the way MuJoCo's renderer expects to find it.
+
+    The composition pass leaves texture unit 3 active with four textures bound
+    to units 0..3, plus a program, a VAO and a bound framebuffer. mjr_render
+    assumes a clean-ish state, in particular that GL_TEXTURE0 is the active
+    unit, and does not reset any of this itself. The first frame after context
+    creation is therefore fine and every later one is not: MuJoCo renders with
+    the compositor's textures still bound underneath it, producing a uniform
+    single-channel image instead of the robot.
+
+    Whoever dirties the state cleans it, so this runs at the end of every pass
+    rather than in the caller's loop.
+    """
+    for unit in (3, 2, 1, 0):
+        GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+    GL.glActiveTexture(GL.GL_TEXTURE0)
+    GL.glBindVertexArray(0)
+    GL.glUseProgram(0)
+    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+    GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+    GL.glDisable(GL.GL_SCISSOR_TEST)
+    GL.glDisable(GL.GL_BLEND)
+    GL.glEnable(GL.GL_DEPTH_TEST)
+    GL.glDepthMask(GL.GL_TRUE)
+    GL.glColorMask(GL.GL_TRUE, GL.GL_TRUE, GL.GL_TRUE, GL.GL_TRUE)
+
+
+def _compile(src: str, kind) -> int:
+    sh = GL.glCreateShader(kind)
+    GL.glShaderSource(sh, src)
+    GL.glCompileShader(sh)
+    if not GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS):
+        raise RuntimeError(GL.glGetShaderInfoLog(sh).decode())
+    return sh
+
+
+class GLCompositor:
+    """Owns the FBOs, textures, PBOs and shader for GPU compositing.
+
+    Call order per frame: capture_robot(...) -> upload_camera(...) -> present().
+    The GL context (window) and the MjrContext must already exist.
+    """
+
+    def __init__(self, mjr_context: mujoco.MjrContext,
+                 width: int, height: int, scale: int = 2,
+                 depth_bias_m: float = 0.025) -> None:
+        self.w, self.h, self.scale = width, height, scale
+        self.mjr = mjr_context
+        self.depth_bias_m = depth_bias_m
+        self.znear, self.zfar = 0.01, 50.0  # kept in sync with the model below
+
+        self._make_program()
+        self._make_robot_fbo()
+        self._make_camera_textures()
+        # A VAO is required by the core profile even for attribute-less draws.
+        self._vao = GL.glGenVertexArrays(1)
+
+    # -- setup ---------------------------------------------------------------
+    def _make_program(self) -> None:
+        self.prog = GL.glCreateProgram()
+        vs = _compile(_VERT, GL.GL_VERTEX_SHADER)
+        fs = _compile(_FRAG, GL.GL_FRAGMENT_SHADER)
+        GL.glAttachShader(self.prog, vs)
+        GL.glAttachShader(self.prog, fs)
+        GL.glLinkProgram(self.prog)
+        if not GL.glGetProgramiv(self.prog, GL.GL_LINK_STATUS):
+            raise RuntimeError(GL.glGetProgramInfoLog(self.prog).decode())
+        GL.glDeleteShader(vs)
+        GL.glDeleteShader(fs)
+        self._uni = {n: GL.glGetUniformLocation(self.prog, n) for n in (
+            "robot_col", "robot_depth", "cam_col", "cam_depth",
+            "out_size", "depth_bias_m", "znear", "zfar",
+            "show_floor", "cam_height", "cam_pitch", "fx_i", "fy_i",
+            "ppx_i", "ppy_i", "cam_res", "floor_tol", "floor_alpha", "floor_tol_rel",
+            "floor_h_tol")}
+        # Floor-overlay parameters, set via configure_floor().
+        self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
+                           ppx=325.6, ppy=239.6, res=(640.0, 480.0), tol=0.15,
+                           alpha=float(os.environ.get("FLOOR_ALPHA", "0.35")),
+                           tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
+                           h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")))
+
+    def _make_robot_fbo(self) -> None:
+        """FBO with sampleable colour+depth textures at 2x, blit target."""
+        sw, sh = self.w * self.scale, self.h * self.scale
+        self.robot_fbo = GL.glGenFramebuffers(1)
+        self.robot_col_tex = GL.glGenTextures(1)
+        self.robot_depth_tex = GL.glGenTextures(1)
+
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.robot_col_tex)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, sw, sh, 0,
+                        GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None)
+        _nearest()
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.robot_depth_tex)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_DEPTH_COMPONENT24, sw, sh, 0,
+                        GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT, None)
+        _nearest()
+
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.robot_fbo)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0,
+                                  GL.GL_TEXTURE_2D, self.robot_col_tex, 0)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT,
+                                  GL.GL_TEXTURE_2D, self.robot_depth_tex, 0)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+    def _make_camera_textures(self) -> None:
+        """Colour (RGB8) and depth (R32F) textures + PBOs for async upload."""
+        self.cam_col_tex = GL.glGenTextures(1)
+        self.cam_depth_tex = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.cam_col_tex)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, self.w, self.h, 0,
+                        GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None)
+        _linear()
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.cam_depth_tex)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R32F, self.w, self.h, 0,
+                        GL.GL_RED, GL.GL_FLOAT, None)
+        _linear()
+        # Double-buffered PBOs so uploads don't stall on the previous frame.
+        self._col_pbos = GL.glGenBuffers(2)
+        self._depth_pbos = GL.glGenBuffers(2)
+        for pbo, nbytes in ((self._col_pbos[0], self.w * self.h * 3),
+                            (self._col_pbos[1], self.w * self.h * 3),
+                            (self._depth_pbos[0], self.w * self.h * 4),
+                            (self._depth_pbos[1], self.w * self.h * 4)):
+            GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, pbo)
+            GL.glBufferData(GL.GL_PIXEL_UNPACK_BUFFER, nbytes, None,
+                            GL.GL_STREAM_DRAW)
+        GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)
+        self._pbo_idx = 0
+
+    # -- per-frame -----------------------------------------------------------
+    def set_depth_bias(self, bias_m: float) -> None:
+        self.depth_bias_m = bias_m
+
+    def configure_floor(self, cam_height, pitch_rad, fx, fy, ppx, ppy,
+                        cam_res, tol=0.15) -> None:
+        """Set the camera geometry used to detect the floor for the red overlay."""
+        self._floor.update(height=cam_height, pitch=pitch_rad, fx=fx, fy=fy,
+                           ppx=ppx, ppy=ppy, res=cam_res, tol=tol)
+
+    def set_show_floor(self, on: bool) -> None:
+        self._floor["show"] = 1 if on else 0
+
+    def capture_robot(self, viewport_full) -> None:
+        """Blit MuJoCo's offscreen buffer into our sampleable robot FBO.
+
+        MuJoCo has just rendered the robot into its offscreen FBO. We copy colour
+        and depth into robot_fbo, whose textures the shader samples. Colour and
+        depth are blitted SEPARATELY: a depth-format mismatch then only affects
+        the depth copy, not the colour, and never aborts the whole operation.
+        """
+        sw, sh = self.w * self.scale, self.h * self.scale
+        src = int(self.mjr.offFBO)
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, src)
+        GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, self.robot_fbo)
+        # Colour first (this must succeed).
+        GL.glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh,
+                             GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
+        # Depth separately; if the formats differ the driver may reject it, so we
+        # swallow that error rather than crash. Occlusion still works if it lands.
+        try:
+            GL.glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh,
+                                 GL.GL_DEPTH_BUFFER_BIT, GL.GL_NEAREST)
+        except GL.error.GLError:
+            pass
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+        GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, 0)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+    def upload_camera(self, colour_bgr: np.ndarray, depth_m: np.ndarray) -> None:
+        """Upload the D455 colour (BGR uint8) and depth (float metres).
+
+        Uses glTexSubImage2D straight from the numpy arrays. The textures are
+        pre-allocated once, so no per-frame GPU allocation happens here.
+        """
+        colour_bgr = np.ascontiguousarray(colour_bgr)
+        # A BGR upload is silently ignored by this driver: the call returns no
+        # error and the texture keeps its previous contents. Upload the same
+        # bytes as GL_RGB (a plain memcpy for the driver) and swap the channels
+        # in the fragment shader instead. Explicit unit + tight alignment so
+        # nothing inherited from MuJoCo's renderer can shift the rows.
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 0)
+        GL.glPixelStorei(GL.GL_UNPACK_SKIP_ROWS, 0)
+        GL.glPixelStorei(GL.GL_UNPACK_SKIP_PIXELS, 0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.cam_col_tex)
+        GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, self.w, self.h,
+                           GL.GL_RGB, GL.GL_UNSIGNED_BYTE, colour_bgr)
+        depth_f = np.ascontiguousarray(depth_m, dtype=np.float32)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.cam_depth_tex)
+        GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, self.w, self.h,
+                           GL.GL_RED, GL.GL_FLOAT, depth_f)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
+    def present_image(self, bgr: np.ndarray, win_w: int, win_h: int) -> None:
+        """Blit a plain BGR image to the window (used in calibration mode).
+
+        Uploads the numpy frame to the camera colour texture and draws it with a
+        pass-through of the composition shader (robot texture empty), so the same
+        window shows CPU-composed calibration overlays.
+        """
+        # Upload as the camera colour, zero depth so nothing is occluded, and an
+        # empty robot (depth cleared to 1 = not drawn) -> shader shows camera only.
+        h, w = bgr.shape[:2]
+        if (w, h) != (self.w, self.h):
+            import cv2
+            bgr = cv2.resize(bgr, (self.w, self.h))
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.cam_col_tex)
+        GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, self.w, self.h,
+                           GL.GL_RGB, GL.GL_UNSIGNED_BYTE,
+                           np.ascontiguousarray(bgr))
+        # Clear the robot depth texture to "far" so the shader draws camera only.
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.robot_fbo)
+        GL.glClearDepth(1.0)
+        GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        # Zero camera depth so cam_z<=0 -> but that shows robot; instead we rely on
+        # robot depth==1 (not drawn) so acc gets cam_rgb. Present as usual.
+        self.present(win_w, win_h)
+
+    def _ensure_readback_fbo(self) -> None:
+        """Create the offscreen FBO the composite is rendered into for readback."""
+        if getattr(self, "_read_fbo", None) is not None:
+            return
+        self._read_fbo = GL.glGenFramebuffers(1)
+        self._read_tex = GL.glGenTextures(1)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._read_tex)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, self.w, self.h, 0,
+                        GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None)
+        _nearest()
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._read_fbo)
+        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0,
+                                  GL.GL_TEXTURE_2D, self._read_tex, 0)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+
+    def composite_to_array(self) -> np.ndarray:
+        """Run the composition shader into an offscreen FBO and return the result.
+
+        This is the proven-working path (matches the standalone unit test): render
+        the composite to an FBO, read it back as a BGR uint8 image. The caller then
+        shows it however it likes (e.g. cv2.imshow), sidestepping any on-screen GL
+        context quirks. One readback per frame, negligible at this resolution.
+        """
+        import numpy as _np
+        self._ensure_readback_fbo()
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._read_fbo)
+        GL.glViewport(0, 0, self.w, self.h)
+        GL.glClearColor(0.0, 0.0, 0.0, 1.0)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        GL.glDisable(GL.GL_CULL_FACE)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glDisable(GL.GL_BLEND)
+        GL.glDisable(GL.GL_SCISSOR_TEST)
+        GL.glUseProgram(self.prog)
+        GL.glBindVertexArray(self._vao)
+        for unit, tex, name in ((0, self.robot_col_tex, "robot_col"),
+                                (1, self.robot_depth_tex, "robot_depth"),
+                                (2, self.cam_col_tex, "cam_col"),
+                                (3, self.cam_depth_tex, "cam_depth")):
+            GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glUniform1i(self._uni[name], unit)
+        GL.glUniform2f(self._uni["out_size"], float(self.w), float(self.h))
+        GL.glUniform1f(self._uni["depth_bias_m"], self.depth_bias_m)
+        GL.glUniform1f(self._uni["znear"], self.znear)
+        GL.glUniform1f(self._uni["zfar"], self.zfar)
+        f = self._floor
+        GL.glUniform1i(self._uni["show_floor"], int(f["show"]))
+        GL.glUniform1f(self._uni["cam_height"], float(f["height"]))
+        GL.glUniform1f(self._uni["cam_pitch"], float(f["pitch"]))
+        GL.glUniform1f(self._uni["fx_i"], float(f["fx"]))
+        GL.glUniform1f(self._uni["fy_i"], float(f["fy"]))
+        GL.glUniform1f(self._uni["ppx_i"], float(f["ppx"]))
+        GL.glUniform1f(self._uni["ppy_i"], float(f["ppy"]))
+        GL.glUniform2f(self._uni["cam_res"], float(f["res"][0]), float(f["res"][1]))
+        GL.glUniform1f(self._uni["floor_tol"], float(f["tol"]))
+        GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
+        GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
+        GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+        # Read back the composited RGB and return BGR (for cv2), flipped to image
+        # orientation (GL origin is bottom-left).
+        buf = GL.glReadPixels(0, 0, self.w, self.h, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+        img = _np.frombuffer(buf, _np.uint8).reshape(self.h, self.w, 3)
+        img = _np.flipud(img)[:, :, ::-1]  # RGB->BGR, flip vertically
+        _restore_gl_state()
+        return _np.ascontiguousarray(img)
+
+    def present(self, win_w: int, win_h: int) -> None:
+        """Run the composition shader to the default framebuffer (the window)."""
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+        GL.glViewport(0, 0, win_w, win_h)
+        # Clear to a distinct colour first. If the window shows THIS colour, the
+        # shader draw below isn't covering the screen (shader/geometry issue). If
+        # the window shows the composited image, all good. Set EDGEBOT_GL_DEBUG=1
+        # to use a bright debug clear; otherwise clear to black.
+        if os.environ.get("EDGEBOT_GL_DEBUG") == "1":
+            GL.glClearColor(0.6, 0.0, 0.0, 1.0)
+        else:
+            GL.glClearColor(0.0, 0.0, 0.0, 1.0)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        # MuJoCo's renderer leaves face culling and depth test enabled. Our
+        # full-screen triangle must not be culled or depth-tested away, so reset
+        # that state explicitly before drawing it.
+        GL.glDisable(GL.GL_CULL_FACE)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glDisable(GL.GL_BLEND)
+        GL.glDisable(GL.GL_SCISSOR_TEST)
+        GL.glUseProgram(self.prog)
+        GL.glBindVertexArray(self._vao)
+        # Bind the four textures to units 0..3.
+        for unit, tex, name in ((0, self.robot_col_tex, "robot_col"),
+                                (1, self.robot_depth_tex, "robot_depth"),
+                                (2, self.cam_col_tex, "cam_col"),
+                                (3, self.cam_depth_tex, "cam_depth")):
+            GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glUniform1i(self._uni[name], unit)
+        GL.glUniform2f(self._uni["out_size"], float(self.w), float(self.h))
+        GL.glUniform1f(self._uni["depth_bias_m"], self.depth_bias_m)
+        GL.glUniform1f(self._uni["znear"], self.znear)
+        GL.glUniform1f(self._uni["zfar"], self.zfar)
+        f = self._floor
+        GL.glUniform1i(self._uni["show_floor"], int(f["show"]))
+        GL.glUniform1f(self._uni["cam_height"], float(f["height"]))
+        GL.glUniform1f(self._uni["cam_pitch"], float(f["pitch"]))
+        GL.glUniform1f(self._uni["fx_i"], float(f["fx"]))
+        GL.glUniform1f(self._uni["fy_i"], float(f["fy"]))
+        GL.glUniform1f(self._uni["ppx_i"], float(f["ppx"]))
+        GL.glUniform1f(self._uni["ppy_i"], float(f["ppy"]))
+        GL.glUniform2f(self._uni["cam_res"], float(f["res"][0]), float(f["res"][1]))
+        GL.glUniform1f(self._uni["floor_tol"], float(f["tol"]))
+        GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
+        GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
+        GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+        _restore_gl_state()
+
+
+def _nearest() -> None:
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+
+
+def _linear() -> None:
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+
+
+# ---------------------------------------------------------------------------
+# Floor detection from depth.
+# ---------------------------------------------------------------------------
+class FloorDetector:
+    """Builds a floor mask by comparing measured depth to expected floor depth."""
+
+    def __init__(self, cam_height: float, pitch_deg: float,
+                 fx: float, fy: float, ppx: float, ppy: float,
+                 tolerance_m: float = 0.15, tolerance_rel: float = 0.0) -> None:
+        self.H = cam_height
+        self.pitch = np.radians(pitch_deg)
+        self.fx, self.fy, self.ppx, self.ppy = fx, fy, ppx, ppy
+        self.tol = tolerance_m
+        # Stereo depth error grows roughly with the square of the distance, so a
+        # single absolute tolerance is far too tight far away. The effective
+        # tolerance is max(tolerance_m, tolerance_rel * expected_depth).
+        self.tol_rel = tolerance_rel
+        self._cache_shape = None
+        self._expected = None  # cached expected-floor-depth map for the depth size
+
+    def _expected_floor(self, dw: int, dh: int) -> np.ndarray:
+        """Per-pixel perpendicular depth Z if the pixel were on the floor.
+
+        Builds the full 3D ray for each pixel in the camera frame, rotates it to
+        world by the camera tilt, and finds the depth Z at which the ray reaches
+        the ground plane (world height 0). This accounts for the complete pixel
+        angle, both horizontal and vertical offsets from the optical axis.
+        """
+        if self._cache_shape == (dw, dh):
+            return self._expected
+        us = np.arange(dw)
+        vs = np.arange(dh)
+        uu, vv = np.meshgrid(us, vs)
+        # Intrinsics scaled to the depth resolution.
+        fx = self.fx * dw / 640.0
+        fy = self.fy * dh / 480.0
+        ppx = self.ppx * dw / 640.0
+        ppy = self.ppy * dh / 480.0
+        # Ray in the camera optical frame (x right, y down, z optical axis). A
+        # point at sensor-depth Z along this ray is (x*Z, y*Z, Z) in camera frame.
+        x = (uu - ppx) / fx
+        y = (vv - ppy) / fy
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        # Camera axes expressed in the world frame (X right, Y forward, Z up),
+        # camera at height H looking forward tilted down by pitch:
+        #   x_cam = (1, 0, 0)
+        #   z_cam = (0, cos p, -sin p)   (optical axis, forward and down)
+        #   y_cam = z_cam x x_cam        (points down)
+        # World height of a point at depth Z is H + Z * world_dir_z, where
+        # world_dir_z is the vertical component of (x*x_cam + y*y_cam + z*z_cam).
+        # y_cam vertical component = -cos(pitch); z_cam vertical component = -sin(pitch).
+        world_dir_z = x * 0.0 + y * (-cp) + 1.0 * (-sp)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            expected = -self.H / world_dir_z  # depth Z where world height = 0
+        expected[world_dir_z >= 0] = np.inf   # ray not heading down: no floor
+        expected[expected <= 0] = np.inf
+        self._cache_shape = (dw, dh)
+        self._expected = expected
+        return expected
+
+    def _rays(self, dw: int, dh: int):
+        """Per-pixel camera-frame ray components (x right, y down, z forward)."""
+        uu, vv = np.meshgrid(np.arange(dw), np.arange(dh))
+        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
+        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        return (uu - ppx) / fx, (vv - ppy) / fy
+
+    def height_map(self, depth_m: np.ndarray) -> np.ndarray:
+        """Height above the ground plane, in metres, for every pixel.
+
+        The 3D point behind a pixel is Z*(x, y, 1) in the camera frame, where Z
+        is the perpendicular depth RealSense reports. Only the vertical
+        component of the ray matters for height: with no camera roll the
+        horizontal angle x is parallel to the floor and contributes nothing.
+
+        Working in height rather than in depth is what makes a single uniform
+        threshold correct at every distance. A height tolerance maps to a depth
+        tolerance of tol / |world_dir_z|, which widens with distance on its own,
+        exactly as stereo error does, with no tuning parameter.
+        """
+        dh, dw = depth_m.shape
+        _, y = self._rays(dw, dh)
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        world_dir_z = y * (-cp) - sp
+        return self.H + depth_m * world_dir_z
+
+    def height_mask(self, depth_m: np.ndarray, tol_h: float = 0.08) -> np.ndarray:
+        """Floor mask from the height criterion."""
+        return (depth_m > 0) & (np.abs(self.height_map(depth_m)) < tol_h)
+
+    def refine(self, mask: np.ndarray, depth_m: np.ndarray,
+               close_px: int = 9, min_area_frac: float = 0.02) -> np.ndarray:
+        """Close the holes a depth sensor leaves in an otherwise flat floor.
+
+        Even with the SDK filters, specular highlights on polished tiles return
+        no depth at all, so the raw mask is a floor riddled with gaps. Those gaps
+        are not obstacles: an obstacle produces a *shorter* measured depth, not a
+        missing one, and it is compact and connected. A hole with no depth,
+        below the horizon, entirely surrounded by floor, is floor.
+
+        So: morphological closing to bridge the speckle, then fill the enclosed
+        holes, then keep only components large enough to be a floor rather than
+        noise. Pixels that carry a valid depth inconsistent with the ground plane
+        are never added back, which is what keeps obstacles out.
+        """
+        import cv2
+        m = mask.astype(np.uint8)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+
+        # Fill enclosed holes: flood from the border on the background, whatever
+        # the flood cannot reach is an interior hole.
+        h, w = m.shape
+        ff = m.copy()
+        cv2.floodFill(ff, np.zeros((h + 2, w + 2), np.uint8), (0, 0), 1)
+        m = (m | (1 - ff)).astype(np.uint8)
+
+        # Never claim a pixel that has a valid depth contradicting the plane:
+        # that is an object standing on the floor, and it must stay out.
+        contradicts = (depth_m > 0) & (np.abs(self.height_map(depth_m)) >= 0.20)
+        m[contradicts] = 0
+
+        # Drop specks; keep components covering at least min_area_frac.
+        num, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+        out = np.zeros_like(m, dtype=bool)
+        for i in range(1, num):
+            if stats[i, cv2.CC_STAT_AREA] >= min_area_frac * h * w:
+                out |= lab == i
+        return out
+
+    def fit_plane(self, depth_m: np.ndarray, inlier_m: float = 0.05,
+                  iters: int = 80, seed: int = 0):
+        """Measure the real ground plane instead of trusting the calibration.
+
+        RANSAC on the reconstructed point cloud, restricted to rows below the
+        horizon. Returns (height_m, pitch_deg, inlier_fraction) or None when
+        there are too few valid points, which is itself the answer: the sensor
+        is not seeing the floor at all.
+        """
+        dh, dw = depth_m.shape
+        x, y = self._rays(dw, dh)
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        below_horizon = (y * (-cp) - sp) < -1e-3
+        sel = (depth_m > 0) & below_horizon
+        if int(sel.sum()) < 500:
+            return None
+        Z = depth_m[sel]
+        pts = np.stack([x[sel] * Z, y[sel] * Z, Z], axis=1)
+        if len(pts) > 40000:                      # keep RANSAC cheap
+            pts = pts[np.linspace(0, len(pts) - 1, 40000).astype(int)]
+        rng = np.random.default_rng(seed)
+        best = (0, None, 0.0)
+        for _ in range(iters):
+            i = rng.choice(len(pts), 3, replace=False)
+            n = np.cross(pts[i[1]] - pts[i[0]], pts[i[2]] - pts[i[0]])
+            norm = np.linalg.norm(n)
+            if norm < 1e-9:
+                continue
+            n = n / norm
+            d = float(n @ pts[i[0]])
+            hits = int((np.abs(pts @ n - d) < inlier_m).sum())
+            if hits > best[0]:
+                best = (hits, n, d)
+        hits, n, d = best
+        if n is None:
+            return None
+        # Refine on the inliers, then orient the normal upwards. World up in the
+        # camera frame is (0, -cos p, -sin p), so its y component is negative.
+        inl = pts[np.abs(pts @ n - d) < inlier_m]
+        c = inl.mean(axis=0)
+        n = np.linalg.svd(inl - c)[2][2]
+        d = float(n @ c)
+        if n[1] > 0:
+            n, d = -n, -d
+        return abs(d), float(np.degrees(np.arctan2(-n[2], -n[1]))), hits / len(pts)
+
+    def mask(self, depth_m: np.ndarray) -> np.ndarray:
+        """Boolean floor mask for a depth image already converted to metres."""
+        dh, dw = depth_m.shape
+        expected = self._expected_floor(dw, dh)
+        valid = depth_m > 0
+        # Floor where measured depth is close to the expected floor depth.
+        diff = np.abs(depth_m - expected)
+        with np.errstate(invalid="ignore"):
+            tol = np.maximum(self.tol, self.tol_rel * expected)
+        return valid & np.isfinite(expected) & (diff < tol)
+
+    def report(self, depth_m: np.ndarray, bands: int = 4) -> list[str]:
+        """Per-band comparison of measured against expected floor depth.
+
+        Splits the image into horizontal bands from top to bottom and reports,
+        for each, how much depth is valid and how far it sits from the expected
+        ground plane. Mostly-invalid bands mean the sensor sees nothing (glossy
+        floors are the usual cause); a consistent non-zero median difference
+        across bands means the camera height or pitch is wrong.
+        """
+        dh, dw = depth_m.shape
+        expected = self._expected_floor(dw, dh)
+        heights = self.height_map(depth_m)
+        out = []
+        edges = np.linspace(0, dh, bands + 1).astype(int)
+        for i in range(bands):
+            a, b = edges[i], edges[i + 1]
+            d, e = depth_m[a:b], expected[a:b]
+            ok = (d > 0) & np.isfinite(e)
+            if not ok.any():
+                out.append(f"rows {a:4d}-{b:4d}: no valid depth")
+                continue
+            dm, em = float(np.median(d[ok])), float(np.median(e[ok]))
+            hh = heights[a:b][d > 0]
+            out.append(
+                f"rows {a:4d}-{b:4d}: valid {100.0 * (d > 0).mean():5.1f}% | "
+                f"measured {dm:5.2f} m | expected {em:5.2f} m | "
+                f"median diff {dm - em:+6.2f} m | median height "
+                f"{float(np.median(hh)):+5.2f} m")
+        return out
+
+    def feet_screen_y(self, ground_dist_m: float, window_h: int) -> float:
+        """Vertical screen position (pixels) where a floor point at the given
+        horizontal ground distance appears, from camera geometry alone.
+
+        This places the robot's feet on the real floor at any distance without
+        reference objects: it inverts the floor geometry to find the image row
+        whose ground point is at ground_dist_m.
+        """
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        # For a floor point at horizontal distance d, its perpendicular depth is
+        # Z = sqrt(d^2 + H^2) * cos(angle between ray and optical axis). Rather
+        # than invert analytically, scan image rows for the matching distance.
+        vs = np.linspace(0.0, 1.0, 400)
+        best_v, best_err = 1.0, 1e9
+        for vf in vs:
+            v = vf * 480.0
+            y = (v - self.ppy) / self.fy
+            world_dir_z = y * (-cp) + 1.0 * (-sp)
+            if world_dir_z >= 0:
+                continue
+            Z = -self.H / world_dir_z              # perpendicular depth to floor
+            # Horizontal ground distance for that floor point.
+            x0 = 0.0                                # centre column
+            d = np.sqrt(max(0.0, (Z * Z) * (1 + x0 * x0 + y * y) - self.H * self.H))
+            err = abs(d - ground_dist_m)
+            if err < best_err:
+                best_err, best_v = err, vf
+        return best_v * window_h
+
+
 
 ROBOT = os.environ.get("ROBOT", "g1")
 SCENES = {
@@ -45,6 +795,20 @@ SCENES = {
 WINDOW_W = int(os.environ.get("WINDOW_W", "1280"))
 WINDOW_H = int(os.environ.get("WINDOW_H", "720"))
 WINDOW_NAME = "Edge AI Robotics"
+# Bump this whenever the file changes. If the log shows an older tag than the one
+# you just extracted, the container is running a stale image.
+# Frames at which the full GPU diagnostic block runs. Frame 0 happens before the
+# first cv2.imshow/waitKey, so comparing frame 0 with frame 1 isolates whatever
+# the HighGUI window does to the GL state between iterations.
+DIAG_FRAMES = {30}
+# Run headless: no cv2 window at all. The unit test passes without one, so this
+# tells us directly whether cv2 HighGUI is what breaks the GPU writes.
+# Display path. "glfw" presents the composite straight to the GL window that
+# already owns the context, which is what the GPU composition path is for:
+# no readback, no second toolkit, one context. "cv2" is the previous HighGUI
+# path, kept for comparison. "none" is headless.
+DISPLAY_MODE = "glfw"   # present in the render context, no readback
+NO_CV2 = DISPLAY_MODE != "cv2"
 
 # COCO class id -> readable label, for the classes the detector reports.
 COCO_NAMES = {
@@ -68,6 +832,28 @@ WAITKEY_MS = int(os.environ.get("WAITKEY_MS", "1"))
 PAIR_TOLERANCE_S = float(os.environ.get("PAIR_TOLERANCE_S", "0.2"))
 
 
+def deproject_direct(u_px: int, v_px: int, z_m: float,
+                     fx: float, fy: float, ppx: float, ppy: float) -> float:
+    """Convert a depth pixel + its Z value to the true radial (direct) distance.
+
+    The depth sensor reports Z (perpendicular to the optical axis). Deprojecting
+    with the intrinsics recovers the real 3D point, whose norm is the direct
+    line-of-sight distance from the lens. Ignoring this underestimates distance
+    for points far from the image centre (e.g. objects low in the frame).
+    """
+    x = (u_px - ppx) * z_m / fx
+    y = (v_px - ppy) * z_m / fy
+    return float((x * x + y * y + z_m * z_m) ** 0.5)
+
+
+def _glfw_should_quit(window) -> bool:
+    """True if the window was closed or q/Esc pressed."""
+    if glfw.window_should_close(window):
+        return True
+    return (glfw.get_key(window, glfw.KEY_Q) == glfw.PRESS or
+            glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS)
+
+
 def load_calibration() -> dict | None:
     path = os.environ.get("CAMERA_CALIBRATION", "/config/camera_calibration.json")
     if not os.path.exists(path):
@@ -83,8 +869,38 @@ def load_calibration() -> dict | None:
         return None
 
 
+def _log_floor_stats(detector, depth_metres, on: bool) -> None:
+    """Report what fraction of the frame the floor geometry accepts."""
+    log.info("floor overlay %s", "on" if on else "off")
+    if not on or depth_metres is None:
+        return
+    try:
+        mask = detector.height_mask(
+            depth_metres, tol_h=float(os.environ.get("FLOOR_H_TOL", "0.08")))
+        valid = int((depth_metres > 0).sum())
+        log.info("floor mask: %d px (%.1f%% of frame, %.1f%% of valid depth)",
+                 int(mask.sum()), 100.0 * mask.mean(),
+                 100.0 * mask.sum() / valid if valid else 0.0)
+        for line in detector.report(depth_metres):
+            log.info("  %s", line)
+        fit = detector.fit_plane(depth_metres)
+        if fit is None:
+            log.warning("  plane fit: not enough floor points below the horizon")
+        else:
+            h, pdeg, frac = fit
+            log.info("  plane fit (measured): height=%.2f m pitch=%.1f deg "
+                     "(%.0f%% inliers) | calibration says height=%.2f m pitch=%.1f deg",
+                     h, pdeg, 100.0 * frac, cam_height, _cam_pitch_deg)
+            if abs(h - cam_height) > 0.10 or abs(pdeg - _cam_pitch_deg) > 2.0:
+                log.warning("  calibration disagrees with the measured plane; "
+                            "try CAM_HEIGHT=%.2f CAM_PITCH=%.1f", h, pdeg)
+    except Exception as exc:
+        log.warning("floor mask failed: %s", exc)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
 
     if not os.environ.get("DISPLAY"):
         raise SystemExit("compositor: no DISPLAY set; cannot open a window.")
@@ -94,14 +910,27 @@ def main() -> None:
     model = mujoco.MjModel.from_xml_path(scene)
     data = mujoco.MjData(model)
 
+    # Hide the decor (sol, murs: tout geom du worldbody) by moving it to geom
+    # group 4, which MjvOption hides by default ([1,1,1,0,0,0]). We must NOT use
+    # group 2 for this: mujoco_menagerie puts every visual mesh of the G1 in
+    # group 2 (class "visual"), so cutting group 2 deletes the whole robot.
+    # A group is also cleaner than rgba alpha=0: a hidden geom writes neither
+    # colour nor depth, so it cannot pollute the shader's occlusion test.
+    hidden = 0
     for gid in range(model.ngeom):
         if model.geom_bodyid[gid] == 0:
-            model.geom_rgba[gid, 3] = 0.0
+            model.geom_group[gid] = 4
+            hidden += 1
+    log.info("decor hidden: %d worldbody geoms moved to group 4", hidden)
 
     model.vis.global_.offwidth = WINDOW_W
     model.vis.global_.offheight = WINDOW_H
 
     calib = load_calibration()
+
+    # Robot feet are placed on the real floor by pure camera geometry (height +
+    # pitch + intrinsics), via the floor detector's feet_screen_y(). No reference
+    # objects needed; the red floor mask in calibration validates the geometry.
     if calib and calib.get("vfov_deg"):
         model.vis.global_.fovy = float(calib["vfov_deg"])
     cam_height = float(calib["camera_height_m"]) if calib and calib.get("camera_height_m") else float(os.environ.get("CAM_HEIGHT", "1.2"))
@@ -110,45 +939,141 @@ def main() -> None:
     # view past vertical and the robot appears upside down.
     _raw_pitch = abs(float(calib["pitch_deg"])) if calib and calib.get("pitch_deg") else float(os.environ.get("CAM_PITCH", "12"))
     cam_pitch = float(np.clip(_raw_pitch, 0.0, 45.0))
+    # Vertical FOV for the mouse-to-ground projection (from calibration).
+    calib_vfov = float(calib["vfov_deg"]) if calib and calib.get("vfov_deg") else 63.7
+    # Camera intrinsics for deprojecting depth pixels to true 3D points. The depth
+    # sensor reports Z (perpendicular to the optical axis), not radial distance;
+    # deprojection with fx/fy/ppx/ppy recovers the real (X,Y,Z), hence true
+    # distances. Falls back to FOV-derived values if intrinsics are absent.
+    _intr = (calib or {}).get("intrinsics", {})
+    fx = float(_intr.get("fx", 386.0))
+    fy = float(_intr.get("fy", 386.0))
+    ppx = float(_intr.get("ppx", 320.0))
+    ppy = float(_intr.get("ppy", 240.0))
 
-    renderer = mujoco.Renderer(model, height=WINDOW_H, width=WINDOW_W)
-    seg_renderer = mujoco.Renderer(model, height=WINDOW_H, width=WINDOW_W)
-    seg_renderer.enable_segmentation_rendering()
+    # Floor detector: builds a mask of navigable floor by comparing measured depth
+    # to the expected floor depth. Shown as a red overlay during ROI calibration.
+    _cam_pitch_deg = abs(float(calib["pitch_deg"])) if calib and calib.get("pitch_deg") else 7.0
+    # Floor detection for the 'f' overlay is done in the GPU shader (see
+    # gpu.configure_floor below), using the same camera geometry.
+
+    # --- GLFW window + MuJoCo GL context.
+    SCALE = int(os.environ.get("RENDER_SCALE", "2"))
+    if not glfw.init():
+        raise RuntimeError("glfw init failed")
+    # Hidden GLFW window: it exists only to provide the GL context MuJoCo renders
+    # into. The composited frame is read back and shown with cv2 (the display path
+    # that works reliably here), so the GLFW window itself is never shown.
+    # WINDOW_VISIBLE=1 maps the GLFW window. Some drivers (here: Mesa forced into
+    # probing an unsupported PTL device) refuse to make a context current on an
+    # unmapped X11 drawable, which silently turns every GL call into a no-op.
+    show_win = True
+    glfw.window_hint(glfw.VISIBLE, glfw.TRUE if show_win else glfw.FALSE)
+    window = glfw.create_window(WINDOW_W, WINDOW_H, WINDOW_NAME, None, None)
+    if not window:
+        glfw.terminate()
+        raise RuntimeError("glfw window creation failed")
+    glfw.make_context_current(window)
+    log.info("compositor GL context ready (render scale %dx), display via cv2 on DISPLAY=%s, "
+             "window visible=%s", SCALE, os.environ.get("DISPLAY"), show_win)
+    log.info("GL_VENDOR=%s | GL_RENDERER=%s | GL_VERSION=%s",
+             GL.glGetString(GL.GL_VENDOR).decode(),
+             GL.glGetString(GL.GL_RENDERER).decode(),
+             GL.glGetString(GL.GL_VERSION).decode())
+
+    # Offscreen buffer must be sized (2x, no MSAA) BEFORE the MjrContext is made.
+    configure_model_for_offscreen(model, SCALE, WINDOW_W, WINDOW_H)
+    mjr = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
+    # MuJoCo allocates the offscreen buffer at mjr_makeContext time and clamps it
+    # to what the driver allows. If it came back smaller than the 2x rect we
+    # render into, mjr_render writes into a buffer smaller than the region we
+    # read back, and the readback is black. Detect that and drop to scale 1.
+    log.info("MjrContext offscreen: %dx%d (requested %dx%d), offFBO=%d, offSamples=%d",
+             int(mjr.offWidth), int(mjr.offHeight), WINDOW_W * SCALE, WINDOW_H * SCALE,
+             int(mjr.offFBO), int(mjr.offSamples))
+    if int(mjr.offWidth) < WINDOW_W * SCALE or int(mjr.offHeight) < WINDOW_H * SCALE:
+        log.warning("offscreen buffer smaller than the 2x render rect; "
+                    "falling back to render scale 1")
+        SCALE = 1
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, int(mjr.offFBO))
+    log.info("offFBO status=0x%x (0x8cd5 = complete)",
+             int(GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)))
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
 
     cam = mujoco.MjvCamera()
     cam.distance = CAM_DISTANCE
     cam.azimuth = CAM_AZIMUTH
-    # Tilt the virtual camera down by the real pitch, so the virtual ground plane
-    # matches the real floor. This is what plants the robot's feet on the ground.
     cam.elevation = -cam_pitch
+    opt = mujoco.MjvOption()
+    # Groups 3/4/5 are already off in the MjvOption default ([1,1,1,0,0,0]), so
+    # the collision meshes (group 3) and the decor we moved to group 4 above are
+    # hidden, and the robot's visual meshes (group 2) stay visible. Do NOT set
+    # opt.geomgroup[2] = 0 here: that hides the robot, not the floor.
+    opt.geomgroup[3] = 0
+    opt.geomgroup[4] = 0
+    scn = mujoco.MjvScene(model, maxgeom=20000)
+    # Second scene/option kept for CPU segmentation in calibration mode.
+    seg_scn = mujoco.MjvScene(model, maxgeom=20000)
+
+    # GPU compositor: depth-occluded, anti-aliased compositing with no readback.
+    gpu = GLCompositor(mjr, WINDOW_W, WINDOW_H, SCALE,
+                       depth_bias_m=float(os.environ.get("DEPTH_BIAS_M", "0.025")))
+    # Keep the shader's near/far in sync with the model's projection.
+    gpu.znear = float(model.vis.map.znear * model.stat.extent)
+    gpu.zfar = float(model.vis.map.zfar * model.stat.extent)
+
+    # Calibration/floor overlay need CPU pixels. Creating a mujoco.Renderer makes
+    # its own GL context, which can clash with the GLFW context, so we defer it:
+    # built on first use (when 'c' or 'f' is pressed), not at startup.
+    # Configure the floor detector geometry on the GPU for the 'f' overlay.
+    gpu.configure_floor(cam_height, np.radians(_cam_pitch_deg), fx, fy, ppx, ppy,
+                        (640.0, 480.0),
+                        tol=float(os.environ.get("FLOOR_TOL", "0.15")))
+
+
+    # cv2 window for display. The composite is rendered offscreen (fast, proven)
+    # and shown here; the GLFW window stays hidden (context only).
+    if not NO_CV2:
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+    else:
+        log.info("display mode %s: cv2 HighGUI is out of the loop", DISPLAY_MODE)
 
     pub = Publisher()
-    # Camera streams on a low-HWM socket so ZeroMQ drops old frames and we always
-    # get the freshest RGB/depth. Small messages (state, detections) on a normal
-    # socket so none are dropped.
     cam_sub = Subscriber([topics.CAMERA_RGB, topics.CAMERA_DEPTH], rcvhwm=2)
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS])
 
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
-    log.info("compositor window %dx%d on DISPLAY=%s", WINDOW_W, WINDOW_H, os.environ.get("DISPLAY"))
-
-    bg = np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8)
+    bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
     depth_buf = None    # (t, HxW uint16, scale) latest depth
+    depth_metres = None  # latest depth in metres (float32), for the GPU compositor
     detections = []     # latest bbox+conf+label
     det_t = 0.0
-    show_overlay = False  # start hidden; press i to show
-    robot_scale = float(os.environ.get("ROBOT_SCALE", "1.0"))  # +/- resize
-    # Initial camera values, captured for the 'z' reset key.
-    init_distance = cam.distance
-    init_azimuth = cam.azimuth
-    init_pitch = cam_pitch
-    init_height = cam_height
-    init_scale = robot_scale
+    show_floor = False    # 'f' toggles the red floor overlay at any time
+    # Same geometry as the shader's expected_floor_z(), used only to report how
+    # many pixels the overlay should be tinting.
+    floor_det = FloorDetector(cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
+                              tolerance_m=float(os.environ.get("FLOOR_TOL", "0.15")),
+                              tolerance_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")))
+    log.info("floor geometry: height=%.2f m pitch=%.1f deg fx=%.1f fy=%.1f "
+             "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
+             cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
+             2.0 * np.degrees(np.arctan(240.0 / fy)))
+    prev_keys = {"z": False, "f": False}   # edge detection for the glfw key path
     frames = 0
     last_log = time.perf_counter()
 
+    frame_min_dt = 1.0 / float(os.environ.get("MAX_FPS", "60"))
+    last_frame_t = 0.0
+
     while True:
+        # Explicit frame-rate cap, independent of vsync (which may not throttle in
+        # a headless/container GL context). Prevents the loop spinning the GPU/CPU
+        # at hundreds of fps and slowing the whole machine.
+        _dt = time.perf_counter() - last_frame_t
+        if _dt < frame_min_dt:
+            time.sleep(frame_min_dt - _dt)
+        last_frame_t = time.perf_counter()
+
         # Drain camera streams (low HWM already keeps these fresh), then the
         # small-message socket. Latest wins for the frames.
         while (msg := cam_sub.recv(0)) is not None:
@@ -165,6 +1090,12 @@ def main() -> None:
                 d = np.frombuffer(payload["depth"], dtype=np.uint16).reshape(
                     payload["h"], payload["w"])
                 depth_buf = (payload.get("t", time.time()), d, payload.get("scale", 0.001))
+                # Depth in metres, resized to the window, for the GPU compositor's
+                # occlusion test (upscaled nearest to keep hard object edges).
+                dm = d.astype(np.float32) * payload.get("scale", 0.001)
+                if dm.shape != (WINDOW_H, WINDOW_W):
+                    dm = cv2.resize(dm, (WINDOW_W, WINDOW_H), interpolation=cv2.INTER_NEAREST)
+                depth_metres = dm
         while (msg := sub.recv(0)) is not None:
             topic, payload = msg
             if topic == topics.DETECTIONS:
@@ -174,6 +1105,12 @@ def main() -> None:
                 qpos = np.asarray(payload["qpos"], dtype=np.float64)
                 if qpos.shape[0] == model.nq:
                     data.qpos[:] = qpos
+                    # The sim spawns the robot at x=0 (menagerie "stand" keyframe
+                    # is qpos = 0 0 0.79 ...), which is exactly where the virtual
+                    # camera sits (0, 0, cam_height). The robot would be directly
+                    # under the lens and outside the frustum. Push it START_AHEAD
+                    # metres down the optical axis so it is actually framed.
+                    data.qpos[0] += START_AHEAD
                     mujoco.mj_forward(model, data)
 
         # Distance for each detection, from the depth frame paired by timestamp.
@@ -190,7 +1127,12 @@ def main() -> None:
                 py = min(dh - 1, max(0, int(cyn * dh)))
                 raw = int(dmap[py, px])
                 if raw > 0:
-                    rng = raw * scale
+                    # raw*scale is Z (perpendicular); deproject to true distance.
+                    # Scale intrinsics to the depth image resolution.
+                    z = raw * scale
+                    rng = deproject_direct(px, py, z,
+                                           fx * dw / 640.0, fy * dh / 480.0,
+                                           ppx * dw / 640.0, ppy * dh / 480.0)
             bearing = (cxn - 0.5) * HFOV_DEG
             obstacles.append({
                 "cx": cxn, "cy": cyn, "w": d.get("w", 0.0), "height": d.get("h", 0.0),
@@ -222,55 +1164,109 @@ def main() -> None:
         cam_pos = cam.lookat - cam.distance * fwd
         robot_dist = float(np.linalg.norm(data.qpos[:3] - cam_pos))
 
-        renderer.update_scene(data, cam)
-        robot = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
-        seg_renderer.update_scene(data, cam)
-        mask = seg_renderer.render()[:, :, 0] >= 0
-
-        # Resize the rendered robot by robot_scale, anchored at the feet, so the
-        # robot grows/shrinks in place without moving where it stands or touching
-        # physics. Scaling the image (not the model) keeps it cheap and stable.
-        if abs(robot_scale - 1.0) > 1e-3 and mask.any():
-            ys, xs = np.where(mask)
-            # Anchor at the bottom-centre of the robot (its feet on the floor).
-            ax = int((xs.min() + xs.max()) / 2)
-            ay = int(ys.max())
-            M = np.float32([[robot_scale, 0, ax * (1 - robot_scale)],
-                            [0, robot_scale, ay * (1 - robot_scale)]])
-            robot = cv2.warpAffine(robot, M, (WINDOW_W, WINDOW_H))
-            mask = cv2.warpAffine(mask.astype(np.uint8), M, (WINDOW_W, WINDOW_H)) > 0
-
-        out = np.where(mask[:, :, None], robot, bg)
-
-        # Overlay (boxes, labels, distances, robot readout) is toggled with 'i'.
-        if show_overlay:
-            for o in obstacles:
-                cxn, cyn = o["cx"], o["cy"]
-                wn = o["w"] if o["w"] else o["height"] * 0.5  # real width from detection
-                hn = o["height"]
-                x1 = int((cxn - wn / 2) * WINDOW_W)
-                y1 = int((cyn - hn / 2) * WINDOW_H)
-                x2 = int((cxn + wn / 2) * WINDOW_W)
-                y2 = int((cyn + hn / 2) * WINDOW_H)
-                cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                # Label: class name, confidence, then distance if measured.
-                name = COCO_NAMES.get(o["class_id"], "obj")
-                conf = int(o["score"] * 100)
-                if o["range_m"] is not None:
-                    label = f"{name} {conf}% {o['range_m']:.2f}m"
-                else:
-                    label = f"{name} {conf}%"
-                cv2.putText(out, label, (x1, max(18, y1 - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-            cv2.putText(out, f"robot: {robot_dist:.2f}m", (12, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-
-        cv2.imshow(WINDOW_NAME, out)
+        # Render the robot into MuJoCo's offscreen buffer (only the robot; the
+        # ground plane is hidden via geomgroup[2]=0), then composite it over the
+        # camera in the shader (depth occlusion + anti-aliasing) and present to
+        # the GLFW window. Pressing 'f' tints detected floor pixels red.
+        mujoco.mjv_updateScene(model, data, opt, None, cam,
+                               mujoco.mjtCatBit.mjCAT_ALL, scn)
+        sw, sh = WINDOW_W * SCALE, WINDOW_H * SCALE
+        # Diagnostic mode: CAMERA_ONLY=1 shows the raw camera (bg) directly,
+        # bypassing the robot render and the shader, to check the camera path in
+        # isolation inside the real compositor.
+        if os.environ.get("CAMERA_ONLY") == "1":
+            if bg is not None:
+                if frames in (10, 30):
+                    log.info("CAMERA_ONLY: bg shape=%s mean=%.1f", bg.shape, float(bg.mean()))
+                    cv2.imwrite(f"/data/camera_only_{frames}.png", bg)
+                if DISPLAY_MODE == "cv2":
+                    cv2.imshow(WINDOW_NAME, bg)
+            frames += 1
+            if DISPLAY_MODE == "cv2":
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), 27):
+                    break
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            elif frames > 65:
+                break
+            continue
+        try:
+            # cv2.imshow/waitKey pump a GTK main loop between frames, which can
+            # leave another GL context current on this thread. Re-assert ours
+            # before touching the GPU: cheap, and a no-op when nothing stole it.
+            glfw.make_context_current(window)
+            mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, mjr)
+            mujoco.mjr_render(mujoco.MjrRect(0, 0, sw, sh), scn, mjr)
+            gpu.capture_robot(None)
+            gpu.upload_camera(
+                bg if bg is not None else np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8),
+                depth_metres if depth_metres is not None
+                else np.zeros((WINDOW_H, WINDOW_W), np.float32))
+            gpu.set_show_floor(show_floor)
+            out = gpu.composite_to_array()   # offscreen render + readback (fast)
+        except Exception as exc:
+            log.error("GPU compositing failed: %s", exc, exc_info=True)
+            raise
+        # Diagnostic: save a few composited frames to disk so we can confirm the
+        # composition is correct independently of on-screen display. Written to
+        # /data (mounted), viewable from the host.
+        if frames in DIAG_FRAMES:
+            try:
+                outpath = f"/data/composite_frame_{frames}.png"
+                cv2.imwrite(outpath, out)
+                bgmean = float(bg.mean()) if bg is not None else -1
+                # Read the robot-only offscreen render and the camera texture back,
+                # exactly like the unit test, to see the real inputs in the loop.
+                from OpenGL import GL as _GL
+                import numpy as _np
+                sw2, sh2 = WINDOW_W * SCALE, WINDOW_H * SCALE
+                _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, int(mjr.offFBO))
+                rbuf = _GL.glReadPixels(0, 0, sw2, sh2, _GL.GL_RGB, _GL.GL_UNSIGNED_BYTE)
+                rimg = _np.frombuffer(rbuf, _np.uint8).reshape(sh2, sw2, 3)
+                rnz = int((rimg.sum(axis=2) > 10).sum())
+                _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, 0)
+                cv2.imwrite(f"/data/comp_robot_{frames}.png", _np.flipud(rimg)[:, :, ::-1])
+                # Read the camera colour TEXTURE back from the GPU. If the robot
+                # render is empty the shader must output cam_rgb, so a black
+                # composite with a non-black bg means either this texture is
+                # black (upload failed) or the draw never landed.
+                _GL.glActiveTexture(_GL.GL_TEXTURE0)
+                _GL.glBindTexture(_GL.GL_TEXTURE_2D, gpu.cam_col_tex)
+                tb = _GL.glGetTexImage(_GL.GL_TEXTURE_2D, 0, _GL.GL_RGB,
+                                       _GL.GL_UNSIGNED_BYTE)
+                timg = _np.frombuffer(tb, _np.uint8).reshape(WINDOW_H, WINDOW_W, 3)
+                log.info("frame %d: composite mean=%.1f, bg mean=%.1f, robot px=%d (maxb %d), "
+                         "cam_col tex mean=%.1f (max %d), depth=%s",
+                         frames, float(out.mean()), bgmean, rnz, int(rimg.max()),
+                         float(timg.mean()), int(timg.max()),
+                         depth_metres is not None)
+                # Framing check: is the robot actually inside the frustum?
+                log.info("frame %d: scn.ngeom=%d robot xyz=(%.2f %.2f %.2f) "
+                         "cam lookat=(%.2f %.2f %.2f) dist=%.2f az=%.1f el=%.1f fovy=%.1f",
+                         frames, int(scn.ngeom),
+                         float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2]),
+                         float(cam.lookat[0]), float(cam.lookat[1]), float(cam.lookat[2]),
+                         float(cam.distance), float(cam.azimuth), float(cam.elevation),
+                         float(model.vis.global_.fovy))
+                if bg is not None:
+                    cv2.imwrite(f"/data/comp_rawcam_{frames}.png", bg)
+            except Exception as exc:
+                log.warning("could not save diagnostic frame: %s", exc)
+        if DISPLAY_MODE == "glfw":
+            # Present in the same context that just rendered: bind the default
+            # framebuffer, run the composition shader again straight to the
+            # window, swap. No CPU copy, no second GUI toolkit.
+            _fbw, _fbh = glfw.get_framebuffer_size(window)
+            gpu.present(_fbw, _fbh)
+            glfw.swap_buffers(window)
+            glfw.poll_events()
+        elif DISPLAY_MODE == "cv2":
+            cv2.imshow(WINDOW_NAME, out)
 
         frames += 1
         now = time.perf_counter()
-        if now - last_log >= 5.0:
+        if now - last_log >= 30.0:
             fps = frames / (now - last_log)
             age = time.time() - bg_t if bg_t else -1
             log.info("composited %.1f fps, bg age %.2fs, depth paired=%s",
@@ -278,80 +1274,40 @@ def main() -> None:
             frames = 0
             last_log = now
 
-        key = cv2.waitKey(WAITKEY_MS) & 0xFF
-        if key in (ord("q"), 27):
-            break
-        if key == ord("i"):
-            show_overlay = not show_overlay
-            log.info("overlay %s", "on" if show_overlay else "off")
-        # z resets all camera adjustments to their initial values (recovers from
-        # a bad tweak, e.g. an upside-down view).
-        elif key == ord("z"):
-            cam.distance = init_distance
-            cam.azimuth = init_azimuth
-            cam_pitch = init_pitch
-            cam.elevation = -cam_pitch
-            cam_height = init_height
-            robot_scale = init_scale
-            # Also send the robot back to its start pose (the sim handles CMD_RESET).
-            pub.send(topics.CMD_RESET, {"stamp": time.time()})
-            log.info("reset: camera to initial + robot to start pose")
-        # Live camera-pose tuning for placing the robot. Arrow-like keys:
-        #   a/d  azimuth (rotate view around robot)
-        #   w/s  distance (closer / farther)
-        #   r/f  elevation (tilt up / down)
-        elif key == ord("a"):
-            cam.azimuth -= 5
-            log.info("azimuth %.0f", cam.azimuth)
-        elif key == ord("d"):
-            cam.azimuth += 5
-            log.info("azimuth %.0f", cam.azimuth)
-        elif key == ord("w"):
-            cam.distance = max(0.3, cam.distance - 0.1)
-            log.info("distance %.2f", cam.distance)
-        elif key == ord("s"):
-            cam.distance += 0.1
-            log.info("distance %.2f", cam.distance)
-        elif key == ord("k"):
-            cam_pitch = max(0.0, cam_pitch - 2)
-            cam.elevation = -cam_pitch
-            log.info("cam_pitch %.0f (less down)", cam_pitch)
-        elif key == ord("j"):
-            cam_pitch = min(45.0, cam_pitch + 2)
-            cam.elevation = -cam_pitch
-            log.info("cam_pitch %.0f (more down)", cam_pitch)
-        # t/g raise/lower the virtual camera height, to match the real camera or
-        # fine-tune where the robot's feet meet the floor.
-        elif key == ord("t"):
-            cam_height += 0.05
-            log.info("cam_height %.2f", cam_height)
-        elif key == ord("g"):
-            cam_height = max(0.1, cam_height - 0.05)
-            log.info("cam_height %.2f", cam_height)
-        # +/- resize the robot (bigger / smaller), anchored at its feet.
-        elif key in (ord("+"), ord("=")):
-            robot_scale = min(3.0, robot_scale + 0.1)
-            log.info("robot_scale %.2f", robot_scale)
-        elif key in (ord("-"), ord("_")):
-            robot_scale = max(0.3, robot_scale - 0.1)
-            log.info("robot_scale %.2f", robot_scale)
-        # l / r turn the ROBOT itself left / right by 5 degrees (operator control).
-        elif key == ord("l"):
-            pub.send(topics.CMD_TURN, {"wz": np.radians(5)})
-            log.info("robot turn left 5deg")
-        elif key == ord("r"):
-            pub.send(topics.CMD_TURN, {"wz": -np.radians(5)})
-            log.info("robot turn right 5deg")
-        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-            break
+        # Keys: q/Esc quit, z reset robot, f toggle the red floor overlay.
+        if DISPLAY_MODE == "glfw":
+            if _glfw_should_quit(window):
+                break
+            _z = glfw.get_key(window, glfw.KEY_Z) == glfw.PRESS
+            _f = glfw.get_key(window, glfw.KEY_F) == glfw.PRESS
+            if _z and not prev_keys["z"]:
+                pub.send(topics.CMD_RESET, {"stamp": time.time()})
+            if _f and not prev_keys["f"]:
+                show_floor = not show_floor
+                _log_floor_stats(floor_det, depth_metres, show_floor)
+            prev_keys["z"], prev_keys["f"] = _z, _f
+        elif DISPLAY_MODE == "cv2":
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if key == ord("z"):
+                pub.send(topics.CMD_RESET, {"stamp": time.time()})
+            if key == ord("f"):
+                show_floor = not show_floor
+                _log_floor_stats(floor_det, depth_metres, show_floor)
+            if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                break
+        else:
+            if frames > 65:
+                log.info("headless: 65 frames done, stopping")
+                break
 
-    renderer.close()
-    seg_renderer.close()
-    cv2.destroyAllWindows()
+    if DISPLAY_MODE == "cv2":
+        cv2.destroyAllWindows()
+    glfw.terminate()
     pub.close()
     sub.close()
     cam_sub.close()
-
 
 if __name__ == "__main__":
     main()

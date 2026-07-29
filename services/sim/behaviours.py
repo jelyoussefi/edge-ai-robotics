@@ -93,7 +93,7 @@ UNKNOWN_ASSUMED_M = INFLUENCE_M  # unknown depth -> far but noted
 # Patrol: walk a fixed distance, turn about-face, walk back, repeat. Distance is
 # integrated from the commanded forward speed, so no map is needed. The turn is
 # a fixed in-place yaw for a set duration.
-PATROL_LEG_M = float(os.environ.get("PATROL_LEG_M", "2.5"))
+PATROL_LEG_M = float(os.environ.get("PATROL_LEG_M", "4.3"))
 PATROL_TURN_S = float(os.environ.get("PATROL_TURN_S", "2.0"))
 PATROL_TURN_WZ = float(os.environ.get("PATROL_TURN_WZ", "1.6"))
 
@@ -137,6 +137,7 @@ class AvoidBehaviour:
         # de la caméra, -1 revient vers elle.
         self._camera_dist = PATROL_MIN_DISTANCE
         self._direction = 1.0
+        self._turn_reason = ""  # why the last about-face happened (for logging)
 
     def observe(self, payload: dict) -> None:
         self.obstacles = payload.get("obstacles", payload.get("people", []))
@@ -150,12 +151,11 @@ class AvoidBehaviour:
         for obs in self.obstacles:
             rng = obs.get("range_m", _math.inf)
             if rng is None or not _math.isfinite(rng):
-                # No depth: estimate proximity from apparent size. A tall box
-                # fills more of the frame, so treat it as closer. height is the
-                # box height as a fraction of the frame (0..1).
-                h = obs.get("height", 0.0)
-                # h~0.8 (very close) -> ~DANGER_M; h~0.1 (far) -> ~INFLUENCE_M.
-                rng = INFLUENCE_M - (INFLUENCE_M - DANGER_M) * float(np.clip(h / 0.8, 0.0, 1.0))
+                # No valid depth: skip it. We now have real deprojected depth for
+                # detections, so a missing reading means we can't trust a distance.
+                # Estimating from box size caused false positives (a large person
+                # box far to the side read as a very close obstacle).
+                continue
             if rng > INFLUENCE_M:
                 continue
             closest = min(closest, rng)
@@ -197,16 +197,9 @@ class AvoidBehaviour:
         # _direction, qui dit s'il s'éloigne ou se rapproche de la caméra.
         self._camera_dist += self._direction * step
 
-        # Bornes de distance strictes: le robot oscille entre PATROL_MIN_DISTANCE
-        # (près, face caméra) et max_dist (loin, dos caméra). Demi-tour à chaque
-        # borne. Cohérent et sans dérive.
-        max_dist = PATROL_MIN_DISTANCE + PATROL_LEG_M
-        near_edge = self._direction < 0 and self._camera_dist <= PATROL_MIN_DISTANCE
-        far_edge = self._direction > 0 and self._camera_dist >= max_dist
-        if near_edge or far_edge:
-            self._state = self.TURN
-            self._turn_elapsed = 0.0
-            return np.zeros(3)
+        # Distance-based patrol bounds are disabled: the patrol ROI (handled in the
+        # sim) now defines where the robot may go. The behaviour just walks and
+        # avoids obstacles; the sim turns it back at the ROI edges.
         return cmd
 
     def status(self) -> dict:
@@ -215,4 +208,6 @@ class AvoidBehaviour:
         st["avoiding"] = bool(_math.isfinite(self._closest))
         if st["avoiding"]:
             st["closest_m"] = round(self._closest, 2)
+        st["turning"] = self._state == self.TURN
+        st["turn_reason"] = getattr(self, "_turn_reason", "")
         return st

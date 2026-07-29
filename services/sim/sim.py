@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import signal
 import time
 
@@ -40,6 +41,22 @@ SCENES = {
 # Below this base height the robot has clearly gone over. Used only to report
 # state and offer a reset, never to stop the physics.
 FALLEN_HEIGHT = 0.4
+
+
+def _point_in_poly(x: float, y: float, poly: list) -> bool:
+    """Ray-casting point-in-polygon test for keep-out zones (world ground)."""
+    inside = False
+    n = len(poly)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 class Sim:
@@ -74,9 +91,13 @@ class Sim:
         self.pub = Publisher()
         # Sim only listens to perception now; the robot always patrols
         # autonomously and avoids obstacles. No manual/teleop mode.
-        self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN])
+        self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN, topics.KEEPOUT_ZONES, topics.PATROL_ROI])
         self.cmd = np.zeros(3)
         self._manual_turn = 0.0  # pending operator yaw (radians), applied per frame
+        self._keepout: list[list[tuple[float, float]]] = []  # world-ground polygons
+        self._avoid_reason = ""  # current avoidance cause, for change-logging
+        self._roi: list[tuple[float, float]] = []  # patrol region (empty = unbounded)
+        self._roi_turn = 0.0  # remaining random turn when bouncing off a ROI edge
         self.running = True
 
         self._steps_per_control = max(1, int(physics_hz / CONTROL_HZ))
@@ -104,8 +125,42 @@ class Sim:
                 # Operator turn nudge (l/r keys). Accumulate a yaw offset in radians
                 # that is applied on top of the patrol command over a few frames.
                 self._manual_turn += float(payload.get("wz", 0.0))
+            elif topic == topics.KEEPOUT_ZONES:
+                # Operator-drawn no-go polygons (world ground coords). The robot
+                # steers away from these, covering obstacles the detector misses.
+                self._keepout = [[tuple(p) for p in poly] for poly in payload.get("zones", [])]
+            elif topic == topics.PATROL_ROI:
+                # Operator-drawn patrol region (world ground polygon). The robot
+                # wanders freely inside it and turns back at the edges.
+                roi = payload.get("roi", [])
+                self._roi = [tuple(p) for p in roi] if roi else []
+                log.info("patrol ROI set: %d vertices", len(self._roi))
 
         raw = self.behaviour.command(time.time())
+
+        # If a patrol ROI is defined, keep the robot inside it: walk straight, and
+        # on reaching an edge turn by a random angle back toward the interior. This
+        # replaces the fixed distance bounds with a free wander in the drawn region.
+        raw = self._confine_to_roi(raw)
+
+        # Log obstacle avoidance (distinct from keep-out zones) when it starts/stops.
+        st = self.behaviour.status()
+        if st.get("avoiding") and st.get("closest_m") is not None:
+            if self._avoid_reason != "obstacle":
+                self._avoid_reason = "obstacle"
+                log.info("avoiding: obstacle at %.2fm ahead", st["closest_m"])
+        elif st.get("turning") and st.get("turn_reason"):
+            # About-face at a patrol bound, not an avoidance. Log on change.
+            if self._avoid_reason != st["turn_reason"]:
+                self._avoid_reason = st["turn_reason"]
+                log.info("turning: %s (%.1fm from camera)", st["turn_reason"], st.get("camera_dist_m", 0.0))
+        elif self._avoid_reason == "obstacle" or (self._avoid_reason and "bound" in self._avoid_reason):
+            self._avoid_reason = ""
+
+        # Keep-out zones: if the robot is inside or about to enter a no-go polygon,
+        # stop forward motion and turn away. Checks the robot's position and a
+        # point just ahead so it reacts before crossing the boundary.
+        raw = self._avoid_keepout(raw)
 
         # Gentle recentering: if the robot has drifted off the camera axis (y!=0),
         # add a small yaw correction that curves it back toward y=0, so it stays
@@ -143,6 +198,80 @@ class Sim:
         self.data.qpos[4] = cw * qx - sw * qy
         self.data.qpos[5] = cw * qy + sw * qx
         self.data.qpos[6] = cw * qz + sw * qw
+
+    def _confine_to_roi(self, raw: np.ndarray) -> np.ndarray:
+        """Keep the robot inside the patrol ROI, turning at the edges.
+
+        Walks straight inside the region. When a point just ahead would leave the
+        ROI, start a random turn (biased back toward the centre) so the robot
+        bounces off the boundary and wanders freely inside.
+        """
+        if not self._roi:
+            return raw  # no ROI: unbounded straight walking
+        x, y = float(self.data.qpos[0]), float(self.data.qpos[1])
+        qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
+        yaw = 2.0 * np.arctan2(qz, qw)
+        cx = sum(p[0] for p in self._roi) / len(self._roi)
+        cy = sum(p[1] for p in self._roi) / len(self._roi)
+
+        if not _point_in_poly(x, y, self._roi):
+            # Outside the ROI: steer toward its centre and walk in.
+            to_centre = np.arctan2(cy - y, cx - x)
+            delta = (to_centre - yaw + np.pi) % (2 * np.pi) - np.pi
+            if self._avoid_reason != "roi enter":
+                self._avoid_reason = "roi enter"
+                log.info("heading into ROI from (%.1f, %.1f)", x, y)
+            return np.array([0.2, 0.0, float(np.clip(delta * 2.0, -1.6, 1.6))])
+
+        # Inside: continue an in-progress bounce turn until nearly consumed.
+        if abs(self._roi_turn) > 0.05:
+            wz = float(np.clip(self._roi_turn * 3.0, -1.6, 1.6))
+            self._roi_turn -= np.sign(self._roi_turn) * min(abs(self._roi_turn), 0.08)
+            return np.array([0.1, 0.0, wz])
+
+        # Look ahead; if the next step would leave the ROI, start a bounce turn
+        # back toward the centre with a random spread, so it wanders.
+        look = 0.5
+        ax = x + np.cos(yaw) * look
+        ay = y + np.sin(yaw) * look
+        if not _point_in_poly(ax, ay, self._roi):
+            to_centre = np.arctan2(cy - y, cx - x)
+            spread = random.uniform(-np.pi / 3, np.pi / 3)
+            target_yaw = to_centre + spread
+            delta = (target_yaw - yaw + np.pi) % (2 * np.pi) - np.pi
+            self._roi_turn = float(delta)
+            if self._avoid_reason != "roi edge":
+                self._avoid_reason = "roi edge"
+                log.info("turning: ROI edge at (%.1f, %.1f)", x, y)
+            return np.array([0.0, 0.0, float(np.clip(delta, -1.6, 1.6))])
+
+        if self._avoid_reason in ("roi edge", "roi enter"):
+            self._avoid_reason = ""
+        return raw
+
+    def _avoid_keepout(self, raw: np.ndarray) -> np.ndarray:
+        """Stop and turn if the robot is in or approaching a keep-out zone."""
+        if not self._keepout:
+            return raw
+        x, y = float(self.data.qpos[0]), float(self.data.qpos[1])
+        qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
+        yaw = 2.0 * np.arctan2(qz, qw)
+        # Point ~0.5m ahead of the robot, to react before crossing the boundary.
+        look = 0.5
+        ax = x + np.cos(yaw) * look
+        ay = y + np.sin(yaw) * look
+        for i, poly in enumerate(self._keepout):
+            if _point_in_poly(x, y, poly) or _point_in_poly(ax, ay, poly):
+                # Inside or about to enter: kill forward speed and turn away hard.
+                if self._avoid_reason != f"zone{i}":
+                    self._avoid_reason = f"zone{i}"
+                    log.info("avoiding: keep-out zone %d at robot (%.1f, %.1f)", i, x, y)
+                return np.array([-0.1, 0.0, self.TURN_AWAY_WZ])
+        if self._avoid_reason and self._avoid_reason.startswith("zone"):
+            self._avoid_reason = ""
+        return raw
+
+    TURN_AWAY_WZ = 1.6  # rad/s turn when hitting a keep-out zone
 
     def _recenter(self, raw: np.ndarray) -> np.ndarray:
         """Add a small yaw term steering the robot back to the camera axis y=0."""

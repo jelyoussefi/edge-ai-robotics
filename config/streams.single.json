@@ -1,9 +1,0 @@
-[
-  {
-    "source": "/assets/videos/How_People_Walk.mp4",
-    "loop": true,
-    "model": "/assets/models/yolo11m/FP16/yolo11m.xml",
-    "device": "CPU",
-    "confidence": 0.25
-  }
-]

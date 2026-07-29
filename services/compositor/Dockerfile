@@ -14,7 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglfw3 \
         libglx-mesa0 \
         libegl1 \
+        libglvnd0 \
+        libopengl0 \
+        libgles2 \
+        libegl-mesa0 \
         libgl1-mesa-dri \
+        libglu1-mesa \
         mesa-utils \
         libxinerama1 \
         libxcursor1 \
@@ -61,6 +66,4 @@ RUN pip install --no-cache-dir -e /opt/edgebot
 WORKDIR /app
 COPY services/compositor/ .
 
-# VIEWER_MODE=backdrop runs the compositing viewer (robot over camera),
-# anything else runs the default interactive viewer.
 CMD ["python", "compositor.py"]

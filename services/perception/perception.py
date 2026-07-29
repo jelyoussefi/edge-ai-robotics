@@ -93,7 +93,7 @@ def main() -> None:
 
         count += 1
         now = time.perf_counter()
-        if now - last_log >= 5.0:
+        if now - last_log >= 30.0:
             log.info("%d detection(s) | %.0fms/frame | processed %d",
                      len(detections), infer_ms, count)
             last_log = now

@@ -166,7 +166,7 @@ def main() -> None:
             tel_rows += 1
             last_sample = now
             conn.commit()
-            if tel_rows % 30 == 0:
+            if tel_rows % 90 == 0:
                 log.info("session %d: %d telemetry rows, %d obstacle rows",
                          session_id, tel_rows, obs_rows)
 

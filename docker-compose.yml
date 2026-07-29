@@ -31,8 +31,8 @@ services:
       - bus
     environment:
       <<: *bus-env
-      ROBOT: ${ROBOT:-g1}
-      POLICY: ${POLICY:-kinematic}
+      ROBOT: g1_walker
+      POLICY: rl
       PHYSICS_HZ: "1000"
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"
@@ -46,7 +46,6 @@ services:
     volumes:
       - ./models:/models:ro
       - ./policies:/policies:ro
-    cpuset: ${SIM_CPUS:-}
     restart: unless-stopped
 
   # Rendering to the TV. Needs the host X socket and the Intel iGPU.
@@ -62,9 +61,14 @@ services:
     privileged: true
     environment:
       <<: *bus-env
-      SOURCE_CONFIG: /config/streams.${STREAMS:-d455}.json
+      SOURCE_CONFIG: /config/streams.d455.json
+      DISPLAY: ${DISPLAY:-:0}
+      # The RealSense spatial/temporal/hole-filling filters. Set to 0 to see the
+      # raw depth, which is full of holes on glossy floors.
+      DEPTH_FILTERS: "1"
     volumes:
-      - ./config:/config:ro
+      - ./config:/config
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /dev:/dev
       - /dev/bus/usb:/dev/bus/usb
     restart: unless-stopped
@@ -80,12 +84,18 @@ services:
     # bus. It only needs the GPU for rendering and the display.
     environment:
       <<: *bus-env
-      ROBOT: ${ROBOT:-g1}
+      ROBOT: g1_walker
       DISPLAY: ${DISPLAY:-:0}
+      # GLFW creates the visible GL context (validated: GL 4.6 + FBO on the host).
+      # MuJoCo renders into that current context. MUJOCO_GL=glx matches the GLX
+      # context GLFW provides on X11; EGL was a wrong turn (gladLoadGL error).
       MUJOCO_GL: glx
       LIBVA_DRIVER_NAME: iHD
       INTEL_FORCE_PROBE: "0xb080"
       XDG_RUNTIME_DIR: /tmp/runtime-compositor
+      # How far ahead of the camera the robot is placed, in metres. The sim
+      # spawns it at the camera position, which is off screen.
+      START_AHEAD: "3.0"
     devices:
       - /dev/dri:/dev/dri
     group_add:
@@ -95,6 +105,7 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./models:/models:ro
       - ./config:/config:ro
+      - ./data:/data
     restart: unless-stopped
 
   # Perception. Receives camera frames from the compositor over the bus and runs
@@ -107,7 +118,7 @@ services:
       - bus
     environment:
       <<: *bus-env
-      PERCEPTION_CONFIG: /config/streams.${STREAMS:-d455}.json
+      PERCEPTION_CONFIG: /config/streams.d455.json
     devices:
       - /dev/dri:/dev/dri
       - /dev/accel:/dev/accel
@@ -117,7 +128,6 @@ services:
     volumes:
       - ./config:/config:ro
       - ./assets:/assets:ro
-    cpuset: ${PERCEPTION_CPUS:-}
     restart: unless-stopped
 
   # Recorder. Persists calibration and runtime telemetry to a SQLite file on a
@@ -130,7 +140,7 @@ services:
       - bus
     environment:
       <<: *bus-env
-      ROBOT: ${ROBOT:-g1}
+      ROBOT: g1_walker
       RECORDER_DB: /data/edgebot.sqlite
       RECORD_HZ: "3"
     volumes:

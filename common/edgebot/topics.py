@@ -15,6 +15,10 @@ CMD_VEL = "cmd.vel"
 CMD_RESET = "cmd.reset"
 # Manual turn nudge from the operator: {"wz": +right / -left} (from ./, keys).
 CMD_TURN = "cmd.turn"
+# Keep-out zones as world-ground polygons the robot must not enter.
+KEEPOUT_ZONES = "keepout.zones"
+# Patrol ROI: the polygon the robot must stay inside (replaces distance bounds).
+PATROL_ROI = "patrol.roi"
 
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}

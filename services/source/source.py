@@ -59,6 +59,37 @@ def main() -> None:
     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     log.info("source: camera %dx%d@%d colour + depth (scale %.4f)", w, h, fps, depth_scale)
 
+    # Align depth to colour so a pixel (u,v) in the colour image maps to the same
+    # point in the depth image. The D455's colour and depth sensors are physically
+    # offset; without alignment, distances read at colour pixels are wrong. Safe
+    # here because colour and depth share resolution and fps (the mismatch that
+    # previously stalled the stream is gone).
+    align = rs.align(rs.stream.color)
+
+    # Depth post-processing. Glossy or dark surfaces reflect the projected IR
+    # pattern away from the sensor, so stereo returns nothing there: a shiny tiled
+    # floor comes back full of holes even though it is the flattest, most
+    # unambiguous surface in the room. These filters run on the SDK side and cost
+    # very little, and they are what makes downstream floor detection usable.
+    #   spatial   edge-preserving smoothing, with its own small hole filling
+    #   temporal  reuses recent valid values for a pixel that drops out, which is
+    #             exactly the specular-reflection case on a fixed camera
+    #   hole      fills what remains from the neighbours
+    filters = []
+    if os.environ.get("DEPTH_FILTERS", "1") == "1":
+        spatial = rs.spatial_filter()
+        spatial.set_option(rs.option.filter_magnitude, 2)
+        spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
+        spatial.set_option(rs.option.filter_smooth_delta, 20)
+        spatial.set_option(rs.option.holes_fill, 2)
+        temporal = rs.temporal_filter()
+        temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+        temporal.set_option(rs.option.filter_smooth_delta, 20)
+        hole = rs.hole_filling_filter()
+        hole.set_option(rs.option.holes_fill, 1)   # 1 = from the nearest valid
+        filters = [spatial, temporal, hole]
+        log.info("depth filters: spatial + temporal + hole filling")
+
     pub = Publisher()
     running = True
 
@@ -81,6 +112,8 @@ def main() -> None:
             frames = pipeline.wait_for_frames()
         except Exception:  # noqa: BLE001
             continue
+        # Align depth to the colour frame so their pixels correspond.
+        frames = align.process(frames)
         now = time.perf_counter()
         # One capture timestamp shared by both channels, so the compositor can
         # pair depth with RGB and with the detections computed from that RGB.
@@ -98,6 +131,8 @@ def main() -> None:
 
         if (now - last_depth) >= depth_interval:
             df = frames.get_depth_frame()
+            for flt in filters:
+                df = flt.process(df)
             if df:
                 depth = np.asanyarray(df.get_data())  # uint16, native Z16
                 pub.send(topics.CAMERA_DEPTH,
@@ -107,7 +142,7 @@ def main() -> None:
 
         count += 1
         now = time.perf_counter()
-        if now - last_log >= 5.0:
+        if now - last_log >= 30.0:
             log.info("broadcast %d frame pairs, %.1f fps", count, count / (now - last_log))
             count = 0
             last_log = now
