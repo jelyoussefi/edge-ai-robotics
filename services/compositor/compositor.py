@@ -100,6 +100,8 @@ uniform float floor_tol;        // tolerance (m) for floor match
 uniform float floor_alpha;      // overlay strength, 0..1
 uniform float floor_tol_rel;    // legacy, kept for the depth criterion
 uniform float floor_h_tol;      // |height above ground| gate, metres
+uniform sampler2D floor_paint;  // 1.0 force floor, 0.5 force not-floor, 0 auto
+uniform int   has_paint;        // 0 when no mask was painted
 
 // Convert MuJoCo's non-linear depth-buffer value to a metric eye-space depth.
 float linearize(float d) {
@@ -156,7 +158,7 @@ void main() {
     vec3 col = acc * 0.25;
 
     // Floor overlay: blend red where the measured depth matches expected floor.
-    if (show_floor == 1 && cam_z > 0.0) {
+    if (show_floor == 1) {
         float ez = expected_floor_z(cuv);
         // Height criterion: reconstruct the point behind this pixel and ask how
         // far above the ground plane it sits. Only the vertical component of the
@@ -167,7 +169,18 @@ void main() {
         float yv = (cuv.y * cam_res.y - ppy_i) / fy_i;
         float world_dir_z = -yv * cos(cam_pitch) - sin(cam_pitch);
         float height = cam_height + cam_z * world_dir_z;
-        if (world_dir_z < -1e-3 && abs(height) < floor_h_tol) {
+        bool is_floor = cam_z > 0.0 && world_dir_z < -1e-3
+                        && abs(height) < floor_h_tol;
+        // Hand-painted corrections from `make calibrate`. Polished tiles reflect
+        // the IR pattern away and return no depth at all, so those pixels can
+        // never be decided from the sensor: the operator paints them once and
+        // the result is reused here.
+        if (has_paint == 1) {
+            float pv = texture(floor_paint, cuv).r;
+            if (pv > 0.75)       is_floor = true;    // forced floor
+            else if (pv > 0.25)  is_floor = false;   // forced not floor
+        }
+        if (is_floor) {
             col = mix(col, vec3(1.0, 0.0, 0.0), floor_alpha);
         }
     }
@@ -253,12 +266,14 @@ class GLCompositor:
             "out_size", "depth_bias_m", "znear", "zfar",
             "show_floor", "cam_height", "cam_pitch", "fx_i", "fy_i",
             "ppx_i", "ppy_i", "cam_res", "floor_tol", "floor_alpha", "floor_tol_rel",
-            "floor_h_tol")}
+            "floor_h_tol", "floor_paint", "has_paint")}
         # Floor-overlay parameters, set via configure_floor().
+        self._paint_tex = None
         self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
                            ppx=325.6, ppy=239.6, res=(640.0, 480.0), tol=0.15,
                            alpha=float(os.environ.get("FLOOR_ALPHA", "0.35")),
                            tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
+                           has_paint=0,
                            h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")))
 
     def _make_robot_fbo(self) -> None:
@@ -318,6 +333,39 @@ class GLCompositor:
         """Set the camera geometry used to detect the floor for the red overlay."""
         self._floor.update(height=cam_height, pitch=pitch_rad, fx=fx, fy=fy,
                            ppx=ppx, ppy=ppy, res=cam_res, tol=tol)
+
+    def load_floor_paint(self, path: str) -> bool:
+        """Upload the mask painted during calibration, if there is one.
+
+        Values: 255 forces the pixel to floor, 128 forces it to not-floor, 0
+        leaves the geometric test to decide.
+        """
+        import cv2 as _cv
+        img = _cv.imread(path, _cv.IMREAD_GRAYSCALE) if os.path.exists(path) else None
+        if img is None:
+            self._floor["has_paint"] = 0
+            return False
+        if img.shape[:2] != (self.h, self.w):
+            img = _cv.resize(img, (self.w, self.h), interpolation=_cv.INTER_NEAREST)
+        if self._paint_tex is None:
+            self._paint_tex = GL.glGenTextures(1)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self._paint_tex)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_R8, self.w, self.h, 0,
+                        GL.GL_RED, GL.GL_UNSIGNED_BYTE,
+                        np.ascontiguousarray(img))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        self._floor["has_paint"] = 1
+        forced_on = int((img > 200).sum())
+        forced_off = int(((img > 80) & (img <= 200)).sum())
+        log.info("floor paint loaded from %s: %d px forced floor, %d px forced clear",
+                 path, forced_on, forced_off)
+        return True
 
     def set_show_floor(self, on: bool) -> None:
         self._floor["show"] = 1 if on else 0
@@ -461,6 +509,11 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
+        if f.get("has_paint") and self._paint_tex is not None:
+            GL.glActiveTexture(GL.GL_TEXTURE4)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._paint_tex)
+            GL.glUniform1i(self._uni["floor_paint"], 4)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
         # Read back the composited RGB and return BGR (for cv2), flipped to image
         # orientation (GL origin is bottom-left).
@@ -517,6 +570,11 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
+        if f.get("has_paint") and self._paint_tex is not None:
+            GL.glActiveTexture(GL.GL_TEXTURE4)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._paint_tex)
+            GL.glUniform1i(self._uni["floor_paint"], 4)
         GL.glDisable(GL.GL_DEPTH_TEST)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
         _restore_gl_state()
@@ -804,7 +862,7 @@ DIAG_FRAMES = {30}
 # Run headless: no cv2 window at all. The unit test passes without one, so this
 # tells us directly whether cv2 HighGUI is what breaks the GPU writes.
 # Display path. "glfw" presents the composite straight to the GL window that
-# already owns the context, which is what the GPU composition path is for:
+# already owns the context, which is what gpu_compositor.py was designed for:
 # no readback, no second toolkit, one context. "cv2" is the previous HighGUI
 # path, kept for comparison. "none" is headless.
 DISPLAY_MODE = "glfw"   # present in the render context, no readback
@@ -819,7 +877,7 @@ COCO_NAMES = {
 
 CAM_DISTANCE = float(os.environ.get("CAM_DISTANCE", "1.0"))
 # The robot starts this many metres ahead of the camera and walks away.
-START_AHEAD = float(os.environ.get("START_AHEAD", "1.0"))
+
 CAM_ELEVATION = float(os.environ.get("CAM_ELEVATION", "-3.0"))
 # Azimuth 0: virtual camera behind the robot looking along +x (its forward
 # direction), so the robot is seen from behind, walking away from the camera.
@@ -1026,6 +1084,7 @@ def main() -> None:
     # its own GL context, which can clash with the GLFW context, so we defer it:
     # built on first use (when 'c' or 'f' is pressed), not at startup.
     # Configure the floor detector geometry on the GPU for the 'f' overlay.
+    gpu.load_floor_paint(os.environ.get("FLOOR_PAINT", "/config/floor_mask.png"))
     gpu.configure_floor(cam_height, np.radians(_cam_pitch_deg), fx, fy, ppx, ppy,
                         (640.0, 480.0),
                         tol=float(os.environ.get("FLOOR_TOL", "0.15")))
@@ -1054,6 +1113,9 @@ def main() -> None:
     floor_det = FloorDetector(cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
                               tolerance_m=float(os.environ.get("FLOOR_TOL", "0.15")),
                               tolerance_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")))
+    log.info("virtual camera at the calibrated pose: (0.00, 0.00, %.2f) m, "
+             "pitch %.1f deg down; world origin is the floor under the camera "
+             "and the robot starts there", cam_height, _cam_pitch_deg)
     log.info("floor geometry: height=%.2f m pitch=%.1f deg fx=%.1f fy=%.1f "
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
@@ -1104,13 +1166,12 @@ def main() -> None:
             elif topic == topics.ROBOT_STATE:
                 qpos = np.asarray(payload["qpos"], dtype=np.float64)
                 if qpos.shape[0] == model.nq:
+                    # The world origin is the floor point directly below the
+                    # camera, and the virtual camera sits at the calibrated
+                    # height above it, so the sim's own coordinates are used as
+                    # they are: the robot starts at the camera's feet and walks
+                    # away from the viewer.
                     data.qpos[:] = qpos
-                    # The sim spawns the robot at x=0 (menagerie "stand" keyframe
-                    # is qpos = 0 0 0.79 ...), which is exactly where the virtual
-                    # camera sits (0, 0, cam_height). The robot would be directly
-                    # under the lens and outside the frustum. Push it START_AHEAD
-                    # metres down the optical axis so it is actually framed.
-                    data.qpos[0] += START_AHEAD
                     mujoco.mj_forward(model, data)
 
         # Distance for each detection, from the depth frame paired by timestamp.

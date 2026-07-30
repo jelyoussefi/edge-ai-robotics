@@ -93,9 +93,6 @@ services:
       LIBVA_DRIVER_NAME: iHD
       INTEL_FORCE_PROBE: "0xb080"
       XDG_RUNTIME_DIR: /tmp/runtime-compositor
-      # How far ahead of the camera the robot is placed, in metres. The sim
-      # spawns it at the camera position, which is off screen.
-      START_AHEAD: "3.0"
     devices:
       - /dev/dri:/dev/dri
     group_add:

@@ -66,4 +66,6 @@ RUN pip install --no-cache-dir -e /opt/edgebot
 WORKDIR /app
 COPY services/compositor/ .
 
+# VIEWER_MODE=backdrop runs the compositing viewer (robot over camera),
+# anything else runs the default interactive viewer.
 CMD ["python", "compositor.py"]
