@@ -25,8 +25,15 @@ MODEL_DIR="models/g1_walker"
 
 mkdir -p "$POLICY_DIR" "$MODEL_DIR"
 
+# The scene file is OURS and changes with the code, unlike the fetched model and
+# policy. Refresh it before the skip: leaving it behind the early exit meant that
+# once the assets were downloaded, every later edit to lighting or scene settings
+# was silently ignored, and the model kept loading a stale copy.
+cp services/sim/g1_walker_scene.xml "$MODEL_DIR/scene.xml"
+echo "  scene refreshed: $MODEL_DIR/scene.xml"
+
 if [ -f "$POLICY_DIR/walker.onnx.data" ] && [ -f "$MODEL_DIR/g1.xml" ]; then
-    echo "  G1 walker policy and model already present, skipping."
+    echo "  G1 walker policy and model already present, skipping the download."
     exit 0
 fi
 
@@ -68,7 +75,6 @@ if [ -d "$CLONE/assets" ]; then
     cp -r "$CLONE/assets" "$MODEL_DIR/assets"
 fi
 # Place our clean scene beside the model so its <include file="g1.xml"/> resolves.
-cp services/sim/g1_walker_scene.xml "$MODEL_DIR/scene.xml"
 
 [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
 

@@ -103,6 +103,8 @@ uniform float floor_h_tol;      // |height above ground| gate, metres
 uniform sampler2D floor_paint;  // 1.0 force floor, 0.5 force not-floor, 0 auto
 // Scale check: up to three horizontal reference lines, given as image rows in
 // 0..1 counted from the TOP. Negative means unused.
+uniform int   subsamples;       // per axis, so subsamples^2 coverage levels
+uniform float depth_far;        // depth value of the background: 1.0 or 0.0
 uniform vec3  ref_rows;
 uniform float ref_px;           // half thickness, in normalised rows
 uniform int   has_paint;        // 0 when no mask was painted
@@ -129,7 +131,8 @@ float expected_floor_z(vec2 cuv) {
 }
 
 void main() {
-    vec2 texel = 1.0 / (out_size * 2.0);   // one high-res subsample step
+    // One step of the offscreen render, whatever supersampling it was made at.
+    vec2 texel = 1.0 / (out_size * float(max(1, subsamples)));
     vec3 acc = vec3(0.0);
     // The camera frame is uploaded straight from numpy, whose row 0 is the TOP
     // of the image, while GL texel row 0 is the BOTTOM. Flip v when sampling it
@@ -142,24 +145,39 @@ void main() {
     vec3 cam_rgb = texture(cam_col, cuv).bgr;
     float cam_z = texture(cam_depth, cuv).r;        // metres (0 = no data)
 
-    for (int dy = 0; dy < 2; ++dy) {
-        for (int dx = 0; dx < 2; ++dx) {
-            vec2 suv = uv + vec2(float(dx), float(dy)) * texel;
+    int   ss  = max(1, subsamples);
+    float inv = 1.0 / float(ss * ss);
+    for (int dy = 0; dy < ss; ++dy) {
+        for (int dx = 0; dx < ss; ++dx) {
+            vec2 suv = uv + (vec2(float(dx), float(dy)) + 0.5) * texel;
             vec4 rc = texture(robot_col, suv);
             float rd = texture(robot_depth, suv).r;
-            // Detect the robot by its rendered colour: MuJoCo clears the offscreen
-            // background to black, so any non-black pixel is the robot. This is
-            // robust even if the depth blit is unavailable. Occlusion by the real
-            // scene still applies when we have a valid robot depth (< 1).
+            // Coverage comes from DEPTH, not from colour. MuJoCo leaves the
+            // offscreen depth at 1.0 where it drew nothing, so anything nearer
+            // is robot whatever its shade. Testing luminance instead punched
+            // holes through everything genuinely black on the G1: the helmet,
+            // the knee covers, the joints and the soles were read as background
+            // and the camera showed through them.
+            //
+            // Colour remains the fallback for the case the depth blit failed:
+            // an exactly zero depth means no depth information at all, whereas
+            // 1.0 means "background", which must stay background.
+            // Normalise the convention first. This driver hands back a
+            // REVERSED buffer, background 0.0 and near-geometry just above it,
+            // where the classic mapping puts the background at 1.0. Feeding the
+            // raw value to linearize() put the robot 9 mm from the lens and
+            // silently disabled occlusion.
+            float rds = (depth_far > 0.5) ? rd : 1.0 - rd;
+            float robot_z = linearize(rds);
+            bool depth_valid = rds > 0.0 && rds < 0.9999;
             float lum = max(rc.r, max(rc.g, rc.b));
-            bool drawn = lum > 0.02;
-            float robot_z = linearize(rd);
-            bool depth_valid = rd > 0.0 && rd < 0.9999;
-            bool occluded = depth_valid && (cam_z > 0.0) && (robot_z > cam_z + depth_bias_m);
+            bool drawn = depth_valid || (rds >= 1.0 && lum > 0.02);
+            bool occluded = depth_valid && (cam_z > 0.0)
+                            && (robot_z > cam_z + depth_bias_m);
             acc += (drawn && !occluded) ? rc.rgb : cam_rgb;
         }
     }
-    vec3 col = acc * 0.25;
+    vec3 col = acc * inv;
 
     // Floor overlay: blend red where the measured depth matches expected floor.
     if (show_floor == 1) {
@@ -256,6 +274,11 @@ class GLCompositor:
                  width: int, height: int, scale: int = 2,
                  depth_bias_m: float = 0.025) -> None:
         self.w, self.h, self.scale = width, height, scale
+        self.depth_format, self.depth_has_stencil = 0, False
+        self.depth_far = 1.0     # background depth value, probed after the first blit
+        self._depth_probed = False
+        self._depth_blit_warned = False
+        self._depth_blit_ok = False
         self.mjr = mjr_context
         self.depth_bias_m = depth_bias_m
         self.znear, self.zfar = 0.01, 50.0  # kept in sync with the model below
@@ -284,7 +307,7 @@ class GLCompositor:
             "show_floor", "cam_height", "cam_pitch", "fx_i", "fy_i",
             "ppx_i", "ppy_i", "cam_res", "floor_tol", "floor_alpha", "floor_tol_rel",
             "floor_h_tol", "floor_paint", "has_paint",
-            "ref_rows", "ref_px")}
+            "ref_rows", "ref_px", "subsamples", "depth_far")}
         # Floor-overlay parameters, set via configure_floor().
         self._paint_tex = None
         self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
@@ -293,6 +316,63 @@ class GLCompositor:
                            tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
                            has_paint=0, ref_rows=(-1.0, -1.0, -1.0),
                            h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")))
+
+    def _probe_mujoco_depth(self):
+        """Internal format of MuJoCo's offscreen depth buffer, and whether it
+        carries stencil. Returns a safe default if the query is unavailable."""
+        WITH_STENCIL = {0x88F0, 0x8CAD}          # DEPTH24_STENCIL8, DEPTH32F_STENCIL8
+        try:
+            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, int(self.mjr.offFBO))
+            fmt = None
+            for att in (GL.GL_DEPTH_STENCIL_ATTACHMENT, GL.GL_DEPTH_ATTACHMENT):
+                kind = GL.glGetFramebufferAttachmentParameteriv(
+                    GL.GL_READ_FRAMEBUFFER, att,
+                    GL.GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE)
+                if int(kind) == int(GL.GL_NONE):
+                    continue
+                name = int(GL.glGetFramebufferAttachmentParameteriv(
+                    GL.GL_READ_FRAMEBUFFER, att,
+                    GL.GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME))
+                if int(kind) == int(GL.GL_RENDERBUFFER):
+                    GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, name)
+                    fmt = int(GL.glGetRenderbufferParameteriv(
+                        GL.GL_RENDERBUFFER, GL.GL_RENDERBUFFER_INTERNAL_FORMAT))
+                    GL.glBindRenderbuffer(GL.GL_RENDERBUFFER, 0)
+                else:
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, name)
+                    fmt = int(GL.glGetTexLevelParameteriv(
+                        GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_INTERNAL_FORMAT))
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+                break
+            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+            if fmt:
+                log.info("MuJoCo offscreen depth format is 0x%04x%s", fmt,
+                         ", packed with stencil" if fmt in WITH_STENCIL else "")
+                return fmt, fmt in WITH_STENCIL
+        except Exception as exc:
+            log.warning("could not query MuJoCo's depth format (%s)", exc)
+        log.info("falling back to DEPTH24_STENCIL8 for the robot depth texture")
+        return int(GL.GL_DEPTH24_STENCIL8), True
+
+    def _probe_depth_convention(self) -> None:
+        """Read a corner of the blitted depth to learn where the background sits.
+
+        A corner is background by construction, so its value IS the far value.
+        Depending on the driver that is 1.0 (classic) or 0.0 (reversed), and
+        every depth comparison downstream depends on knowing which.
+        """
+        try:
+            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.robot_fbo)
+            px = GL.glReadPixels(0, 0, 1, 1, GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT)
+            GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+            far = float(np.asarray(px, np.float32).ravel()[0])
+            self.depth_far = 1.0 if far > 0.5 else 0.0
+            log.info("robot depth background reads %.4f -> %s convention", far,
+                     "classic (far = 1)" if self.depth_far > 0.5
+                     else "REVERSED (far = 0)")
+        except Exception as exc:
+            log.warning("could not probe the depth convention (%s), assuming "
+                        "the classic one", exc)
 
     def _make_robot_fbo(self) -> None:
         """FBO with sampleable colour+depth textures at 2x, blit target."""
@@ -305,16 +385,33 @@ class GLCompositor:
         GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB8, sw, sh, 0,
                         GL.GL_RGB, GL.GL_UNSIGNED_BYTE, None)
         _nearest()
+        # Match MuJoCo's own depth format instead of assuming one. Blitting
+        # depth between framebuffers is only legal when the formats are
+        # IDENTICAL, and a mismatch fails with GL_INVALID_OPERATION while copying
+        # nothing. Assuming DEPTH_COMPONENT24 left this texture at zero for the
+        # whole life of the project; assuming DEPTH24_STENCIL8 instead merely
+        # moved the error. So ask the driver what MuJoCo actually allocated.
+        self.depth_format, self.depth_has_stencil = self._probe_mujoco_depth()
         GL.glBindTexture(GL.GL_TEXTURE_2D, self.robot_depth_tex)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_DEPTH_COMPONENT24, sw, sh, 0,
-                        GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT, None)
+        GL.glTexStorage2D(GL.GL_TEXTURE_2D, 1, self.depth_format, sw, sh)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAX_LEVEL, 0)
+        if self.depth_has_stencil:
+            # Sample the depth part, not the stencil part.
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_DEPTH_STENCIL_TEXTURE_MODE,
+                               GL.GL_DEPTH_COMPONENT)
         _nearest()
 
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.robot_fbo)
         GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0,
                                   GL.GL_TEXTURE_2D, self.robot_col_tex, 0)
-        GL.glFramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT,
-                                  GL.GL_TEXTURE_2D, self.robot_depth_tex, 0)
+        GL.glFramebufferTexture2D(
+            GL.GL_FRAMEBUFFER,
+            GL.GL_DEPTH_STENCIL_ATTACHMENT if self.depth_has_stencil
+            else GL.GL_DEPTH_ATTACHMENT,
+            GL.GL_TEXTURE_2D, self.robot_depth_tex, 0)
+        st = GL.glCheckFramebufferStatus(GL.GL_FRAMEBUFFER)
+        if st != GL.GL_FRAMEBUFFER_COMPLETE:
+            log.warning("robot FBO incomplete: 0x%x", int(st))
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
 
     def _make_camera_textures(self) -> None:
@@ -415,13 +512,31 @@ class GLCompositor:
         # Colour first (this must succeed).
         GL.glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh,
                              GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST)
-        # Depth separately; if the formats differ the driver may reject it, so we
-        # swallow that error rather than crash. Occlusion still works if it lands.
+        # Depth and stencil together: the source is packed, so they copy as one.
+        # Report a failure once rather than swallowing it, because a silent
+        # failure degrades the cut-out to a luminance test and shows up as holes
+        # in everything dark on the robot.
+        bits = GL.GL_DEPTH_BUFFER_BIT
+        if self.depth_has_stencil:
+            bits |= GL.GL_STENCIL_BUFFER_BIT
+        GL.glGetError()
         try:
-            GL.glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh,
-                                 GL.GL_DEPTH_BUFFER_BIT, GL.GL_NEAREST)
-        except GL.error.GLError:
-            pass
+            GL.glBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, bits, GL.GL_NEAREST)
+            err = GL.glGetError()
+        except GL.error.GLError as exc:
+            err = int(getattr(exc, "err", 1))
+        if err and not self._depth_blit_warned:
+            self._depth_blit_warned = True
+            log.warning("robot depth blit failed (GL error 0x%x, format 0x%04x): "
+                        "the silhouette falls back to a luminance test, so dark "
+                        "parts of the robot may show holes and occlusion by the "
+                        "real scene is disabled", err, self.depth_format)
+        elif not err and not self._depth_blit_ok:
+            self._depth_blit_ok = True
+            log.info("robot depth blit OK: the silhouette is cut out by depth")
+        if not err and not self._depth_probed:
+            self._depth_probed = True
+            self._probe_depth_convention()
         GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
         GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, 0)
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
@@ -541,6 +656,8 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
         GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
         GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
+        GL.glUniform1i(self._uni["subsamples"], int(self.scale))
+        GL.glUniform1f(self._uni["depth_far"], float(self.depth_far))
         GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
         if f.get("has_paint") and self._paint_tex is not None:
             GL.glActiveTexture(GL.GL_TEXTURE4)
@@ -604,6 +721,8 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
         GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
         GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
+        GL.glUniform1i(self._uni["subsamples"], int(self.scale))
+        GL.glUniform1f(self._uni["depth_far"], float(self.depth_far))
         GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
         if f.get("has_paint") and self._paint_tex is not None:
             GL.glActiveTexture(GL.GL_TEXTURE4)
@@ -1162,7 +1281,6 @@ def main() -> None:
     opt.geomgroup[3] = 0
     opt.geomgroup[4] = 0
     scn = mujoco.MjvScene(model, maxgeom=20000)
-    # Second scene/option kept for CPU segmentation in calibration mode.
     seg_scn = mujoco.MjvScene(model, maxgeom=20000)
 
     # GPU compositor: depth-occluded, anti-aliased compositing with no readback.
@@ -1394,11 +1512,10 @@ def main() -> None:
                 _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, 0)
                 cv2.imwrite(f"/data/comp_robot_{frames}.png", _np.flipud(rimg)[:, :, ::-1])
 
-                # Where the robot actually lands on screen, against where the
-                # geometry says it should. glReadPixels returns rows bottom-up,
-                # so flip to image rows, then express both in the 480-row space
-                # the intrinsics are defined in. This settles the scale with a
-                # measurement instead of an impression.
+                # Where the robot lands on screen against where the geometry says
+                # it should. glReadPixels returns rows bottom-up, so flip to image
+                # rows, then express both in the 480-row space the intrinsics are
+                # defined in. This settles the scale with a measurement.
                 rows = _np.nonzero((rimg.sum(axis=2) > 10).any(axis=1))[0]
                 if rows.size:
                     top = (sh2 - 1 - int(rows.max())) * 480.0 / sh2
@@ -1406,7 +1523,7 @@ def main() -> None:
                     dist = float(_np.hypot(data.qpos[0], data.qpos[1]))
                     hz, e_top, e_bot = scale_reference_rows(
                         cam_height, _cam_pitch_deg, fy, ppy, max(0.3, dist),
-                        float(os.environ.get("ROBOT_HEIGHT", "1.30")))
+                        float(os.environ.get("ROBOT_HEIGHT", "1.31")))
                     log.info("scale check at %.2f m: rendered rows %.1f..%.1f "
                              "(%.1f tall), expected %.1f..%.1f (%.1f tall) -> "
                              "%.0f%% of the expected height, top off by %+.1f rows",
@@ -1415,8 +1532,8 @@ def main() -> None:
                              (e_bot - e_top) * 480.0,
                              100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * 480.0),
                              top - e_top * 480.0)
-                    # The same measurement expressed in metres, which is what a
-                    # ruler in the room actually shows.
+                    # The same measurement in metres, which is what a ruler in
+                    # the room actually shows.
                     h_top = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
                                             max(0.3, dist), top / 480.0)
                     h_bot = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
