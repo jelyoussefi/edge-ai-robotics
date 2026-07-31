@@ -177,6 +177,45 @@ class FloorGeometry:
     def mask(self, depth_m, tol_h=0.08):
         return (depth_m > 0) & (np.abs(self.height_map(depth_m)) < tol_h)
 
+    def project(self, fwd, lat, dw=640, dh=480):
+        """Project a point of the ground plane into the image.
+
+        Inverse of the back-projection used everywhere else. The camera frame is
+        x right, y down, z forward; in world terms its axes are
+        z = (cos p, 0, -sin p), x = (0, -1, 0), y = (-sin p, 0, -cos p), and the
+        camera sits at height H above the origin. Returns None behind the lens.
+        """
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        zc = fwd * cp + self.H * sp
+        if zc <= 1e-6:
+            return None
+        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
+        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        return (ppx + fx * (-lat) / zc,
+                ppy + fy * (-fwd * sp + self.H * cp) / zc)
+
+    def reach(self, depth_m, mask):
+        """Nearest and farthest floor distance, measured along the ground.
+
+        Uses the depth the PLANE predicts rather than the measured one: a floor
+        pixel lies on the plane by definition, and the specular holes that were
+        filled in have no measured depth at all. Reported as the horizontal
+        distance from the camera's feet, the coordinate the robot walks in, not
+        the slant range. Percentiles keep a few stray pixels from stretching it.
+        """
+        if not mask.any():
+            return None
+        x, y = self._rays(depth_m.shape[1], depth_m.shape[0])
+        cp, sp = math.cos(self.pitch), math.sin(self.pitch)
+        den = y * cp + sp
+        with np.errstate(divide="ignore", invalid="ignore"):
+            Ze = np.where(den > 1e-6, self.H / den, 0.0)
+        sel = mask & (Ze > 0.2) & (Ze < 25.0)
+        if int(sel.sum()) < 50:
+            return None
+        fwd = (Ze * (cp - y * sp))[sel]
+        return float(np.percentile(fwd, 2)), float(np.percentile(fwd, 98))
+
     def refine(self, mask, depth_m, close_px=9, min_area_frac=0.02):
         """Close the holes a depth sensor leaves in an otherwise flat floor.
 
@@ -548,12 +587,16 @@ class CalibrationUI:
             b.draw(p, b.key == self.tool, self.hover == b.key)
 
         x = 830
-        _text(p, "FLOOR COVERAGE", x, 40, 0.44, DIM)
-        _text(p, f"{stats['cover']:.1f} %", x, 76, 1.0, ACCENT, 2)
-        _text(p, f"valid depth  {stats['valid']:.0f} %", x, 104, 0.44, DIM)
-        _text(p, f"painted  +{stats['add']}  -{stats['rem']}", x, 126, 0.44, DIM)
-        _text(p, "ARROWS  adjust     TAB  next", x, 148, 0.42, DIM)
-        _text(p, "S  SAVE          Q  QUIT", x, 166, 0.44, FG)
+        _text(p, "FLOOR COVERAGE", x, 36, 0.44, DIM)
+        _text(p, f"{stats['cover']:.1f} %", x, 70, 0.95, ACCENT, 2)
+        reach = stats.get("reach")
+        _text(p, "nearest / farthest  " + (f"{reach[0]:.1f} - {reach[1]:.1f} m"
+              if reach else "no floor detected"), x, 94, 0.44,
+              DIM if reach else WARN)
+        _text(p, f"valid depth  {stats['valid']:.0f} %", x, 114, 0.44, DIM)
+        _text(p, f"painted  +{stats['add']}  -{stats['rem']}", x, 134, 0.44, DIM)
+        _text(p, "ARROWS  adjust     TAB  next", x, 152, 0.42, DIM)
+        _text(p, "S  SAVE          Q  QUIT", x, 168, 0.44, FG)
 
     def draw_cursor(self, canvas, mx, my):
         if self.tool is None or my >= IMG_H:
@@ -562,6 +605,39 @@ class CalibrationUI:
         col = ACCENT if self.tool == "brush" else WARN
         cv2.circle(canvas, (mx, my), r, col, 2, cv2.LINE_AA)
         cv2.circle(canvas, (mx, my), 2, col, -1, cv2.LINE_AA)
+
+
+AXIS = (60, 220, 60)     # optical axis, BGR
+
+
+def _draw_optical_axis(canvas, det, dw, dh, far=8.0):
+    """Green line where the camera axis meets the floor, with distance ticks.
+
+    The axis itself projects to a single point, so what is drawn is its ground
+    track: the line lat = 0 running away from the camera. It shows at a glance
+    whether the camera is aimed at the free floor or off to one side, which is
+    exactly what limits how much room the robot gets.
+    """
+    sx, sy = UI_W / float(dw), IMG_H / float(dh)
+
+    def to_canvas(fwd, lat):
+        p = det.project(fwd, lat, dw, dh)
+        if p is None:
+            return None
+        u, v = p[0] * sx, p[1] * sy
+        return (int(round(u)), int(round(v))) if -4000 < u < 4000 and -4000 < v < 4000 else None
+
+    pts = [q for q in (to_canvas(f, 0.0) for f in np.arange(0.4, far, 0.05)) if q]
+    if len(pts) > 1:
+        cv2.polylines(canvas, [np.array(pts, np.int32)], False, (0, 0, 0), 5, cv2.LINE_AA)
+        cv2.polylines(canvas, [np.array(pts, np.int32)], False, AXIS, 2, cv2.LINE_AA)
+    for f in range(1, int(far) + 1):
+        a, b = to_canvas(f, -0.12), to_canvas(f, 0.12)
+        if not (a and b):
+            continue
+        cv2.line(canvas, a, b, (0, 0, 0), 5, cv2.LINE_AA)
+        cv2.line(canvas, a, b, AXIS, 2, cv2.LINE_AA)
+        _text(canvas, f"{f} m", b[0] + 8, b[1] + 5, 0.42, AXIS)
 
 
 def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
@@ -650,7 +726,10 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
                                interpolation=cv2.INTER_NEAREST).astype(bool)
             view[edges] = (60, 60, 255)
 
+            reach = det.reach(depth, mask)
             canvas[:IMG_H] = view
+            _draw_optical_axis(canvas, det, depth.shape[1], depth.shape[0],
+                               far=(reach[1] + 1.0) if reach else 8.0)
             _glass(canvas, 18, 18, 330, 92, 0.72)
             _text(canvas, f"{h:.2f} m    {pitch:.1f} deg", 36, 52, 0.72, FG, 2)
             _text(canvas, "estimated camera pose", 36, 76, 0.44, DIM)
@@ -658,6 +737,7 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
             ui.draw_panel(canvas, {
                 "cover": 100.0 * mask.mean(),
                 "valid": 100.0 * (depth > 0).mean(),
+                "reach": reach,
                 "add": int(ui.add.sum()), "rem": int(ui.rem.sum())})
             ui.draw_cursor(canvas, mouse[0], mouse[1])
             cv2.imshow(win, canvas)

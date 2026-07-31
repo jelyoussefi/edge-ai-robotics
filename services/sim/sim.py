@@ -64,6 +64,10 @@ class Sim:
         scene = SCENES.get(ROBOT)
         if scene is None:
             raise SystemExit(f"unknown robot {ROBOT!r}, expected one of {sorted(SCENES)}")
+        if not os.path.exists(scene):
+            raise SystemExit(
+                f"{scene} is missing. Fetch the model first: "
+                "run 'make build'")
 
         log.info("loading %s", scene)
         self.model = mujoco.MjModel.from_xml_path(scene)
@@ -89,15 +93,34 @@ class Sim:
 
         self.behaviour = AvoidBehaviour()
         self.pub = Publisher()
-        # Sim only listens to perception now; the robot always patrols
+        # Sim only listens to perception; the walk is decided here
         # autonomously and avoids obstacles. No manual/teleop mode.
-        self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN, topics.KEEPOUT_ZONES, topics.PATROL_ROI])
+        self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN,
+                               topics.KEEPOUT_ZONES])
         self.cmd = np.zeros(3)
         self._manual_turn = 0.0  # pending operator yaw (radians), applied per frame
         self._keepout: list[list[tuple[float, float]]] = []  # world-ground polygons
         self._avoid_reason = ""  # current avoidance cause, for change-logging
-        self._roi: list[tuple[float, float]] = []  # patrol region (empty = unbounded)
-        self._roi_turn = 0.0  # remaining random turn when bouncing off a ROI edge
+        self._vx = 0.0           # rate-limited commands, for smooth heading changes
+        self._wz = 0.0
+        self._stopped = False
+        self._last_walk_log = 0.0
+        self._steer_reason = ""
+        # Every position test below uses the front of the feet on the ground, not
+        # the free joint. qpos[0:2] is the pelvis, 0.79 m up and roughly 0.2 m
+        # behind the toes in mid-stride, so a boundary checked against it is a
+        # boundary the feet have already crossed. The G1's four contact spheres
+        # per foot sit at x = -0.05 (heel) and x = +0.12 (toe) in the ankle frame,
+        # and MuJoCo gives their world position every step.
+        self._foot_geoms = [
+            g for g in range(self.model.ngeom)
+            if "ankle_roll" in (mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_BODY,
+                int(self.model.geom_bodyid[g])) or "")]
+        log.info("ground reference: %d foot contact geoms", len(self._foot_geoms))
+        # True once the robot has reached the walkable floor for the first time.
+        # Before that it simply walks straight out from under the camera; after
+        # that it is steered back in if it ever leaves.
         self.running = True
 
         self._steps_per_control = max(1, int(physics_hz / CONTROL_HZ))
@@ -111,62 +134,40 @@ class Sim:
         self.running = False
 
     def _poll_bus(self) -> None:
-        """Consume perception messages, then compute the patrol command."""
+        """Consume perception messages, then compute the walk command."""
         while (msg := self.sub.recv(0)) is not None:
             topic, payload = msg
             if topic == topics.PERCEPTION_OBSTACLES:
+                payload = self._obstacles_to_robot_frame(payload)
                 self.behaviour.observe(payload)
             elif topic == topics.CMD_RESET:
                 # Compositor asked (via 'z') to send the robot back to its start
-                # pose. Reset physics and the patrol behaviour together.
+                # pose. Reset physics and the walk together.
                 self._reset()
                 self.behaviour = AvoidBehaviour()
             elif topic == topics.CMD_TURN:
                 # Operator turn nudge (l/r keys). Accumulate a yaw offset in radians
-                # that is applied on top of the patrol command over a few frames.
+                # that is applied on top of the walk command over a few frames.
                 self._manual_turn += float(payload.get("wz", 0.0))
             elif topic == topics.KEEPOUT_ZONES:
                 # Operator-drawn no-go polygons (world ground coords). The robot
                 # steers away from these, covering obstacles the detector misses.
                 self._keepout = [[tuple(p) for p in poly] for poly in payload.get("zones", [])]
-            elif topic == topics.PATROL_ROI:
-                # Operator-drawn patrol region (world ground polygon). The robot
-                # wanders freely inside it and turns back at the edges.
-                roi = payload.get("roi", [])
-                self._roi = [tuple(p) for p in roi] if roi else []
-                log.info("patrol ROI set: %d vertices", len(self._roi))
 
-        raw = self.behaviour.command(time.time())
+        # Step 1 of the movement work: walk straight along the optical axis and
+        # stop at STOP_AT. Everything else (patrol regions, wandering, about-face
+        # rules) has been removed; it will be rebuilt one step at a time.
+        raw = self._walk_the_axis()
 
-        # If a patrol ROI is defined, keep the robot inside it: walk straight, and
-        # on reaching an edge turn by a random angle back toward the interior. This
-        # replaces the fixed distance bounds with a free wander in the drawn region.
-        raw = self._confine_to_roi(raw)
-
-        # Log obstacle avoidance (distinct from keep-out zones) when it starts/stops.
         st = self.behaviour.status()
         if st.get("avoiding") and st.get("closest_m") is not None:
             if self._avoid_reason != "obstacle":
                 self._avoid_reason = "obstacle"
                 log.info("avoiding: obstacle at %.2fm ahead", st["closest_m"])
-        elif st.get("turning") and st.get("turn_reason"):
-            # About-face at a patrol bound, not an avoidance. Log on change.
-            if self._avoid_reason != st["turn_reason"]:
-                self._avoid_reason = st["turn_reason"]
-                log.info("turning: %s (%.1fm from camera)", st["turn_reason"], st.get("camera_dist_m", 0.0))
-        elif self._avoid_reason == "obstacle" or (self._avoid_reason and "bound" in self._avoid_reason):
+        elif self._avoid_reason == "obstacle":
             self._avoid_reason = ""
 
-        # Keep-out zones: if the robot is inside or about to enter a no-go polygon,
-        # stop forward motion and turn away. Checks the robot's position and a
-        # point just ahead so it reacts before crossing the boundary.
         raw = self._avoid_keepout(raw)
-
-        # Gentle recentering: if the robot has drifted off the camera axis (y!=0),
-        # add a small yaw correction that curves it back toward y=0, so it stays
-        # in the fixed camera's view during a long demo. Only while walking (not
-        # turning), and capped so it never overpowers the gait or looks abrupt.
-        raw = self._recenter(raw)
 
         self.cmd = np.array(
             [
@@ -199,65 +200,151 @@ class Sim:
         self.data.qpos[5] = cw * qy + sw * qx
         self.data.qpos[6] = cw * qz + sw * qw
 
-    def _confine_to_roi(self, raw: np.ndarray) -> np.ndarray:
-        """Keep the robot inside the patrol ROI, turning at the edges.
+    def _steer(self, reason: str, detail: str = "") -> None:
+        """Log why the heading is being changed, once per change of reason."""
+        if reason != self._steer_reason:
+            self._steer_reason = reason
+            log.info("heading change: %s%s", reason, f" ({detail})" if detail else "")
 
-        Walks straight inside the region. When a point just ahead would leave the
-        ROI, start a random turn (biased back toward the centre) so the robot
-        bounces off the boundary and wanders freely inside.
-        """
-        if not self._roi:
-            return raw  # no ROI: unbounded straight walking
-        x, y = float(self.data.qpos[0]), float(self.data.qpos[1])
+    def _yaw(self) -> float:
         qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
-        yaw = 2.0 * np.arctan2(qz, qw)
-        cx = sum(p[0] for p in self._roi) / len(self._roi)
-        cy = sum(p[1] for p in self._roi) / len(self._roi)
+        return 2.0 * float(np.arctan2(qz, qw))
 
-        if not _point_in_poly(x, y, self._roi):
-            # Outside the ROI: steer toward its centre and walk in.
-            to_centre = np.arctan2(cy - y, cx - x)
-            delta = (to_centre - yaw + np.pi) % (2 * np.pi) - np.pi
-            if self._avoid_reason != "roi enter":
-                self._avoid_reason = "roi enter"
-                log.info("heading into ROI from (%.1f, %.1f)", x, y)
-            return np.array([0.2, 0.0, float(np.clip(delta * 2.0, -1.6, 1.6))])
+    def _ground_ref(self) -> tuple[float, float]:
+        """Ground position of the front of the feet: how far the robot has got.
 
-        # Inside: continue an in-progress bounce turn until nearly consumed.
-        if abs(self._roi_turn) > 0.05:
-            wz = float(np.clip(self._roi_turn * 3.0, -1.6, 1.6))
-            self._roi_turn -= np.sign(self._roi_turn) * min(abs(self._roi_turn), 0.08)
-            return np.array([0.1, 0.0, wz])
+        Among the foot contact geoms, the one furthest along the heading is the
+        leading toe. It is the point that reaches a limit first, so distances are
+        measured from it.
 
-        # Look ahead; if the next step would leave the ROI, start a bounce turn
-        # back toward the centre with a random spread, so it wanders.
-        look = 0.5
-        ax = x + np.cos(yaw) * look
-        ay = y + np.sin(yaw) * look
-        if not _point_in_poly(ax, ay, self._roi):
-            to_centre = np.arctan2(cy - y, cx - x)
-            spread = random.uniform(-np.pi / 3, np.pi / 3)
-            target_yaw = to_centre + spread
-            delta = (target_yaw - yaw + np.pi) % (2 * np.pi) - np.pi
-            self._roi_turn = float(delta)
-            if self._avoid_reason != "roi edge":
-                self._avoid_reason = "roi edge"
-                log.info("turning: ROI edge at (%.1f, %.1f)", x, y)
-            return np.array([0.0, 0.0, float(np.clip(delta, -1.6, 1.6))])
+        It is NOT usable for lateral control: the leading toe alternates between
+        the left and the right foot at every step, which injects a square wave of
+        about +-0.15 m into any cross-track error built on it. Use _ground_centre
+        for that.
+        """
+        if not self._foot_geoms:
+            return float(self.data.qpos[0]), float(self.data.qpos[1])
+        pts = self.data.geom_xpos[self._foot_geoms][:, :2]
+        yaw = self._yaw()
+        fwd = np.array([np.cos(yaw), np.sin(yaw)])
+        lead = pts[int(np.argmax(pts @ fwd))]
+        return float(lead[0]), float(lead[1])
 
-        if self._avoid_reason in ("roi edge", "roi enter"):
-            self._avoid_reason = ""
-        return raw
+    def _ground_centre(self) -> tuple[float, float]:
+        """Ground position midway between the feet: steady across the gait."""
+        if not self._foot_geoms:
+            return float(self.data.qpos[0]), float(self.data.qpos[1])
+        c = self.data.geom_xpos[self._foot_geoms][:, :2].mean(axis=0)
+        return float(c[0]), float(c[1])
+
+    def _obstacles_to_robot_frame(self, payload: dict) -> dict:
+        """Re-express camera-measured obstacles relative to the robot.
+
+        Perception reports range and bearing from the CAMERA, which sits at the
+        world origin looking along +x. The avoidance behaviour reads them as if
+        they were relative to the robot. With the robot several metres down the
+        room, a person standing right in front of the lens reads as an obstacle
+        a few centimetres ahead of it, and the robot brakes and turns away from
+        something that is in fact well behind it.
+
+        The camera sees an obstacle at world (r*cos b, -r*sin b), b positive to
+        the right. Subtract the robot's position, rotate into its heading, and
+        drop whatever ends up behind it.
+        """
+        obstacles = payload.get("obstacles") or payload.get("people") or []
+        if not obstacles:
+            return payload
+        rx, ry = self._ground_ref()
+        yaw = self._yaw()
+        out = []
+        for obs in obstacles:
+            rng = obs.get("range_m")
+            if rng is None or not np.isfinite(rng):
+                out.append(obs)
+                continue
+            b = np.radians(float(obs.get("bearing_deg", 0.0)))
+            ox, oy = rng * np.cos(b), -rng * np.sin(b)
+            dx, dy = ox - rx, oy - ry
+            b_rel = (np.arctan2(dy, dx) - yaw + np.pi) % (2 * np.pi) - np.pi
+            if abs(np.degrees(b_rel)) > 100.0:
+                continue           # behind the robot: not its problem
+            o = dict(obs)
+            o["range_m"] = float(np.hypot(dx, dy))
+            o["bearing_deg"] = float(-np.degrees(b_rel))
+            out.append(o)
+        p2 = dict(payload)
+        p2["obstacles"] = out
+        p2.pop("people", None)
+        return p2
+
+    STOP_AT = float(os.environ.get("STOP_AT", "6.0"))   # m from the camera
+    CRUISE_VX = 0.45      # m/s
+    CROSS_GAIN = 2.0      # how hard to pull back onto the axis
+    LOOKAHEAD = 1.0       # m over which the lateral error is nulled
+    CROSS_MAX = 0.6       # rad, cap on the heading correction
+    TURN_RATE = 0.9       # rad/s cap on the yaw command
+    VX_SLEW = 1.2         # m/s^2 limit on the forward command
+    WZ_SLEW = 2.5         # rad/s^2 limit on the yaw command
+
+    def _walk_the_axis(self) -> np.ndarray:
+        """Walk straight down the optical axis and stop at STOP_AT.
+
+        The world origin is the point of floor directly below the camera and +x
+        is the optical axis, so "stay on the axis" means hold y = 0. Heading
+        alone is not enough for that: a small yaw bias integrates into a drift
+        that never comes back. The lateral error is therefore nulled over
+        LOOKAHEAD metres, which is what holds the line.
+
+        Distance is measured from the front of the feet, the point that actually
+        reaches STOP_AT first.
+        """
+        x, _ = self._ground_ref()       # leading toe: how far it has got
+        _, y = self._ground_centre()    # midway between the feet: steady lateral
+        yaw = self._yaw()
+        dt = 1.0 / 50.0
+
+        if x >= self.STOP_AT:
+            if not self._stopped:
+                self._stopped = True
+                log.info("reached STOP_AT: toes at %.2f m on the axis, %+.3f m off it",
+                         x, y)
+            return self._smooth(0.0, 0.0, dt)
+
+        # Hold y = 0: aim at a point LOOKAHEAD ahead on the axis.
+        want = float(np.arctan2(-self.CROSS_GAIN * y, self.LOOKAHEAD))
+        want = float(np.clip(want, -self.CROSS_MAX, self.CROSS_MAX))
+        err = (want - yaw + np.pi) % (2 * np.pi) - np.pi
+        # Walk at cruise all the way, then command zero: the rate limiter turns
+        # that into a smooth stop over about a third of a second. Tapering the
+        # command instead leaves the policy below the speed at which it actually
+        # makes ground, so it shuffles on the spot and never arrives; that is why
+        # the robot used to settle short of STOP_AT with a non-zero command.
+        vx = self.CRUISE_VX * max(0.25, 1.0 - abs(err) / 1.2)
+        if not self._stopped and time.time() - self._last_walk_log > 2.0:
+            self._last_walk_log = time.time()
+            log.info("walking the axis: toes at %.2f m of %.2f m, %+.3f m off the "
+                     "axis, heading %+.1f deg, vx %.2f m/s",
+                     x, self.STOP_AT, y, np.degrees(yaw), self._vx)
+        return self._smooth(vx, float(np.clip(err * 1.2, -self.TURN_RATE,
+                                              self.TURN_RATE)), dt)
+
+    def _smooth(self, vx_des: float, wz_des: float, dt: float) -> np.ndarray:
+        """Rate limit the command, so no heading or speed change is a step."""
+        self._vx += float(np.clip(vx_des - self._vx, -self.VX_SLEW * dt,
+                                  self.VX_SLEW * dt))
+        self._wz += float(np.clip(wz_des - self._wz, -self.WZ_SLEW * dt,
+                                  self.WZ_SLEW * dt))
+        return np.array([self._vx, 0.0, self._wz])
+
+    TURN_AWAY_WZ = 1.6  # rad/s turn when hitting a keep-out zone
 
     def _avoid_keepout(self, raw: np.ndarray) -> np.ndarray:
         """Stop and turn if the robot is in or approaching a keep-out zone."""
         if not self._keepout:
             return raw
-        x, y = float(self.data.qpos[0]), float(self.data.qpos[1])
-        qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
-        yaw = 2.0 * np.arctan2(qz, qw)
-        # Point ~0.5m ahead of the robot, to react before crossing the boundary.
-        look = 0.5
+        x, y = self._ground_ref()
+        yaw = self._yaw()
+        look = 0.6   # m ahead, enough to react before entering a keep-out zone
         ax = x + np.cos(yaw) * look
         ay = y + np.sin(yaw) * look
         for i, poly in enumerate(self._keepout):
@@ -271,34 +358,15 @@ class Sim:
             self._avoid_reason = ""
         return raw
 
-    TURN_AWAY_WZ = 1.6  # rad/s turn when hitting a keep-out zone
-
-    def _recenter(self, raw: np.ndarray) -> np.ndarray:
-        """Add a small yaw term steering the robot back to the camera axis y=0."""
-        # Only correct when moving forward (walking), not during an in-place turn.
-        if raw[0] <= 0.05:
-            return raw
-        y = float(self.data.qpos[1])
-        # Robot heading from the base quaternion (yaw around z).
-        qw, qz = float(self.data.qpos[3]), float(self.data.qpos[6])
-        yaw = 2.0 * np.arctan2(qz, qw)
-        # Desired: reduce |y|. Steer toward the axis: if y>0 (left), turn right.
-        # Blend the lateral error and current heading so it curves smoothly back.
-        DEADBAND = 0.15   # metres; ignore small offsets
-        GAIN = 0.8
-        if abs(y) < DEADBAND:
-            return raw
-        # Target heading points back toward the axis, damped by how far off we are.
-        target_yaw = -np.clip(y * GAIN, -0.6, 0.6)  # radians, toward y=0
-        correction = float(np.clip((target_yaw - yaw) * 0.5, -0.4, 0.4))
-        return np.array([raw[0], raw[1], raw[2] + correction])
-
     def _reset(self) -> None:
         """Return the robot to its start pose without restarting the service."""
         if self.model.nkey:
             mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
         else:
             mujoco.mj_resetData(self.model, self.data)
+        # Back to the world origin, which is the floor directly under the camera,
+        # facing away from it. The robot then walks out into the scene again.
+        self._vx = self._wz = 0.0
         mujoco.mj_forward(self.model, self.data)
         # Reset the controller's internal state in place instead of recreating it,
         # which would recompile the policy (slow, and can stall the reset).

@@ -33,6 +33,12 @@ services:
       <<: *bus-env
       ROBOT: g1_walker
       POLICY: rl
+      # "lateral" paces across the view at a constant distance, so the robot
+      # keeps the same apparent size; "axial" walks along the optical axis.
+      # Step 1 of the movement work: walk the optical axis, stop here.
+      STOP_AT: ${STOP_AT:-6.0}
+      # Height of the G1 in its walking pose, used only by the 'h' scale check.
+      ROBOT_HEIGHT: "1.31"
       PHYSICS_HZ: "1000"
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"

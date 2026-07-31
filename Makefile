@@ -42,7 +42,7 @@ help:
 	@echo "  make clean      Remove containers and build stamps"
 	@echo "  make distclean  Also remove images and fetched assets"
 	@echo ""
-	@echo "  In the compositor window:  f  floor overlay   z  reset the robot   q  quit"
+	@echo "  In the compositor window:  f  floor overlay   h  scale check   r  reset   q  quit"
 
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)

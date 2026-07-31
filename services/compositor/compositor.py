@@ -101,6 +101,10 @@ uniform float floor_alpha;      // overlay strength, 0..1
 uniform float floor_tol_rel;    // legacy, kept for the depth criterion
 uniform float floor_h_tol;      // |height above ground| gate, metres
 uniform sampler2D floor_paint;  // 1.0 force floor, 0.5 force not-floor, 0 auto
+// Scale check: up to three horizontal reference lines, given as image rows in
+// 0..1 counted from the TOP. Negative means unused.
+uniform vec3  ref_rows;
+uniform float ref_px;           // half thickness, in normalised rows
 uniform int   has_paint;        // 0 when no mask was painted
 
 // Convert MuJoCo's non-linear depth-buffer value to a metric eye-space depth.
@@ -184,6 +188,19 @@ void main() {
             col = mix(col, vec3(1.0, 0.0, 0.0), floor_alpha);
         }
     }
+
+    // Scale reference lines, drawn last so nothing hides them.
+    if (ref_rows.x >= 0.0 && abs(cuv.y - ref_rows.x) < ref_px) {
+        col = mix(col, vec3(1.0, 1.0, 0.2), 0.85);   // camera height, the horizon
+    }
+    if (ref_rows.y >= 0.0 && abs(cuv.y - ref_rows.y) < ref_px) {
+        col = mix(col, vec3(0.2, 1.0, 0.3), 0.85);   // expected top of the robot
+    }
+    if (ref_rows.z >= 0.0 && abs(cuv.y - ref_rows.z) < ref_px) {
+        col = mix(col, vec3(0.3, 0.7, 1.0), 0.85);   // expected ground at its feet
+    }
+    if (false) {
+    }
     frag = vec4(col, 1.0);
 }
 """
@@ -266,14 +283,15 @@ class GLCompositor:
             "out_size", "depth_bias_m", "znear", "zfar",
             "show_floor", "cam_height", "cam_pitch", "fx_i", "fy_i",
             "ppx_i", "ppy_i", "cam_res", "floor_tol", "floor_alpha", "floor_tol_rel",
-            "floor_h_tol", "floor_paint", "has_paint")}
+            "floor_h_tol", "floor_paint", "has_paint",
+            "ref_rows", "ref_px")}
         # Floor-overlay parameters, set via configure_floor().
         self._paint_tex = None
         self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
                            ppx=325.6, ppy=239.6, res=(640.0, 480.0), tol=0.15,
                            alpha=float(os.environ.get("FLOOR_ALPHA", "0.35")),
                            tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
-                           has_paint=0,
+                           has_paint=0, ref_rows=(-1.0, -1.0, -1.0),
                            h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")))
 
     def _make_robot_fbo(self) -> None:
@@ -366,6 +384,18 @@ class GLCompositor:
         log.info("floor paint loaded from %s: %d px forced floor, %d px forced clear",
                  path, forced_on, forced_off)
         return True
+
+    def set_scale_refs(self, rows) -> None:
+        """Three image rows (0..1 from the top) to mark, or negatives to hide.
+
+        Used to check the composition scale against something physical: a point
+        at the camera's own height always projects to the same row whatever its
+        distance, so that line is the horizon, and the other two say where the
+        top and the base of an object of known height at a known distance must
+        appear. If the rendered robot does not sit between them, the scale is
+        wrong, and no amount of looking will settle it.
+        """
+        self._floor["ref_rows"] = tuple(rows)
 
     def set_show_floor(self, on: bool) -> None:
         self._floor["show"] = 1 if on else 0
@@ -509,6 +539,8 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
+        GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
         GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
         if f.get("has_paint") and self._paint_tex is not None:
             GL.glActiveTexture(GL.GL_TEXTURE4)
@@ -570,6 +602,8 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
+        GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
         GL.glUniform1i(self._uni["has_paint"], int(f.get("has_paint", 0)))
         if f.get("has_paint") and self._paint_tex is not None:
             GL.glActiveTexture(GL.GL_TEXTURE4)
@@ -850,7 +884,13 @@ SCENES = {
     "g1_walker": "/models/g1_walker/scene.xml",
 }
 
-WINDOW_W = int(os.environ.get("WINDOW_W", "1280"))
+# The window must have the CAMERA's aspect ratio, not a 16:9 one. MuJoCo derives
+# its horizontal field of view from fovy and the viewport aspect, so a 16:9
+# viewport with the D455's 63.7 deg vertical FOV renders 95.7 deg horizontally
+# against a camera that sees 79.3 deg. The robot then comes out too narrow, its
+# lateral position drifts off the floor, and the error grows toward the edges.
+# 4:3 makes both fields agree exactly, and the 640x480 frame scales uniformly.
+WINDOW_W = int(os.environ.get("WINDOW_W", "960"))
 WINDOW_H = int(os.environ.get("WINDOW_H", "720"))
 WINDOW_NAME = "Edge AI Robotics"
 # Bump this whenever the file changes. If the log shows an older tag than the one
@@ -858,7 +898,8 @@ WINDOW_NAME = "Edge AI Robotics"
 # Frames at which the full GPU diagnostic block runs. Frame 0 happens before the
 # first cv2.imshow/waitKey, so comparing frame 0 with frame 1 isolates whatever
 # the HighGUI window does to the GL state between iterations.
-DIAG_FRAMES = {30}
+DIAG_FRAMES = {int(f) for f in os.environ.get(
+    "DIAG_FRAMES", "30,120,300,600,900,1200").split(",")}
 # Run headless: no cv2 window at all. The unit test passes without one, so this
 # tells us directly whether cv2 HighGUI is what breaks the GPU writes.
 # Display path. "glfw" presents the composite straight to the GL window that
@@ -927,6 +968,49 @@ def load_calibration() -> dict | None:
         return None
 
 
+def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
+                         img_rows=480.0):
+    """Image rows, 0..1 from the top, of three heights at a known distance.
+
+    Returns (horizon, top of the object, its base). A point at the camera's own
+    height projects to the same row whatever its distance, which is the horizon;
+    the other two follow from the pinhole projection. Comparing the rendered
+    robot against these settles the composition scale with a measurement instead
+    of an impression.
+    """
+    p = np.radians(abs(pitch_deg))
+    cp, sp = np.cos(p), np.sin(p)
+
+    def row(h):
+        zc = dist_m * cp - (h - cam_h) * sp
+        if zc <= 1e-6:
+            return -1.0
+        yc = -dist_m * sp - (h - cam_h) * cp
+        return float((ppy + fy * yc / zc) / img_rows)
+
+    return row(cam_h), row(obj_h), row(0.0)
+
+
+def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=480.0):
+    """Invert the projection: what world height does this image row correspond to?
+
+    The projection of a point at height h and distance F is
+        v = ppy + fy * (-F sin p - (h - H) cos p) / (F cos p - (h - H) sin p)
+    which solves to
+        h = H + F (u cos p + sin p) / (u sin p - cos p),  u = (v - ppy) / fy.
+    Measuring the height that way assumes nothing about the model: it reports
+    what is actually on screen, in metres, ready to compare with a mark on a
+    real ruler.
+    """
+    p = np.radians(abs(pitch_deg))
+    cp, sp = np.cos(p), np.sin(p)
+    u = (row * img_rows - ppy) / fy
+    den = u * sp - cp
+    if abs(den) < 1e-9:
+        return float("nan")
+    return float(cam_h + dist_m * (u * cp + sp) / den)
+
+
 def _log_floor_stats(detector, depth_metres, on: bool) -> None:
     """Report what fraction of the frame the floor geometry accepts."""
     log.info("floor overlay %s", "on" if on else "off")
@@ -963,7 +1047,15 @@ def main() -> None:
     if not os.environ.get("DISPLAY"):
         raise SystemExit("compositor: no DISPLAY set; cannot open a window.")
 
-    scene = SCENES[ROBOT]
+    try:
+        scene = SCENES[ROBOT]
+    except KeyError:
+        raise SystemExit(
+            f"unknown robot {ROBOT!r}, expected one of {sorted(SCENES)}")
+    if not os.path.exists(scene):
+        raise SystemExit(
+            f"{scene} is missing. Fetch the model first: "
+            "run 'make build'")
     log.info("loading %s", scene)
     model = mujoco.MjModel.from_xml_path(scene)
     data = mujoco.MjData(model)
@@ -1084,7 +1176,10 @@ def main() -> None:
     # its own GL context, which can clash with the GLFW context, so we defer it:
     # built on first use (when 'c' or 'f' is pressed), not at startup.
     # Configure the floor detector geometry on the GPU for the 'f' overlay.
-    gpu.load_floor_paint(os.environ.get("FLOOR_PAINT", "/config/floor_mask.png"))
+    _paint_path = os.environ.get("FLOOR_PAINT", "/config/floor_mask.png")
+    gpu.load_floor_paint(_paint_path)
+    floor_paint_cpu = (cv2.imread(_paint_path, cv2.IMREAD_GRAYSCALE)
+                       if os.path.exists(_paint_path) else None)
     gpu.configure_floor(cam_height, np.radians(_cam_pitch_deg), fx, fy, ppx, ppy,
                         (640.0, 480.0),
                         tol=float(os.environ.get("FLOOR_TOL", "0.15")))
@@ -1120,7 +1215,10 @@ def main() -> None:
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
              2.0 * np.degrees(np.arctan(240.0 / fy)))
-    prev_keys = {"z": False, "f": False}   # edge detection for the glfw key path
+    prev_keys = {"r": False, "f": False, "h": False}
+    show_scale = False   # 'h' draws the horizon and the expected robot height
+    # The walkable region is republished periodically: the floor the camera sees
+    # is what bounds the robot, and it is cheap to keep in step with the scene.
     frames = 0
     last_log = time.perf_counter()
 
@@ -1212,9 +1310,11 @@ def main() -> None:
         # the virtual ground plane matches the real floor and the robot, standing
         # on z=0, is always on the floor, not floating up at table height.
         # Ground distance the camera naturally looks at, from its height and pitch.
-        p = np.radians(max(1.0, cam_pitch))
+        pitch_eff = max(0.25, cam_pitch)   # avoid a division by zero at 0 deg
+        p = np.radians(pitch_eff)
         ground_ahead = cam_height / np.tan(p)
         cam.lookat[:] = np.array([ground_ahead, 0.0, 0.0])
+        cam.elevation = -pitch_eff
         # Put the camera at world height H by setting the orbital distance so that
         # distance * sin(pitch) = H (camera_z = lookat_z + distance*sin(p) = H).
         cam.distance = cam_height / np.sin(p)
@@ -1265,13 +1365,18 @@ def main() -> None:
                 depth_metres if depth_metres is not None
                 else np.zeros((WINDOW_H, WINDOW_W), np.float32))
             gpu.set_show_floor(show_floor)
-            out = gpu.composite_to_array()   # offscreen render + readback (fast)
+            if show_scale:
+                dist = float(np.hypot(data.qpos[0], data.qpos[1]))
+                gpu.set_scale_refs(scale_reference_rows(
+                    cam_height, _cam_pitch_deg, fy, ppy, max(0.3, dist),
+                    float(os.environ.get("ROBOT_HEIGHT", "1.30"))))
+            else:
+                gpu.set_scale_refs((-1.0, -1.0, -1.0))
+            out = gpu.composite_to_array()
         except Exception as exc:
-            log.error("GPU compositing failed: %s", exc, exc_info=True)
+            log.error("GPU compositing failed: %s", exc)
             raise
-        # Diagnostic: save a few composited frames to disk so we can confirm the
-        # composition is correct independently of on-screen display. Written to
-        # /data (mounted), viewable from the host.
+
         if frames in DIAG_FRAMES:
             try:
                 outpath = f"/data/composite_frame_{frames}.png"
@@ -1288,6 +1393,41 @@ def main() -> None:
                 rnz = int((rimg.sum(axis=2) > 10).sum())
                 _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, 0)
                 cv2.imwrite(f"/data/comp_robot_{frames}.png", _np.flipud(rimg)[:, :, ::-1])
+
+                # Where the robot actually lands on screen, against where the
+                # geometry says it should. glReadPixels returns rows bottom-up,
+                # so flip to image rows, then express both in the 480-row space
+                # the intrinsics are defined in. This settles the scale with a
+                # measurement instead of an impression.
+                rows = _np.nonzero((rimg.sum(axis=2) > 10).any(axis=1))[0]
+                if rows.size:
+                    top = (sh2 - 1 - int(rows.max())) * 480.0 / sh2
+                    bot = (sh2 - 1 - int(rows.min())) * 480.0 / sh2
+                    dist = float(_np.hypot(data.qpos[0], data.qpos[1]))
+                    hz, e_top, e_bot = scale_reference_rows(
+                        cam_height, _cam_pitch_deg, fy, ppy, max(0.3, dist),
+                        float(os.environ.get("ROBOT_HEIGHT", "1.30")))
+                    log.info("scale check at %.2f m: rendered rows %.1f..%.1f "
+                             "(%.1f tall), expected %.1f..%.1f (%.1f tall) -> "
+                             "%.0f%% of the expected height, top off by %+.1f rows",
+                             dist, top, bot, bot - top,
+                             e_top * 480.0, e_bot * 480.0,
+                             (e_bot - e_top) * 480.0,
+                             100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * 480.0),
+                             top - e_top * 480.0)
+                    # The same measurement expressed in metres, which is what a
+                    # ruler in the room actually shows.
+                    h_top = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
+                                            max(0.3, dist), top / 480.0)
+                    h_bot = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
+                                            max(0.3, dist), bot / 480.0)
+                    log.info("  on screen the robot spans %.3f m to %.3f m above "
+                             "the floor, so it stands %.3f m tall at %.2f m",
+                             h_bot, h_top, h_top - h_bot, dist)
+                    if e_bot * 480.0 > 479.0 or e_top * 480.0 < 1.0:
+                        log.info("  (the robot does not fit in frame at this "
+                                 "distance, so the rendered height is clipped "
+                                 "and the percentage is meaningless)")
                 # Read the camera colour TEXTURE back from the GPU. If the robot
                 # render is empty the shader must output cam_rgb, so a black
                 # composite with a non-black bg means either this texture is
@@ -1335,23 +1475,27 @@ def main() -> None:
             frames = 0
             last_log = now
 
-        # Keys: q/Esc quit, z reset robot, f toggle the red floor overlay.
+        # Keys: q/Esc quit, r reset the robot to the camera foot, f floor overlay.
         if DISPLAY_MODE == "glfw":
             if _glfw_should_quit(window):
                 break
-            _z = glfw.get_key(window, glfw.KEY_Z) == glfw.PRESS
+            _r = glfw.get_key(window, glfw.KEY_R) == glfw.PRESS
             _f = glfw.get_key(window, glfw.KEY_F) == glfw.PRESS
-            if _z and not prev_keys["z"]:
+            _h = glfw.get_key(window, glfw.KEY_H) == glfw.PRESS
+            if _r and not prev_keys["r"]:
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if _f and not prev_keys["f"]:
                 show_floor = not show_floor
                 _log_floor_stats(floor_det, depth_metres, show_floor)
-            prev_keys["z"], prev_keys["f"] = _z, _f
+            if _h and not prev_keys["h"]:
+                show_scale = not show_scale
+                log.info("scale reference lines %s", "on" if show_scale else "off")
+            prev_keys["r"], prev_keys["f"], prev_keys["h"] = _r, _f, _h
         elif DISPLAY_MODE == "cv2":
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("z"):
+            if key == ord("r"):
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if key == ord("f"):
                 show_floor = not show_floor
