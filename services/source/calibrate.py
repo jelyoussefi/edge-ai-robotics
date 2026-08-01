@@ -36,6 +36,8 @@ import os
 import sys
 import time
 
+from edgebot.floor import straighten
+
 try:
     import numpy as np
     import pyrealsense2 as rs
@@ -237,10 +239,16 @@ class FloorGeometry:
         for i in range(1, num):
             if stats[i, cv2.CC_STAT_AREA] >= min_area_frac * h * w:
                 out |= lab == i
-        return out
+        return straighten(out)
 
-    def fit_plane(self, depth_m, inlier_m=0.05, iters=80):
-        """Measure the real ground plane by RANSAC instead of trusting the input."""
+    def fit_plane(self, depth_m, inlier_m=0.05, iters=80, seed=None):
+        """Measure the real ground plane by RANSAC instead of trusting the input.
+
+        `seed=None` draws a fresh sample each call, so repeated fits on the same
+        frame explore different triplets and their spread is a real measure of
+        how well determined the plane is. A fixed seed returned the same answer
+        every time, which looked like confidence and was not.
+        """
         x, y = self._rays(depth_m.shape[1], depth_m.shape[0])
         cp, sp = math.cos(self.pitch), math.sin(self.pitch)
         sel = (depth_m > 0) & ((y * (-cp) - sp) < -1e-3)
@@ -250,7 +258,7 @@ class FloorGeometry:
         pts = np.stack([x[sel] * Z, y[sel] * Z, Z], axis=1)
         if len(pts) > 40000:
             pts = pts[np.linspace(0, len(pts) - 1, 40000).astype(int)]
-        rng = np.random.default_rng(0)
+        rng = np.random.default_rng(seed)
         best = (0, None, 0.0)
         for _ in range(iters):
             i = rng.choice(len(pts), 3, replace=False)
@@ -268,7 +276,11 @@ class FloorGeometry:
             return None
         inl = pts[np.abs(pts @ n - d) < inlier_m]
         c = inl.mean(axis=0)
-        n = np.linalg.svd(inl - c)[2][2]
+        # full_matrices=False. The default also computes U, which is N by N:
+        # with the 40000 inliers this is capped at, that is an 11.9 GB
+        # allocation and the process is killed. Only the right singular vectors
+        # are used here, and those cost nothing.
+        n = np.linalg.svd(inl - c, full_matrices=False)[2][2]
         d = float(n @ c)
         if n[1] > 0:
             n, d = -n, -d
@@ -702,14 +714,29 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
 
             if ui.fit_request:
                 ui.fit_request = False
-                fit = det.fit_plane(depth)
-                if fit is None:
+                # Fit several times and take the median. A single RANSAC on this
+                # scene lands anywhere in a 7 cm band, and one run at 16% inliers
+                # once read 10 cm low: acting on it moved the calibration the
+                # wrong way. The median of a handful is stable, and the spread is
+                # reported so a fit that cannot be trusted says so.
+                fits = [f for f in (det.fit_plane(depth) for _ in range(9))
+                        if f is not None]
+                if len(fits) < 5:
                     print("  not enough floor points in view to fit a plane")
                 else:
-                    h, pitch = fit[0], abs(fit[1])
+                    hs = sorted(f[0] for f in fits)
+                    ps = sorted(abs(f[1]) for f in fits)
+                    ins = sorted(f[2] for f in fits)
+                    h, pitch = hs[len(hs) // 2], ps[len(ps) // 2]
+                    spread = hs[-1] - hs[0]
                     ui.sl["height"].value = h
-                    print(f"  measured plane: height {h:.2f} m, pitch "
-                          f"{pitch:.1f} deg ({fit[2]*100:.0f}% inliers)")
+                    print(f"  {len(fits)} fits: height {h:.2f} m "
+                          f"(spread {spread * 100:.0f} cm), pitch {pitch:.1f} deg, "
+                          f"inliers {100 * ins[len(ins) // 2]:.0f}%")
+                    if spread > 0.10 or ins[len(ins) // 2] < 0.25:
+                        print("  that fit is weak: too little of the frame is "
+                              "floor. Measure the height with a tape instead, or "
+                              "paint more floor and try again.")
                     continue
 
             auto = det.refine(det.mask(depth, tol_h=tol), depth)

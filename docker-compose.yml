@@ -59,6 +59,8 @@ services:
       # Starting value only: the sim measures how far each turn actually sweeps
       # and converges the lane onto it within a lap or two.
       LANE: ${LANE:-0.39}
+      # How close a corner has to be before the robot turns onto the next edge.
+      CORNER_R: ${CORNER_R:-0.5}
       # How much the controller ignores the gait's own sway. Longer is calmer
       # but slower to correct a real drift.
       SMOOTH_TAU: ${SMOOTH_TAU:-0.5}
@@ -100,6 +102,12 @@ services:
       - bus
     privileged: true
     environment:
+      # Straighten the floor boundary: stereo depth is noisy where the floor
+      # meets a wall, so the raw edge wobbles although the real one is a line.
+      # STRAIGHTEN=0 keeps the raw boundary; STRAIGHTEN_TOL raises or lowers how
+      # aggressively the contour is simplified.
+      STRAIGHTEN: ${STRAIGHTEN:-1}
+      STRAIGHTEN_TOL: ${STRAIGHTEN_TOL:-0.012}
       <<: *bus-env
       SOURCE_CONFIG: /config/streams.d455.json
       DISPLAY: ${DISPLAY:-:0}
@@ -123,6 +131,14 @@ services:
     # No camera: the compositor receives RGB + depth from the source over the
     # bus. It only needs the GPU for rendering and the display.
     environment:
+      # Distance kept from the floor's edge while walking its perimeter.
+      ROI_MARGIN: ${ROI_MARGIN:-0.45}
+      # Straighten the floor boundary: stereo depth is noisy where the floor
+      # meets a wall, so the raw edge wobbles although the real one is a line.
+      # STRAIGHTEN=0 keeps the raw boundary; STRAIGHTEN_TOL raises or lowers how
+      # aggressively the contour is simplified.
+      STRAIGHTEN: ${STRAIGHTEN:-1}
+      STRAIGHTEN_TOL: ${STRAIGHTEN_TOL:-0.012}
       # Height of the G1 in its walking pose, used only by the 'h' scale check.
       ROBOT_HEIGHT: "1.31"
       # Supersampling of the robot render. The silhouette gets scale^2 coverage

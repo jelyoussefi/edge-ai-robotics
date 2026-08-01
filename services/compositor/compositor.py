@@ -32,6 +32,7 @@ import mujoco
 import numpy as np
 from OpenGL import GL
 from edgebot import topics
+from edgebot.floor import polygon_from_mask, shrink, straighten
 from edgebot.bus import Publisher, Subscriber
 
 
@@ -755,8 +756,13 @@ class FloorDetector:
 
     def __init__(self, cam_height: float, pitch_deg: float,
                  fx: float, fy: float, ppx: float, ppy: float,
-                 tolerance_m: float = 0.15, tolerance_rel: float = 0.0) -> None:
+                 tolerance_m: float = 0.15, tolerance_rel: float = 0.0,
+                 height_tol_m: float | None = None) -> None:
         self.H = cam_height
+        # When set, the floor test is "within this height of the ground plane",
+        # which is the rule the calibration tool applies. Without it the two
+        # disagreed and the red preview did not show the mask the demo used.
+        self.h_tol = height_tol_m
         self.pitch = np.radians(pitch_deg)
         self.fx, self.fy, self.ppx, self.ppy = fx, fy, ppx, ppy
         self.tol = tolerance_m
@@ -875,7 +881,28 @@ class FloorDetector:
         for i in range(1, num):
             if stats[i, cv2.CC_STAT_AREA] >= min_area_frac * h * w:
                 out |= lab == i
-        return out
+        return straighten(out)
+
+    def to_world(self, u: float, v: float, dw: int, dh: int):
+        """Ground point a pixel looks at, as (forward, lateral) in metres.
+
+        Uses the PLANE rather than the measured depth: a floor pixel lies on the
+        plane by definition, and the boundary pixels are exactly the ones whose
+        measured depth is least trustworthy. Returns None for a ray that does
+        not descend to the floor at all.
+        """
+        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
+        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        x, y = (u - ppx) / fx, (v - ppy) / fy
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        den = y * cp + sp
+        if den <= 1e-6:
+            return None
+        Ze = self.H / den
+        if not (0.2 < Ze < 25.0):
+            return None
+        # World y points LEFT while the image abscissa grows to the right.
+        return float(Ze * (cp - y * sp)), float(-x * Ze)
 
     def fit_plane(self, depth_m: np.ndarray, inlier_m: float = 0.05,
                   iters: int = 80, seed: int = 0):
@@ -917,14 +944,26 @@ class FloorDetector:
         # camera frame is (0, -cos p, -sin p), so its y component is negative.
         inl = pts[np.abs(pts @ n - d) < inlier_m]
         c = inl.mean(axis=0)
-        n = np.linalg.svd(inl - c)[2][2]
+        # full_matrices=False. The default also computes U, which is N by N:
+        # with the 40000 inliers this is capped at, that is an 11.9 GB
+        # allocation and the process is killed. Only the right singular vectors
+        # are used here, and those cost nothing.
+        n = np.linalg.svd(inl - c, full_matrices=False)[2][2]
         d = float(n @ c)
         if n[1] > 0:
             n, d = -n, -d
         return abs(d), float(np.degrees(np.arctan2(-n[2], -n[1]))), hits / len(pts)
 
     def mask(self, depth_m: np.ndarray) -> np.ndarray:
-        """Boolean floor mask for a depth image already converted to metres."""
+        """Boolean floor mask for a depth image already converted to metres.
+
+        Prefers the HEIGHT criterion when the calibration supplied a threshold:
+        a depth gate of 0.15 m plus 4% of range is not the same rule as "within
+        8 cm of the floor", and a height gate is the meaningful one anyway,
+        being a fixed tolerance at every distance rather than one that widens.
+        """
+        if self.h_tol is not None:
+            return (depth_m > 0) & (np.abs(self.height_map(depth_m)) < self.h_tol)
         dh, dw = depth_m.shape
         expected = self._expected_floor(dw, dh)
         valid = depth_m > 0
@@ -1087,6 +1126,21 @@ def load_calibration() -> dict | None:
         return None
 
 
+def _world_to_pixel(cam_h, pitch_deg, fx, fy, ppx, ppy, fwd, lat, w, h):
+    """Project a ground point onto the composite. Inverse of to_world()."""
+    p = np.radians(abs(pitch_deg))
+    cp, sp = np.cos(p), np.sin(p)
+    zc = fwd * cp + cam_h * sp
+    if zc <= 1e-6:
+        return None
+    sx, sy = w / 640.0, h / 480.0
+    u = (ppx + fx * (-lat) / zc) * sx
+    v = (ppy + fy * (-fwd * sp + cam_h * cp) / zc) * sy
+    if not (-4000 < u < 4000 and -4000 < v < 4000):
+        return None
+    return int(round(u)), int(round(v))
+
+
 def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
                          img_rows=480.0):
     """Image rows, 0..1 from the top, of three heights at a known distance.
@@ -1130,8 +1184,14 @@ def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=480.0):
     return float(cam_h + dist_m * (u * cp + sp) / den)
 
 
-def _log_floor_stats(detector, depth_metres, on: bool) -> None:
-    """Report what fraction of the frame the floor geometry accepts."""
+def _log_floor_stats(detector, depth_metres, on: bool,
+                     cam_height: float = 0.0, cam_pitch_deg: float = 0.0) -> None:
+    """Report what fraction of the frame the floor geometry accepts.
+
+    The calibration is passed in. It used to be read from main()'s locals, which
+    are not in scope here, so this raised NameError every time 'f' was pressed
+    and the plane-fit comparison never once ran.
+    """
     log.info("floor overlay %s", "on" if on else "off")
     if not on or depth_metres is None:
         return
@@ -1151,8 +1211,8 @@ def _log_floor_stats(detector, depth_metres, on: bool) -> None:
             h, pdeg, frac = fit
             log.info("  plane fit (measured): height=%.2f m pitch=%.1f deg "
                      "(%.0f%% inliers) | calibration says height=%.2f m pitch=%.1f deg",
-                     h, pdeg, 100.0 * frac, cam_height, _cam_pitch_deg)
-            if abs(h - cam_height) > 0.10 or abs(pdeg - _cam_pitch_deg) > 2.0:
+                     h, pdeg, 100.0 * frac, cam_height, cam_pitch_deg)
+            if abs(h - cam_height) > 0.10 or abs(pdeg - cam_pitch_deg) > 2.0:
                 log.warning("  calibration disagrees with the measured plane; "
                             "try CAM_HEIGHT=%.2f CAM_PITCH=%.1f", h, pdeg)
     except Exception as exc:
@@ -1321,11 +1381,26 @@ def main() -> None:
     detections = []     # latest bbox+conf+label
     det_t = 0.0
     show_floor = False    # 'f' toggles the red floor overlay at any time
+    _annotated = False    # True when the CPU copy carries the overlay or ring
+    overlay_mask = None   # cached floor overlay, recomputed a few times a second
+    overlay_t = 0.0
+    roi_next_t = 0.0      # next republication of the walkable floor
+    roi_cached = None     # computed once: the camera does not move
     # Same geometry as the shader's expected_floor_z(), used only to report how
     # many pixels the overlay should be tinting.
+    # Use the threshold the operator settled on during calibration, so the
+    # overlay, the walkable polygon and the calibration preview are one mask.
+    _h_tol = float(calib["floor_h_tol_m"]) if (calib and calib.get("floor_h_tol_m")) else None
+    if os.environ.get("FLOOR_H_TOL"):
+        _h_tol = float(os.environ["FLOOR_H_TOL"])
     floor_det = FloorDetector(cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
                               tolerance_m=float(os.environ.get("FLOOR_TOL", "0.15")),
-                              tolerance_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")))
+                              tolerance_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
+                              height_tol_m=_h_tol)
+    log.info("floor criterion: %s",
+             f"height within {_h_tol * 100:.0f} cm of the plane, from the "
+             f"calibration" if _h_tol else
+             "depth tolerance (the calibration has no floor_h_tol_m)")
     log.info("virtual camera at the calibrated pose: (0.00, 0.00, %.2f) m, "
              "pitch %.1f deg down; world origin is the floor under the camera "
              "and the robot starts there", cam_height, _cam_pitch_deg)
@@ -1474,6 +1549,7 @@ def main() -> None:
             # cv2.imshow/waitKey pump a GTK main loop between frames, which can
             # leave another GL context current on this thread. Re-assert ours
             # before touching the GPU: cheap, and a no-op when nothing stole it.
+            _annotated = False
             glfw.make_context_current(window)
             mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, mjr)
             mujoco.mjr_render(mujoco.MjrRect(0, 0, sw, sh), scn, mjr)
@@ -1482,7 +1558,52 @@ def main() -> None:
                 bg if bg is not None else np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8),
                 depth_metres if depth_metres is not None
                 else np.zeros((WINDOW_H, WINDOW_W), np.float32))
-            gpu.set_show_floor(show_floor)
+            # The shader's own per-pixel test is never used for the overlay: it
+            # has no closing, no hole filling and no component filter, so shiny
+            # tiles that drop a few pixels of depth show up as holes in a floor
+            # that the rest of the system considers solid. The overlay is drawn
+            # below from the SAME CPU mask the polygon and the calibration use.
+            gpu.set_show_floor(False)
+
+            # Publish the walkable floor as a world-space polygon, once. The
+            # camera does not move, so neither does the floor; recomputing it
+            # would only make the boundary the robot is following shift under
+            # its feet. Republished periodically so a restarted sim gets it.
+            if depth_metres is not None and time.perf_counter() >= roi_next_t:
+                roi_next_t = time.perf_counter() + 5.0
+                try:
+                    if roi_cached is None:
+                        # Reuse the detector built above rather than making a
+                        # second one: it already carries the calibrated pose and
+                        # the tolerances, and a duplicate would drift from it.
+                        det = floor_det
+                        mask = det.refine(det.mask(depth_metres), depth_metres)
+                        if floor_paint_cpu is not None:
+                            paint = floor_paint_cpu
+                            if paint.shape != mask.shape:
+                                paint = cv2.resize(paint, (mask.shape[1], mask.shape[0]),
+                                                   interpolation=cv2.INTER_NEAREST)
+                            mask = mask.copy()
+                            mask[paint > 200] = True     # painted floor
+                            mask[(paint > 80) & (paint <= 200)] = False
+                        dh_, dw_ = mask.shape
+                        poly = polygon_from_mask(
+                            mask, lambda u, v: det.to_world(u, v, dw_, dh_))
+                        if poly:
+                            roi_cached = shrink(poly, float(
+                                os.environ.get("ROI_MARGIN", "0.45")))
+                            xs_ = [q[0] for q in roi_cached]
+                            ys_ = [q[1] for q in roi_cached]
+                            log.info("walkable floor: %d vertices, %.1f-%.1f m "
+                                     "ahead, %.1f-%.1f m across",
+                                     len(roi_cached), min(xs_), max(xs_),
+                                     min(ys_), max(ys_))
+                    if roi_cached:
+                        pub.send(topics.PATROL_ROI,
+                                 {"roi": roi_cached, "stamp": time.time()})
+                except Exception as exc:
+                    log.warning("could not build the walkable floor: %s", exc)
+
             if show_scale:
                 dist = float(np.hypot(data.qpos[0], data.qpos[1]))
                 gpu.set_scale_refs(scale_reference_rows(
@@ -1491,6 +1612,64 @@ def main() -> None:
             else:
                 gpu.set_scale_refs((-1.0, -1.0, -1.0))
             out = gpu.composite_to_array()
+
+            # Floor overlay, from the mask actually in use. Recomputed at most a
+            # couple of times a second: refine() runs a morphological close and a
+            # connected-components pass, which is far too slow for every frame
+            # and pointless anyway since the camera does not move.
+            if show_floor and depth_metres is not None:
+                if (overlay_mask is None
+                        or time.perf_counter() - overlay_t > 0.5):
+                    overlay_t = time.perf_counter()
+                    try:
+                        m = floor_det.refine(floor_det.mask(depth_metres),
+                                             depth_metres)
+                        if floor_paint_cpu is not None:
+                            paint = floor_paint_cpu
+                            if paint.shape != m.shape:
+                                paint = cv2.resize(paint, (m.shape[1], m.shape[0]),
+                                                   interpolation=cv2.INTER_NEAREST)
+                            m = m.copy()
+                            m[paint > 200] = True
+                            m[(paint > 80) & (paint <= 200)] = False
+                        overlay_mask = cv2.resize(
+                            m.astype(np.uint8), (out.shape[1], out.shape[0]),
+                            interpolation=cv2.INTER_NEAREST).astype(bool)
+                    except Exception as exc:
+                        log.warning("floor overlay failed: %s", exc)
+                        overlay_mask = None
+                if overlay_mask is not None:
+                    sel = overlay_mask
+                    out[sel] = (0.55 * out[sel].astype(np.float32)
+                                + 0.45 * np.array([60, 60, 235], np.float32)
+                                ).astype(np.uint8)
+                    _annotated = True
+            elif not show_floor:
+                overlay_mask = None
+
+            # Draw the polygon the robot is actually following. The 'f' overlay
+            # shows the floor MASK, which is not the same thing: the mask is what
+            # the depth sensor calls floor, while this ring is that boundary
+            # simplified, projected to the ground and pulled inward by
+            # ROI_MARGIN. Seeing the ring is what makes the robot's path legible.
+            if show_floor and roi_cached:
+                pts = []
+                for fwd, lat in roi_cached:
+                    uv = _world_to_pixel(cam_height, _cam_pitch_deg, fx, fy,
+                                         ppx, ppy, fwd, lat,
+                                         out.shape[1], out.shape[0])
+                    if uv is not None:
+                        pts.append(uv)
+                if len(pts) >= 3:
+                    arr = np.array(pts, np.int32)
+                    cv2.polylines(out, [arr], True, (0, 0, 0), 5, cv2.LINE_AA)
+                    cv2.polylines(out, [arr], True, (60, 220, 60), 2, cv2.LINE_AA)
+                    for k, (u, v) in enumerate(pts):
+                        cv2.circle(out, (u, v), 5, (60, 220, 60), -1)
+                        cv2.putText(out, str(k + 1), (u + 8, v - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 220, 60), 1,
+                                    cv2.LINE_AA)
+                    _annotated = True
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
             raise
@@ -1572,11 +1751,18 @@ def main() -> None:
             except Exception as exc:
                 log.warning("could not save diagnostic frame: %s", exc)
         if DISPLAY_MODE == "glfw":
-            # Present in the same context that just rendered: bind the default
-            # framebuffer, run the composition shader again straight to the
-            # window, swap. No CPU copy, no second GUI toolkit.
             _fbw, _fbh = glfw.get_framebuffer_size(window)
-            gpu.present(_fbw, _fbh)
+            if _annotated:
+                # The overlay and the patrol ring are drawn on the CPU copy, so
+                # that copy has to be what reaches the window. present() re-runs
+                # the shader from the GPU textures instead and would show the
+                # composite WITHOUT any of it, which is why 'f' appeared to do
+                # nothing: the annotations were being made on an array nobody
+                # displayed. Only pay the upload when there is something to show.
+                gpu.present_image(out, _fbw, _fbh)
+            else:
+                # Nothing annotated: present straight from the GPU, no CPU copy.
+                gpu.present(_fbw, _fbh)
             glfw.swap_buffers(window)
             glfw.poll_events()
         elif DISPLAY_MODE == "cv2":
@@ -1603,7 +1789,8 @@ def main() -> None:
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if _f and not prev_keys["f"]:
                 show_floor = not show_floor
-                _log_floor_stats(floor_det, depth_metres, show_floor)
+                _log_floor_stats(floor_det, depth_metres, show_floor,
+                                 cam_height, _cam_pitch_deg)
             if _h and not prev_keys["h"]:
                 show_scale = not show_scale
                 log.info("scale reference lines %s", "on" if show_scale else "off")
@@ -1616,7 +1803,8 @@ def main() -> None:
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if key == ord("f"):
                 show_floor = not show_floor
-                _log_floor_stats(floor_det, depth_metres, show_floor)
+                _log_floor_stats(floor_det, depth_metres, show_floor,
+                                 cam_height, _cam_pitch_deg)
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
         else:

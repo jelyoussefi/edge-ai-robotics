@@ -42,7 +42,7 @@ help:
 	@echo "  make clean      Remove containers and build stamps"
 	@echo "  make distclean  Also remove images and fetched assets"
 	@echo ""
-	@echo "  In the compositor window:  f  floor overlay   h  scale check   r  reset   q  quit"
+	@echo "  In the compositor window:  f  floor + patrol ring   h  scale   r  reset   q  quit"
 
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)
@@ -73,7 +73,13 @@ run: down build
 	@xhost +local:root > /dev/null 2>&1 || true
 	@$(call msg, Starting the demo ...)
 	@$(COMPOSE) up -d
-	@$(COMPOSE) logs -f source sim compositor perception recorder
+	@# Ctrl-C interrupts `logs -f`, which used to leave every container running
+	@# in the background. Trap it and bring the stack down, so one Ctrl-C stops
+	@# the demo as anyone would expect.
+	@trap '$(COMPOSE) down --remove-orphans >/dev/null 2>&1; \
+	       printf "\n  demo stopped\n"; exit 0' INT TERM; \
+	 $(COMPOSE) logs -f source sim compositor perception recorder || true; \
+	 $(COMPOSE) down --remove-orphans >/dev/null 2>&1 || true
 
 down:
 	@$(COMPOSE) down --remove-orphans 2>/dev/null || true

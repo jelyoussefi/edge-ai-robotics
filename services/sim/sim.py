@@ -18,6 +18,7 @@ import time
 import mujoco
 import numpy as np
 from edgebot import topics
+from edgebot.floor import signed_area
 from edgebot.bus import Publisher, Subscriber
 
 from behaviours import AvoidBehaviour
@@ -96,7 +97,7 @@ class Sim:
         # Sim only listens to perception; the walk is decided here
         # autonomously and avoids obstacles. No manual/teleop mode.
         self.sub = Subscriber([topics.PERCEPTION_OBSTACLES, topics.CMD_RESET, topics.CMD_TURN,
-                               topics.KEEPOUT_ZONES])
+                               topics.KEEPOUT_ZONES, topics.PATROL_ROI])
         self.cmd = np.zeros(3)
         self._manual_turn = 0.0  # pending operator yaw (radians), applied per frame
         self._keepout: list[list[tuple[float, float]]] = []  # world-ground polygons
@@ -107,6 +108,9 @@ class Sim:
         self._turning = False     # True while the about-face is in progress
         self._turn_sign = 1.0     # direction of rotation, fixed when a turn starts
         self._turn_y0 = 0.0       # lateral position when the turn began
+        self._roi: list = []      # walkable floor, counter-clockwise
+        self._leg = 0             # edge of the ring currently being followed
+        self._joined = False      # True once the robot has reached the ring
         self.lane = self.LANE     # learned from the turns actually performed
         self._yaw_f = 0.0         # gait-filtered heading, for control only
         self._y_f = 0.0           # gait-filtered lateral position
@@ -148,6 +152,23 @@ class Sim:
         """Consume perception messages, then compute the walk command."""
         while (msg := self.sub.recv(0)) is not None:
             topic, payload = msg
+            if topic == topics.PATROL_ROI:
+                roi = [tuple(map(float, q)) for q in (payload.get("roi") or [])]
+                if len(roi) >= 3 and roi != self._roi:
+                    # Walk the ring so the boundary stays on the right. For a
+                    # counter-clockwise ring the interior is on the LEFT of the
+                    # direction of travel, so the boundary is on the right;
+                    # reverse a clockwise one rather than special-casing later.
+                    if signed_area(roi) < 0:
+                        roi = roi[::-1]
+                    self._roi = roi
+                    self._joined = False
+                    self._leg = self._nearest_leg()
+                    log.info("walkable floor received: %d vertices, perimeter "
+                             "%.1f m, walking it with the edge on the right",
+                             len(roi), self._perimeter())
+                continue
+
             if topic == topics.PERCEPTION_OBSTACLES:
                 payload = self._obstacles_to_robot_frame(payload)
                 self.behaviour.observe(payload)
@@ -332,6 +353,7 @@ class Sim:
     # 0.66 rad/s of the 0.9 asked.
     LANE = float(os.environ.get("LANE", "0.39"))
     EASE_IN = 0.8         # m before the limit over which speed blends into the turn
+    CORNER_R = float(os.environ.get("CORNER_R", "0.5"))  # m, when a corner counts
     # Time constant of the filter on the heading and lateral position used for
     # control. Must exceed one stride or the controller chases the gait's own
     # sway; too long and it is slow to notice a real drift.
@@ -340,7 +362,157 @@ class Sim:
     VX_SLEW = 1.2         # m/s^2 limit on the forward command
     WZ_SLEW = float(os.environ.get("WZ_SLEW", "4.0"))  # rad/s^2 on the yaw command
 
+    def _perimeter(self) -> float:
+        return float(sum(np.hypot(self._roi[i][0] - self._roi[(i + 1) % len(self._roi)][0],
+                                  self._roi[i][1] - self._roi[(i + 1) % len(self._roi)][1])
+                         for i in range(len(self._roi))))
+
+    def _closest_on_ring(self, here):
+        """Closest point ON the ring's edges, and which edge it belongs to.
+
+        The nearest VERTEX is not the right answer: on a long edge the nearest
+        point is usually somewhere along it, and heading for a corner instead
+        would cut across the floor.
+        """
+        best, bd, bi = None, float("inf"), 0
+        for i in range(len(self._roi)):
+            a = np.asarray(self._roi[i], float)
+            b = np.asarray(self._roi[(i + 1) % len(self._roi)], float)
+            d = b - a
+            L2 = float(d @ d)
+            t = 0.0 if L2 < 1e-9 else float(np.clip((here - a) @ d / L2, 0.0, 1.0))
+            p = a + t * d
+            dist = float(np.hypot(*(p - here)))
+            if dist < bd:
+                bd, best, bi = dist, p, i
+        return best, bi
+
+    def _nearest_leg(self) -> int:
+        """Index of the edge whose far end the robot should head for first."""
+        x, y = self._ground_centre()
+        best, bd = 0, float("inf")
+        for i in range(len(self._roi)):
+            d = np.hypot(self._roi[i][0] - x, self._roi[i][1] - y)
+            if d < bd:
+                bd, best = d, i
+        return best
+
+    def _walk_the_edge(self) -> np.ndarray:
+        """Follow the floor's boundary, keeping it on the robot's right.
+
+        The polygon arrives already offset inward, so following it IS walking at
+        a fixed distance from the edge. It is walked as a sequence of straight
+        legs rather than as a curve: each leg is the same line-following problem
+        the axial patrol already solves, and the corners are the same about-face,
+        only through a smaller angle.
+
+        The ring is oriented counter-clockwise on arrival, which puts the
+        interior on the left of the direction of travel and therefore the
+        boundary on the right.
+        """
+        x, _ = self._ground_ref()
+        _, y_raw = self._ground_centre()
+        x_c, _ = self._ground_centre()
+        yaw_raw = self._yaw()
+        dt = 1.0 / 50.0
+
+        a = dt / max(dt, self.SMOOTH_TAU)
+        dyaw = (yaw_raw - self._yaw_f + np.pi) % (2 * np.pi) - np.pi
+        self._yaw_f = (self._yaw_f + a * dyaw + np.pi) % (2 * np.pi) - np.pi
+        yaw = self._yaw_f
+
+        n = len(self._roi)
+
+        # Join the ring before trying to follow it. The robot starts at the foot
+        # of the camera, which is several metres OUTSIDE the walkable floor, and
+        # the edge-following law only makes sense once it is on an edge: from two
+        # metres away it walked along the edge's direction instead of toward it,
+        # capped at CROSS_MAX, and drifted out of frame. So walk to the nearest
+        # point of the ring first, then start.
+        here0 = np.array([x_c, y_raw])
+        if not self._joined:
+            aim, leg = self._closest_on_ring(here0)
+            gap = float(np.hypot(*(aim - here0)))
+            if gap < self.CORNER_R:
+                self._joined = True
+                self._leg = leg
+                log.info("reached the floor's edge at (%.1f, %.1f), following it "
+                         "from edge %d", aim[0], aim[1], leg + 1)
+            else:
+                want = float(np.arctan2(aim[1] - here0[1], aim[0] - here0[0]))
+                err = (want - yaw + np.pi) % (2 * np.pi) - np.pi
+                if time.time() - self._last_walk_log > 2.0:
+                    self._last_walk_log = time.time()
+                    log.info("joining the floor: %.1f m to go, heading %+.0f deg",
+                             gap, np.degrees(want))
+                vx = self.CRUISE_VX if abs(err) < 0.5 else self.TURN_VX
+                return self._smooth(vx, float(np.clip(err * self.HEAD_GAIN,
+                                                      -self.TURN_RATE,
+                                                      self.TURN_RATE)), dt)
+
+        target = np.asarray(self._roi[(self._leg + 1) % n], float)
+        prev = np.asarray(self._roi[self._leg], float)
+        here = np.array([x_c, y_raw])
+
+        if self._turning:
+            err = (self._target_yaw - yaw_raw + np.pi) % (2 * np.pi) - np.pi
+            if abs(err) < self.TURN_DONE:
+                self._turning = False
+                log.info("corner taken, now heading for (%.1f, %.1f)",
+                         *self._roi[(self._leg + 1) % n])
+            else:
+                return self._smooth(self.TURN_VX,
+                                    float(np.sign(err)) * self.TURN_WZ, dt)
+
+        # Corner reached: step to the next edge and turn onto it.
+        if float(np.hypot(*(target - here))) < self.CORNER_R:
+            self._leg = (self._leg + 1) % n
+            if self._leg == 0:
+                self._laps += 1
+            nxt = np.asarray(self._roi[(self._leg + 1) % n], float)
+            self._target_yaw = float(np.arctan2(nxt[1] - target[1],
+                                                nxt[0] - target[0]))
+            self._turning = True
+            log.info("corner at (%.1f, %.1f), turning onto the next edge "
+                     "(%+.0f deg), lap %d", target[0], target[1],
+                     np.degrees((self._target_yaw - yaw_raw + np.pi)
+                                % (2 * np.pi) - np.pi), self._laps)
+            return self._smooth(self.TURN_VX, self.TURN_WZ, dt)
+
+        # Cross-track along the current edge, same law as the axial patrol.
+        d = target - prev
+        L = float(np.hypot(*d))
+        if L < 1e-6:
+            self._leg = (self._leg + 1) % n
+            return self._smooth(self.CRUISE_VX, 0.0, dt)
+        d /= L
+        nrm = np.array([-d[1], d[0]])
+        cross = float(np.dot(here - prev, nrm))
+        leg_yaw = float(np.arctan2(d[1], d[0]))
+        want = leg_yaw + float(np.clip(
+            np.arctan2(-self.CROSS_GAIN * cross, self.LOOKAHEAD),
+            -self.CROSS_MAX, self.CROSS_MAX))
+        err = (want - yaw + np.pi) % (2 * np.pi) - np.pi
+        damp = self.YAW_DAMP * float(self.data.qvel[5])
+        over = max(0.0, abs(err) - self.SLOW_ABOVE)
+        vx = self.CRUISE_VX * max(0.3, 1.0 - over / 0.9)
+        to_go = float(np.hypot(*(target - here)))
+        if to_go < self.EASE_IN:
+            vx = self.TURN_VX + (vx - self.TURN_VX) * (to_go / self.EASE_IN)
+        if time.time() - self._last_walk_log > 2.0:
+            self._last_walk_log = time.time()
+            log.info("edge %d of %d: %.2f m to the corner, %+.3f m off the edge, "
+                     "heading %+.1f deg, vx %.2f m/s, lap %d",
+                     self._leg + 1, n, to_go, cross, np.degrees(yaw_raw),
+                     self._vx, self._laps)
+        return self._smooth(vx, float(np.clip(err * self.HEAD_GAIN - damp,
+                                              -self.TURN_RATE,
+                                              self.TURN_RATE)), dt)
+
     def _walk_the_axis(self) -> np.ndarray:
+        # Once the floor polygon is known, follow its boundary instead.
+        if self._roi:
+            return self._walk_the_edge()
         """Pace the optical axis: out to STOP_AT, about-face, back to RETURN_TO.
 
         The world origin is the floor under the camera and +x is the optical
@@ -567,6 +739,7 @@ class Sim:
         # facing away from it. The robot then walks out into the scene again.
         self._outbound = True
         self._turning = False
+        self._joined = False
         self._laps = 0
         self._yaw_f = self._y_f = 0.0
         self._vx = self._wz = 0.0
