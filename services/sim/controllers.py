@@ -176,11 +176,39 @@ class RLController:
 
         core = ov.Core()
         log.info("compiling %s for %s", POLICY_PATH, OV_DEVICE)
+        model_ov = core.read_model(POLICY_PATH)
+        # Pin the batch dimension before compiling. The ONNX declares [?, 99],
+        # and the NPU does not accept dynamic shapes: it fails to compile and the
+        # fallback below quietly moves the policy to the CPU. Exactly one
+        # observation is fed per control step, so the shape is [1, 99] and always
+        # was; declaring it is what makes the NPU usable at all.
         try:
-            compiled = core.compile_model(POLICY_PATH, OV_DEVICE)
-        except Exception:
-            log.warning("%s unavailable, falling back to CPU", OV_DEVICE)
-            compiled = core.compile_model(POLICY_PATH, "CPU")
+            shape = list(model_ov.input(0).partial_shape)
+            if any(d.is_dynamic for d in shape):
+                fixed = [1 if d.is_dynamic else d.get_length() for d in shape]
+                model_ov.reshape({model_ov.input(0): ov.PartialShape(fixed)})
+                log.info("input reshaped to %s so the NPU can take it", fixed)
+        except Exception as exc:
+            log.warning("could not fix the input shape (%s)", exc)
+
+        try:
+            compiled = core.compile_model(model_ov, OV_DEVICE)
+        except Exception as exc:
+            # Say WHY, rather than only that it happened: the difference between
+            # a missing driver and an unsupported model matters here.
+            # The useful part of an OpenVINO error is at the END of the chain:
+            # the first line is only "Exception from core.cpp:117".
+            detail = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+            log.warning("%s unavailable, falling back to CPU: %s", OV_DEVICE,
+                        " | ".join(detail[-3:])[:300])
+            try:
+                log.warning("  devices OpenVINO can see here: %s",
+                            ", ".join(core.available_devices) or "none")
+            except Exception:
+                pass
+            compiled = core.compile_model(model_ov, "CPU")
+        else:
+            log.info("policy running on %s", OV_DEVICE)
         self.net = compiled
         self.out_port = compiled.output(0)
 

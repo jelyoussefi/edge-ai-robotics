@@ -35,8 +35,40 @@ services:
       POLICY: rl
       # "lateral" paces across the view at a constant distance, so the robot
       # keeps the same apparent size; "axial" walks along the optical axis.
-      # Step 1 of the movement work: walk the optical axis, stop here.
+      # The robot paces the optical axis between these two limits, turning on
+      # the spot at each end.
       STOP_AT: ${STOP_AT:-6.0}
+      RETURN_TO: ${RETURN_TO:-1.5}
+      # About-face tuning. The log prints commanded vs actual yaw rate during
+      # the turn: if actual stays well below commanded, the policy is saturated
+      # and raising TURN_WZ further will not help.
+      # The policy turns by stepping: with little forward speed it plants both
+      # feet and stops rotating, whatever yaw is asked. TURN_VX is therefore the
+      # lever that matters, at the cost of the turn sweeping sideways; the line
+      # following pulls the robot back onto the axis afterwards.
+      TURN_WZ: ${TURN_WZ:-0.9}
+      # Below about 0.25 m/s this policy stops stepping and the turn stalls, so
+      # this is close to the floor: tighten the arc with TURN_WZ, not by slowing.
+      TURN_VX: ${TURN_VX:-0.26}
+      # How straight the robot stays while rejoining the axis: lower looks like
+      # a correction, higher looks like it walked off diagonally.
+      CROSS_MAX: ${CROSS_MAX:-0.35}
+      # Lane offset either side of the optical axis, half the turn diameter, so
+      # each about-face lands on the opposite lane with nothing to correct.
+      # LANE=0 puts the robot back on a single centred line.
+      # Starting value only: the sim measures how far each turn actually sweeps
+      # and converges the lane onto it within a lap or two.
+      LANE: ${LANE:-0.39}
+      # How much the controller ignores the gait's own sway. Longer is calmer
+      # but slower to correct a real drift.
+      SMOOTH_TAU: ${SMOOTH_TAU:-0.5}
+      # Distance over which a lateral error is corrected. Longer is calmer:
+      # the heading loop needs to be much faster than this one or they oscillate.
+      LOOKAHEAD: ${LOOKAHEAD:-2.0}
+      YAW_DAMP: ${YAW_DAMP:-0.5}
+      # Walking speed along the axis. The policy was trained around 0.5-0.8 m/s,
+      # so it is steadier here than at a crawl.
+      CRUISE_VX: ${CRUISE_VX:-0.6}
       PHYSICS_HZ: "1000"
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"
@@ -44,6 +76,10 @@ services:
       OV_DEVICE: ${OV_DEVICE:-GPU}
     devices:
       - /dev/dri:/dev/dri
+      # The NPU lives on /dev/accel, not /dev/dri. Without it the policy
+      # cannot see the NPU at all and silently falls back to the CPU,
+      # whatever OV_DEVICE says. perception already mounts it.
+      - /dev/accel:/dev/accel
     group_add:
       - "${RENDER_GID:-993}"
       - "${VIDEO_GID:-44}"
