@@ -57,6 +57,12 @@ FLOOR_CELL = float(os.environ.get("GF_FLOOR_CELL", "0.10"))
 # 6.2 m. Both are depth noise, and both inflate a bounding box for free.
 Z_MIN = float(os.environ.get("GF_Z_MIN", "-0.3"))
 X_MAX = float(os.environ.get("GF_X_MAX", "8.0"))
+# Downsampled labelled cloud for the compositor's 'p' display, off the hot path.
+# 5000 points draw in about a millisecond and still show the room's structure;
+# the full 200 k would cost more to publish than to render.
+CLOUD_MAX = int(os.environ.get("GF_CLOUD_MAX", "5000"))
+CLOUD_HZ = float(os.environ.get("GF_CLOUD_HZ", "2.0"))
+CLOUD_CELL = float(os.environ.get("GF_CLOUD_CELL", "0.08"))
 
 
 def _quaternion_from_pitch(pitch_rad: float):
@@ -117,6 +123,8 @@ class GroundfloorBridge(Node):
         self._floor_vertices = 0
         self._floor_dropped = 0
         self._obs_dropped = 0
+        self._cloud_t = 0.0
+        self._cloud_n = 0
         self._stamps: dict = {}
         self._last_report = time.time()
         self.get_logger().info(
@@ -216,6 +224,21 @@ class GroundfloorBridge(Node):
                 self._stamps.pop(next(iter(self._stamps)))
 
     @staticmethod
+    def _plausible_mask(pts):
+        """Boolean mask of the returns the room can contain.
+
+        Separate from _plausible because the labelled cloud has to filter its
+        label column in lockstep with its points, and a mask is the only form
+        that survives being applied to two arrays.
+        """
+        if pts.size == 0:
+            return np.zeros((0,), bool)
+        ok = np.isfinite(pts).all(axis=1)
+        ok &= pts[:, 2] >= Z_MIN
+        ok &= pts[:, 0] <= X_MAX
+        return ok
+
+    @staticmethod
     def _plausible(pts):
         """Drop returns the room cannot contain. Returns (kept, n_dropped).
 
@@ -231,10 +254,42 @@ class GroundfloorBridge(Node):
         """
         if pts.size == 0:
             return pts, 0
-        ok = np.isfinite(pts).all(axis=1)
-        ok &= pts[:, 2] >= Z_MIN
-        ok &= pts[:, 0] <= X_MAX
+        ok = GroundfloorBridge._plausible_mask(pts)
         return pts[ok], int((~ok).sum())
+
+    def _publish_cloud(self, pts, labels) -> None:
+        """Downsample the labelled cloud and put it on the bus for the display.
+
+        Voxel-first, stride-second. A plain stride keeps whatever order the
+        producer happened to use, which on a row-major depth cloud means the
+        near floor -- densest in points, least interesting -- swamps the sample.
+        Quantising to a voxel and keeping one point per cell spreads the budget
+        over the room's actual surfaces; the stride afterwards only handles the
+        case where even the voxels exceed the budget.
+        """
+        now = time.time()
+        if now - self._cloud_t < 1.0 / CLOUD_HZ:
+            return
+        self._cloud_t = now
+        ok = self._plausible_mask(pts)
+        pts, labels = pts[ok], labels[ok]
+        if pts.shape[0] == 0:
+            return
+        total = int(pts.shape[0])
+
+        keys = np.floor(pts / CLOUD_CELL).astype(np.int64)
+        # Pack three small ints into one so np.unique sorts once instead of
+        # lexsorting three columns.
+        packed = (keys[:, 0] << 42) ^ (keys[:, 1] << 21) ^ keys[:, 2]
+        _, keep = np.unique(packed, return_index=True)
+        if keep.shape[0] > CLOUD_MAX:
+            keep = keep[np.linspace(0, keep.shape[0] - 1, CLOUD_MAX).astype(np.int64)]
+        xyz = np.ascontiguousarray(pts[keep], np.float32)
+        lab = np.ascontiguousarray(np.clip(labels[keep], 0, 65535), np.uint16)
+        self._cloud_n = int(xyz.shape[0])
+        self.bus_pub.send(topics.SUITE_CLOUD, {
+            "xyz": xyz.tobytes(), "labels": lab.tobytes(),
+            "n": self._cloud_n, "total": total, "stamp": now})
 
     def _on_labeled(self, msg: PointCloud2) -> None:
         """Turn the ground class of their labelled cloud into a floor outline."""
@@ -243,6 +298,7 @@ class GroundfloorBridge(Node):
                                      bool(msg.is_bigendian))
         if pts.shape[0] == 0:
             return
+        self._publish_cloud(pts, labels)
         ground, dropped = self._plausible(pts[labels == GROUND_LABEL])
         poly = floor_polygon(ground, cell=FLOOR_CELL)
         self._floor_dropped += dropped
@@ -280,7 +336,8 @@ class GroundfloorBridge(Node):
                 f"{self._floor_pts} ground points, {self._floor_vertices} "
                 f"vertices | dropped as impossible: {self._obs_dropped} "
                 f"obstacle, {self._floor_dropped} ground "
-                f"(z < {Z_MIN} or x > {X_MAX})")
+                f"(z < {Z_MIN} or x > {X_MAX}) | cloud: {self._cloud_n} pts "
+                f"at {CLOUD_HZ:g} Hz")
 
 
 def main() -> None:

@@ -184,6 +184,12 @@ services:
       # docs/ETAPE-B-RESULTS.md.
       DIAG_FRAMES: ${DIAG_FRAMES:-0}
       SHOW_FLOOR: ${SHOW_FLOOR:-0}
+      # Etat initial de l'affichage du nuage ('p') : 0 eteint, 1 par-dessus la
+      # video, 2 nuage seul. Les deux etiquettes viennent des memes variables
+      # que le pont, pour qu'elles ne puissent pas diverger.
+      SHOW_CLOUD: ${SHOW_CLOUD:-0}
+      GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
+      GF_OBSTACLE_LABEL: ${GF_OBSTACLE_LABEL:-5}
       <<: *bus-env
       ROBOT: g1_walker
       DISPLAY: ${DISPLAY:-:0}
@@ -262,6 +268,13 @@ services:
       GF_Z_MIN: ${GF_Z_MIN:--0.3}
       GF_X_MAX: ${GF_X_MAX:-8.0}
       GF_PARAMS: ${GF_PARAMS:-/params/groundfloor_segmentation_params.yaml}
+      # Copie sous-echantillonnee du nuage etiquete, pour l'affichage 'p' du
+      # compositeur. 5000 points suffisent a montrer la structure de la piece
+      # et se dessinent en ~1 ms ; les 200 k complets couteraient plus cher a
+      # publier qu'a rendre.
+      GF_CLOUD_MAX: ${GF_CLOUD_MAX:-5000}
+      GF_CLOUD_HZ: ${GF_CLOUD_HZ:-2.0}
+      GF_CLOUD_CELL: ${GF_CLOUD_CELL:-0.08}
     volumes:
       - ./config:/config:ro
       # Mounted rather than baked so max_surface_height can be changed and the

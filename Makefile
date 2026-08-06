@@ -47,6 +47,7 @@ help:
 	@echo ""
 	@echo "  In the compositor window:  f  floor   s  detections   h  scale   r  reset   q  quit"
 	@echo "                             f also draws the suite's ground in cyan when groundfloor runs"
+	@echo "                             p  suite point cloud: off / over the video / cloud only"
 
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)

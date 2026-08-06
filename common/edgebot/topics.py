@@ -58,6 +58,26 @@ GROUNDFLOOR_OBSTACLES = "groundfloor.obstacles"
 #   {"poly": [[x, y], ...], "points": int, "stamp": float}
 GROUNDFLOOR_FLOOR = "groundfloor.floor"
 
+# groundfloor -> compositor. A downsampled copy of the suite's labelled cloud,
+# for the 'p' display mode. Diagnostic: nothing steers on it.
+#
+# Raw bytes rather than a list of 4-tuples. At 5000 points a msgpack list of
+# lists is around 200 kB and costs a Python loop at both ends; the packed form
+# is 5000*3*4 + 5000*2 = 70 kB and unpacks with np.frombuffer. Same reasoning as
+# CAMERA_DEPTH, which carries its Z16 the same way.
+#
+#   {"xyz": bytes,     # n * 3 float32, world frame: x forward, y left, z up
+#    "labels": bytes,  # n uint16, the suite's class per point
+#    "n": int,         # points in this message, after downsampling
+#    "total": int,     # points BEFORE downsampling, so the ratio is visible
+#    "stamp": float}
+#
+# World frame, not camera frame: the bridge already receives them in base_link,
+# and converting once here means the compositor needs only its own calibrated
+# pose to draw them. These points carry a real z, so the consumer must NOT use
+# the floor-plane projection.
+SUITE_CLOUD = "suite.cloud"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

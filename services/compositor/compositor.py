@@ -1050,6 +1050,13 @@ DIAG_FRAMES = int(os.environ.get("DIAG_FRAMES", "0") or 0)
 # toggles them; this only sets the initial state, so a diagnostic capture can be
 # scripted on a machine whose X display is not the one this renders to.
 SHOW_FLOOR_AT_START = os.environ.get("SHOW_FLOOR", "0") not in ("", "0")
+# Initial state of the 'p' cloud display: 0 off, 1 over the video, 2 cloud
+# alone. Same purpose as SHOW_FLOOR -- a capture with no keyboard.
+SHOW_CLOUD_AT_START = int(os.environ.get("SHOW_CLOUD", "0") or 0)
+# Which classes get a colour of their own. Same defaults as the bridge, and
+# compose feeds both from the same ${GF_GROUND_LABEL} so they cannot drift.
+CLOUD_GROUND_LABEL = int(os.environ.get("GF_GROUND_LABEL", "3"))
+CLOUD_OBSTACLE_LABEL = int(os.environ.get("GF_OBSTACLE_LABEL", "5"))
 # Run headless: no cv2 window at all. The unit test passes without one, so this
 # tells us directly whether cv2 HighGUI is what breaks the GPU writes.
 # Display path. "glfw" presents the composite straight to the GL window that
@@ -1194,6 +1201,98 @@ def _world_to_pixel(cam_h, pitch_deg, fx, fy, ppx, ppy, fwd, lat, w, h):
     if not (-4000 < u < 4000 and -4000 < v < 4000):
         return None
     return int(round(u)), int(round(v))
+
+
+def _cloud_to_pixels(cam_h, pitch_deg, fx, fy, ppx, ppy, xyz, w, h):
+    """Project world points that carry a real height. Vectorised.
+
+    _world_to_pixel above is the FLOOR-plane path: it assumes z = 0 and folds
+    the camera height in as a constant. These points are a segmentation of the
+    whole room -- a point on a table at 0.75 m projected as if it lay on the
+    floor lands metres behind the table, the same error that made silhouette
+    subtraction necessary in the first place. The only change needed is to
+    measure the drop from the camera to each point rather than to the ground:
+    substitute (cam_h - z) for cam_h and the rest of the pinhole is identical,
+    which is also why this reduces exactly to _world_to_pixel at z = 0.
+
+    Returns (u, v, ok) with ok marking points in front of the camera AND inside
+    the frame, so the caller can index without bounds checks.
+    """
+    p = np.radians(abs(pitch_deg))
+    cp, sp = np.cos(p), np.sin(p)
+    fwd, lat, up = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+    drop = cam_h - up
+    zc = fwd * cp + drop * sp
+    ok = zc > 1e-6
+    safe = np.where(ok, zc, 1.0)
+    sx, sy = w / 640.0, h / 480.0
+    u = (ppx + fx * (-lat) / safe) * sx
+    v = (ppy + fy * (-fwd * sp + drop * cp) / safe) * sy
+    ok &= (u >= 0) & (u < w - 1) & (v >= 0) & (v < h - 1)
+    return u.astype(np.int32), v.astype(np.int32), ok
+
+
+def _draw_cloud(out, xyz, labels, cam_h, pitch_deg, fx, fy, ppx, ppy,
+                ground_label, obstacle_label):
+    """Draw the suite's labelled cloud as 2 px dots. Returns points drawn.
+
+    Direct array assignment rather than cv2.circle per point: at 5000 points
+    the call overhead alone dominates, and a 2 px dot is four writes to a
+    slice. Painted in label order with ground first, so a point standing on the
+    floor is not hidden by the floor point behind it.
+    """
+    u, v, ok = _cloud_to_pixels(cam_h, pitch_deg, fx, fy, ppx, ppy, xyz,
+                                out.shape[1], out.shape[0])
+    if not ok.any():
+        return 0
+    u, v, lab = u[ok], v[ok], labels[ok]
+    # BGR. Grey last so an unexpected class is visible but never mistaken for
+    # one of the two that carry meaning.
+    for value, colour in ((None, (150, 150, 150)),
+                          (obstacle_label, (0, 165, 255)),
+                          (ground_label, (60, 220, 60))):
+        if value is None:
+            sel = (lab != ground_label) & (lab != obstacle_label)
+        else:
+            sel = lab == value
+        if not sel.any():
+            continue
+        uu, vv = u[sel], v[sel]
+        for dv in (0, 1):
+            for du in (0, 1):
+                out[vv + dv, uu + du] = colour
+    return int(ok.sum())
+
+
+def _cloud_caption(out, drawn, total, ms, mode) -> None:
+    """Point count, downsample ratio and draw cost, bottom left.
+
+    The cost is on screen rather than in the log because it is the number that
+    decides whether this mode is usable during a demo, and a log line scrolls
+    past while the operator is looking at the window.
+    """
+    lines = [f"suite cloud: {drawn} pts drawn of {total} "
+             f"({100.0 * drawn / total:.1f}%)" if total else
+             f"suite cloud: {drawn} pts",
+             f"draw {ms:.2f} ms/frame   mode {mode}/2 ('p')"]
+    y = out.shape[0] - 12 - 20 * (len(lines) - 1)
+    for text in lines:
+        cv2.putText(out, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, text, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        y += 20
+    x = 12
+    for label, colour in (("ground", (60, 220, 60)),
+                          ("obstacle", (0, 165, 255)),
+                          ("other", (150, 150, 150))):
+        cv2.rectangle(out, (x, out.shape[0] - 56), (x + 10,
+                      out.shape[0] - 48), colour, -1)
+        cv2.putText(out, label, (x + 14, out.shape[0] - 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, label, (x + 14, out.shape[0] - 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, colour, 1, cv2.LINE_AA)
+        x += 22 + 8 * len(label)
 
 
 def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
@@ -1815,7 +1914,8 @@ def main() -> None:
     pub = Publisher()
     cam_sub = Subscriber([topics.CAMERA_RGB, topics.CAMERA_DEPTH], rcvhwm=2)
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
-                      topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR])
+                      topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR,
+                      topics.SUITE_CLOUD])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -1827,6 +1927,13 @@ def main() -> None:
     suite_floor: list = []      # the suite's floor outline, drawn under 'f'
     suite_floor_t = 0.0
     _diag_written = 0           # diagnostic PNGs written so far, capped above
+    # 'p' cycles: 0 off, 1 cloud over the video, 2 cloud alone on black.
+    cloud_mode = SHOW_CLOUD_AT_START
+    cloud_xyz = None
+    cloud_lab = None
+    cloud_total = 0
+    cloud_t = 0.0
+    cloud_ms = 0.0              # cost of the last cloud draw, shown on screen
     _annotated = False    # True when the CPU copy carries the overlay or ring
     last_dets: list = []  # rounded detections, to notice when the scene moves
     obstacle_boxes: list = []   # ground footprints currently subtracted
@@ -1858,7 +1965,7 @@ def main() -> None:
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
              2.0 * np.degrees(np.arctan(240.0 / fy)))
-    prev_keys = {"r": False, "f": False, "h": False, "s": False}
+    prev_keys = {"r": False, "f": False, "h": False, "s": False, "p": False}
     show_scale = False   # 'h' draws the horizon and the expected robot height
     # The walkable region is republished periodically: the floor the camera sees
     # is what bounds the robot, and it is cheap to keep in step with the scene.
@@ -1924,6 +2031,20 @@ def main() -> None:
                 suite_floor = [(float(a), float(b))
                                for a, b in (payload.get("poly") or [])]
                 suite_floor_t = time.time()
+                continue
+
+            if topic == topics.SUITE_CLOUD:
+                # Unpacked once here rather than per frame: the display runs at
+                # 60 Hz and the cloud arrives at 2.
+                try:
+                    _n = int(payload["n"])
+                    cloud_xyz = np.frombuffer(
+                        payload["xyz"], np.float32).reshape(_n, 3)
+                    cloud_lab = np.frombuffer(payload["labels"], np.uint16)
+                    cloud_total = int(payload.get("total", _n))
+                    cloud_t = time.time()
+                except Exception as exc:
+                    log.warning("could not read the suite cloud: %s", exc)
                 continue
 
             if topic == topics.DETECTIONS:
@@ -2078,10 +2199,28 @@ def main() -> None:
             # couple of times a second: refine() runs a morphological close and a
             # connected-components pass, which is far too slow for every frame
             # and pointless anyway since the camera does not move.
+            # The cloud goes down FIRST so the floor outlines stay readable on
+            # top of it, and mode 2 blanks the video so the room's structure is
+            # judged on the points alone.
+            _cloud_fresh = (cloud_xyz is not None
+                            and time.time() - cloud_t < 3.0)
+            _cloud_drawn = 0
+            if cloud_mode and _cloud_fresh:
+                _t0 = time.perf_counter()
+                if cloud_mode == 2:
+                    out[:] = 0
+                _cloud_drawn = _draw_cloud(
+                    out, cloud_xyz, cloud_lab, cam_height, _cam_pitch_deg,
+                    fx, fy, ppx, ppy, CLOUD_GROUND_LABEL,
+                    CLOUD_OBSTACLE_LABEL)
+                cloud_ms = (time.perf_counter() - _t0) * 1000.0
+                _cloud_caption(out, _cloud_drawn, cloud_total, cloud_ms,
+                               cloud_mode)
+                _annotated = True
             _annotated = _draw_overlays(
-                out, ov, show_floor, show_seg, floor_det, depth_metres,
-                floor_paint_cpu, obstacle_boxes, roi_cached, detections,
-                seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
+                out, ov, show_floor and cloud_mode != 2, show_seg, floor_det,
+                depth_metres, floor_paint_cpu, obstacle_boxes, roi_cached,
+                detections, seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
                 fx, fy, ppx, ppy, suite_floor, suite_floor_t) or _annotated
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
@@ -2130,7 +2269,8 @@ def main() -> None:
             frames = 0
             last_log = now
 
-        # Keys: q/Esc quit, r reset the robot to the camera foot, f floor overlay.
+        # Keys: q/Esc quit, r reset the robot to the camera foot, f floor
+        # overlay, p cycle the suite's point cloud (off / over video / alone).
         if DISPLAY_MODE == "glfw":
             if _glfw_should_quit(window):
                 break
@@ -2138,6 +2278,13 @@ def main() -> None:
             _f = glfw.get_key(window, glfw.KEY_F) == glfw.PRESS
             _h = glfw.get_key(window, glfw.KEY_H) == glfw.PRESS
             _s = glfw.get_key(window, glfw.KEY_S) == glfw.PRESS
+            _p = glfw.get_key(window, glfw.KEY_P) == glfw.PRESS
+            if _p and not prev_keys["p"]:
+                cloud_mode = (cloud_mode + 1) % 3
+                log.info("suite cloud display: %s%s",
+                         ("off", "over the video", "cloud only")[cloud_mode],
+                         "" if cloud_xyz is not None else
+                         " (nothing received: is groundfloor running?)")
             if _r and not prev_keys["r"]:
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if _f and not prev_keys["f"]:
@@ -2152,8 +2299,8 @@ def main() -> None:
                 log.info("segmentation overlay %s%s", "on" if show_seg else "off",
                          "" if seg_mask is not None else
                          " (no mask received: is the model a -seg one?)")
-            prev_keys["r"], prev_keys["f"], prev_keys["h"], prev_keys["s"] = \
-                _r, _f, _h, _s
+            (prev_keys["r"], prev_keys["f"], prev_keys["h"], prev_keys["s"],
+             prev_keys["p"]) = _r, _f, _h, _s, _p
         elif DISPLAY_MODE == "cv2":
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
