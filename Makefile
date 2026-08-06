@@ -46,6 +46,7 @@ help:
 	@echo "  make distclean  Also remove images and fetched assets"
 	@echo ""
 	@echo "  In the compositor window:  f  floor   s  detections   h  scale   r  reset   q  quit"
+	@echo "                             f also draws the suite's ground in cyan when groundfloor runs"
 
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)

@@ -1244,7 +1244,8 @@ class _Overlays:
 def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
                    floor_paint_cpu, obstacle_boxes, roi_cached, detections,
                    seg_mask, seg_mask_t, cam_height, cam_pitch_deg,
-                   fx, fy, ppx, ppy) -> bool:
+                   fx, fy, ppx, ppy, suite_floor=None,
+                   suite_floor_t=0.0) -> bool:
     """Draw whatever the operator has switched on. Returns True if it drew.
 
     Kept out of the main loop because it is diagnostic, not part of producing a
@@ -1332,6 +1333,48 @@ def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
                 cv2.putText(out, str(k + 1), (u + 8, v - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 220, 60), 1,
                             cv2.LINE_AA)
+            annotated = True
+
+    # The suite's floor, through the SAME projection as ours. Reusing
+    # _world_to_pixel rather than deriving a second path is the whole point: a
+    # disagreement then has to come from the two floor detections, not from two
+    # ways of drawing a ground polygon.
+    #
+    # Outline only, no vertex markers and no fill. A fill would hide the video
+    # underneath, which is the thing being judged, and two filled polygons
+    # overlapping read as a third colour rather than as a disagreement.
+    _suite_fresh = suite_floor and (time.time() - suite_floor_t) < 3.0
+    if show_floor and _suite_fresh:
+        spts = []
+        for fwd, lat in suite_floor:
+            uv = _world_to_pixel(cam_height, cam_pitch_deg, fx, fy,
+                                 ppx, ppy, fwd, lat,
+                                 out.shape[1], out.shape[0])
+            if uv is not None:
+                spts.append(uv)
+        if len(spts) >= 3:
+            arr = np.array(spts, np.int32)
+            cv2.polylines(out, [arr], True, (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.polylines(out, [arr], True, (255, 255, 0), 2, cv2.LINE_AA)
+            annotated = True
+
+    if show_floor and (roi_cached or _suite_fresh):
+        # Legend. Without it the two outlines are just two coloured rings and
+        # the screenshot is unreadable a week later.
+        y = 24
+        for label, colour, on in (("ours (walkable floor)", (60, 220, 60),
+                                   bool(roi_cached)),
+                                  ("Intel suite (ground)", (255, 255, 0),
+                                   bool(_suite_fresh))):
+            if not on:
+                continue
+            cv2.line(out, (12, y - 5), (40, y - 5), (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.line(out, (12, y - 5), (40, y - 5), colour, 2, cv2.LINE_AA)
+            cv2.putText(out, label, (48, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(out, label, (48, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        colour, 1, cv2.LINE_AA)
+            y += 22
             annotated = True
     return annotated
 
@@ -1749,7 +1792,7 @@ def main() -> None:
     pub = Publisher()
     cam_sub = Subscriber([topics.CAMERA_RGB, topics.CAMERA_DEPTH], rcvhwm=2)
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
-                      topics.OBSTACLE_MASK])
+                      topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -1758,6 +1801,8 @@ def main() -> None:
     detections = []     # latest bbox+conf+label
     det_t = 0.0
     show_floor = False    # 'f' toggles the red floor overlay at any time
+    suite_floor: list = []      # the suite's floor outline, drawn under 'f'
+    suite_floor_t = 0.0
     _annotated = False    # True when the CPU copy carries the overlay or ring
     last_dets: list = []  # rounded detections, to notice when the scene moves
     obstacle_boxes: list = []   # ground footprints currently subtracted
@@ -1844,6 +1889,17 @@ def main() -> None:
                     seg_mask_t = time.time()
                 except Exception as exc:
                     log.warning("could not read the obstacle mask: %s", exc)
+                continue
+
+            if topic == topics.GROUNDFLOOR_FLOOR:
+                # The suite's floor, drawn beside ours under the same 'f'.
+                # Diagnostic only: nothing downstream reads it, and the demo
+                # runs identically whether or not groundfloor is up. Stamped so
+                # a stopped bridge fades the outline out instead of leaving a
+                # stale one on screen looking like a live disagreement.
+                suite_floor = [(float(a), float(b))
+                               for a, b in (payload.get("poly") or [])]
+                suite_floor_t = time.time()
                 continue
 
             if topic == topics.DETECTIONS:
@@ -2002,7 +2058,7 @@ def main() -> None:
                 out, ov, show_floor, show_seg, floor_det, depth_metres,
                 floor_paint_cpu, obstacle_boxes, roi_cached, detections,
                 seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
-                fx, fy, ppx, ppy) or _annotated
+                fx, fy, ppx, ppy, suite_floor, suite_floor_t) or _annotated
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
             raise
