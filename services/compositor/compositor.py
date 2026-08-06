@@ -1408,6 +1408,11 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                 mask[paint > 200] = True     # painted floor
                 mask[(paint > 80) & (paint <= 200)] = False
             dh_, dw_ = mask.shape
+            # Snapshot before the silhouettes and the footprints come out, for
+            # the raw polygon published below. Taken here rather than
+            # reconstructed later because after line-by-line subtraction there
+            # is no way back to the floor the geometry alone reported.
+            _raw_mask = mask.copy()
             # A pixel belonging to a detected object is not floor, whatever
             # the geometry says. Projecting it through the FLOOR plane puts
             # it far behind the object it belongs to: a stool seat at 4 m
@@ -1443,6 +1448,13 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                          "silhouettes" if seg_mask is not None else "boxes",
                          OBSTACLE_MARGIN)
             obstacle_boxes = _boxes
+            # The floor the geometry alone reported: no ROI_MARGIN, no
+            # silhouettes, no footprints. Nothing steers on it -- it exists so
+            # a comparison against another floor detection can neutralise our
+            # own definitions, which are policy (where the robot MAY walk)
+            # rather than perception (where the floor IS). Costs one extra
+            # findContours, and only when the polygon is rebuilt.
+            _publish_free_floor.raw_poly = polygon_from_mask(_raw_mask, _tw) or []
             poly = polygon_from_mask(mask, _tw)
             if poly:
                 _m = float(os.environ.get("ROI_MARGIN", "0.25"))
@@ -1493,6 +1505,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                                       depth_metres.shape[0])
             pub.send(topics.PATROL_ROI,
                      {"roi": roi_cached, "blocked": blocked,
+                      "raw": getattr(_publish_free_floor, "raw_poly", []),
                       "stamp": time.time()})
             # The polygon carries the OUTER boundary only: an
             # obstacle standing away from the walls becomes an

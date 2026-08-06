@@ -18,6 +18,18 @@ CMD_TURN = "cmd.turn"
 # Keep-out zones as world-ground polygons the robot must not enter.
 KEEPOUT_ZONES = "keepout.zones"
 # Patrol ROI: the polygon the robot must stay inside (replaces distance bounds).
+#   {"roi": [[x, y], ...], "blocked": [[x0, x1, y0, y1], ...],
+#    "raw": [[x, y], ...], "stamp": float}
+#
+# `roi` is where the robot MAY walk: the detected floor minus obstacle
+# silhouettes and footprints, then shrunk inward by ROI_MARGIN. That is what
+# the navigator follows.
+#
+# `raw` is where the floor IS, straight from the depth geometry, with none of
+# those three applied. Nothing steers on it. It exists so a comparison against
+# another floor detection can neutralise our own definitions, which are policy
+# and not perception -- comparing a walkable-floor polygon against somebody
+# else's ground segmentation measures our margin as much as their detector.
 PATROL_ROI = "patrol.roi"
 
 # Silhouettes of everything the segmentation model found, as one packed boolean

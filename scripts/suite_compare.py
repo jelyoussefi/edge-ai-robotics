@@ -135,9 +135,9 @@ def main() -> int:
     sub = Subscriber([topics.PATROL_ROI, topics.GROUNDFLOOR_OBSTACLES,
                       topics.GROUNDFLOOR_FLOOR])
     ours, theirs = None, None
-    our_floor, their_floor = None, None
+    our_floor, their_floor, our_raw = None, None, None
     samples, ious, counts = [], [], []
-    floors = []
+    floors, raws = [], []
     theirs_seen, floor_seen = 0, 0
     deadline = time.time() + args.seconds
     print(f"  ecoute pendant {args.seconds:.0f} s ...")
@@ -150,6 +150,7 @@ def main() -> int:
         if topic == topics.PATROL_ROI:
             ours = [tuple(map(float, b)) for b in (payload.get("blocked") or [])]
             our_floor = [tuple(map(float, v)) for v in (payload.get("roi") or [])]
+            our_raw = [tuple(map(float, v)) for v in (payload.get("raw") or [])]
         elif topic == topics.GROUNDFLOOR_OBSTACLES:
             theirs = [tuple(map(float, b)) for b in (payload.get("blocked") or [])]
             theirs_seen += 1
@@ -160,6 +161,10 @@ def main() -> int:
             fc = floor_compare(our_floor, their_floor)
             if fc is not None:
                 floors.append(fc)
+        if our_raw and their_floor:
+            rc = floor_compare(our_raw, their_floor)
+            if rc is not None:
+                raws.append(rc)
         if ours is None or theirs is None:
             continue
         pairs, only_a, only_b = match(ours, theirs)
@@ -199,6 +204,26 @@ def main() -> int:
               f"p95 {med('bd_p95'):.3f} m, max {med('bd_max'):.3f} m")
         print(f"      dont nous -> eux      : {med('bd_ours_to_theirs'):.3f} m")
         print(f"      dont eux -> nous      : {med('bd_theirs_to_ours'):.3f} m")
+
+    # Definitions neutralisees. `roi` est une POLITIQUE (ou le robot a le droit
+    # de marcher) : la marge et la soustraction des silhouettes y sont deja
+    # appliquees, donc la comparer a leur segmentation mesure autant nos choix
+    # que leur detecteur. `raw` est la PERCEPTION seule.
+    print(f"\n  === SOL BRUT CONTRE SOL, DEFINITIONS NEUTRALISEES "
+          f"({len(raws)} comparaisons) ===\n")
+    if not raws:
+        print("    aucun polygone brut recu (compositor trop ancien ?)")
+    else:
+        rmed = lambda k: sorted(f[k] for f in raws)[len(raws) // 2]
+        print(f"    IoU du sol brut         : mediane {rmed('iou'):.3f}, "
+              f"min {min(f['iou'] for f in raws):.3f}, "
+              f"max {max(f['iou'] for f in raws):.3f}")
+        print(f"    surface, brut           : {rmed('area_a'):.2f} m2")
+        print(f"    surface, la suite       : {rmed('area_b'):.2f} m2")
+        print(f"    distance des frontieres : mediane {rmed('bd_median'):.3f} m, "
+              f"p95 {rmed('bd_p95'):.3f} m, max {rmed('bd_max'):.3f} m")
+        print(f"      dont nous -> eux      : {rmed('bd_ours_to_theirs'):.3f} m")
+        print(f"      dont eux -> nous      : {rmed('bd_theirs_to_ours'):.3f} m")
 
     if not samples:
         print("\n  (pas d'empreintes recues, comparaison d'obstacles ignoree)")
