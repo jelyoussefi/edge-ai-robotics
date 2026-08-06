@@ -26,6 +26,14 @@ PATROL_ROI = "patrol.roi"
 # 2400 bytes, small enough to publish every frame.
 OBSTACLE_MASK = "perception.mask"
 
+# groundfloor -> anyone. Obstacle footprints computed by Intel's
+# pointcloud_groundfloor_segmentation, in the same world rectangles as
+# PATROL_ROI's `blocked`. Published ALONGSIDE this project's own, not instead
+# of them: step B is a comparison, and replacing before comparing would leave
+# no way to tell which one is right.
+#   {"blocked": [[x0, x1, y0, y1], ...], "points": int, "stamp": float}
+GROUNDFLOOR_OBSTACLES = "groundfloor.obstacles"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

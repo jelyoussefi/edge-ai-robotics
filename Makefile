@@ -27,7 +27,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test groundfloor suite-compare logs ps shell clean distclean
 default: run
 
 help:
@@ -37,6 +37,8 @@ help:
 	@echo "  make restart    Same as run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
 	@echo "  make seg-test   What the segmentation model sees, as an image"
+	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
+	@echo "  make suite-compare  Their floor against ours, side by side"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
 	@echo "  make shell      Shell inside a service                     [S=sim]"
@@ -59,6 +61,21 @@ $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
 
 .env:
 	@cp .env.example .env
+
+groundfloor:
+	@$(call msg, Starting the Robotics AI Suite floor segmentation ...)
+	@# Own profile, so the demo runs without it and this can be added or
+	@# removed without touching the rest of the stack.
+	@$(COMPOSE) --profile suite up --build groundfloor
+
+suite-compare:
+	@$(call msg, Comparing the two floor pipelines ...)
+	@# Runs inside a container so it reaches the bus by name, and mounts the
+	@# script rather than baking it into an image: it is a measurement, and
+	@# it will change every time we learn something from what it reports.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		perception /scripts/suite_compare.py $(ARGS)
 
 seg-test: $(IMAGES_STAMP)
 	@$(call msg, Running the segmentation model on the live camera feed ...)

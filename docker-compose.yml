@@ -223,6 +223,27 @@ services:
 
   # Recorder. Persists calibration and runtime telemetry to a SQLite file on a
   # mounted volume. Passive: subscribes only to small messages, never the camera.
+  # Intel Robotics AI Suite, brique 1 : segmentation du plan de sol.
+  # Profil optionnel, la demo tourne sans. `make groundfloor` la demarre.
+  groundfloor:
+    profiles: ["suite"]
+    build:
+      context: .
+      dockerfile: services/groundfloor/Dockerfile
+    depends_on: [bus, source]
+    environment:
+      BUS_PUB: tcp://bus:5555
+      BUS_SUB: tcp://bus:5556
+      PYTHONUNBUFFERED: "1"
+      ROS_DISTRO: jazzy
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      # Doit valoir la meme chose que pour le reste du projet, sans quoi les
+      # empreintes des deux cotes ne seraient pas comparables.
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
+    volumes:
+      - ./config:/config:ro
+
   recorder:
     build:
       context: .
