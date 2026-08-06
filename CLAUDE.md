@@ -102,4 +102,3 @@ Do not trust these; the code is authoritative:
 - `README.md` describes `viewer`/`teleop` services, `make teleop|policy|models|perception`, and a `tests/` suite — none of which exist.
 - `docs/CALIBRATION.md` references `scripts/calibrate_camera.py`; the real script is `services/source/calibrate.py`, reached via `make calibrate`.
 - `.env.example` defaults (`ROBOT=g1`, `POLICY=kinematic`) are overridden unconditionally by compose (`g1_walker`, `rl`); `SIM_CPUS` and `STREAMS` are no longer read anywhere.
-- `services/sim/navigator.py:76` — the `# m each side in a gap` comment on `CONFIRM_MIN` actually belongs to `GAP_CLEAR`.

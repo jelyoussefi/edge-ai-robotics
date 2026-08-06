@@ -197,11 +197,6 @@ Plan de sol superposable au nôtre à quelques centimètres via
    fusionnant en un bloc. Sept déclenchements en 40 s observés. À traiter
    après la mesure de B, probablement en excluant la silhouette du robot par
    sa position connue.
-3. **`RETURN_TO` par défaut** : vérifier qu'il vaut 1,9 dans
-   `docker-compose.yml`. À 1,5 le demi-tour proche se fait 20 cm hors du sol
-   praticable, qui commence à 1,7.
-4. Commentaire égaré ligne ~76 de `navigator.py` : `# m each side in a gap`
-   appartient à `GAP_CLEAR`, pas à `CONFIRM_MIN`.
 
 ## Limites connues de la politique RL
 
@@ -219,7 +214,7 @@ une marche optimisée. Vérifier sa licence avant publication.
 Navigator : `CRUISE_VX=0.6`, `TURN_VX=0.26`, `TURN_WZ=0.9`, `LOOKAHEAD=2.0`,
 `YAW_DAMP=0.5`, `CROSS_MAX=0.35`, `SMOOTH_TAU=0.5`, `OBSTACLE_LOOK=3.5`,
 `OBSTACLE_CLEAR=0.45`, `DETOUR_MAX=1.8`, `DETOUR_RUNUP=1.6`, `DETOUR_GAIN=1.25`,
-`ROBOT_HALF_WIDTH=0.22`, `GAP_CLEAR=0.20`, `STOP_AT=5.2`, `RETURN_TO=1.9`,
+`ROBOT_HALF_WIDTH=0.22`, `GAP_CLEAR=0.20`, `STOP_AT=6.0`, `RETURN_TO=1.9`,
 `EASE_IN=0.8`.
 
 Compositor : `RENDER_SCALE=3`, `ROI_MARGIN=0.25`, `OBSTACLE_MARGIN=0.20`,

@@ -38,7 +38,10 @@ services:
       # The robot paces the optical axis between these two limits, turning on
       # the spot at each end.
       STOP_AT: ${STOP_AT:-6.0}
-      RETURN_TO: ${RETURN_TO:-1.5}
+      # The walkable floor starts at 1.7 m (the floor polygon shrunk by
+      # ROI_MARGIN), so a near limit of 1.5 turned the robot around 20 cm
+      # outside it, on ground it had no depth evidence for.
+      RETURN_TO: ${RETURN_TO:-1.9}
       # About-face tuning. The log prints commanded vs actual yaw rate during
       # the turn: if actual stays well below commanded, the policy is saturated
       # and raising TURN_WZ further will not help.

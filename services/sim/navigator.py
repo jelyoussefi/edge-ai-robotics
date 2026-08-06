@@ -42,7 +42,7 @@ class Navigator:
     """Paces the optical axis, going around what perception reports."""
 
     STOP_AT = float(os.environ.get("STOP_AT", "6.0"))      # far end of the run
-    RETURN_TO = float(os.environ.get("RETURN_TO", "1.5"))  # near end
+    RETURN_TO = float(os.environ.get("RETURN_TO", "1.9"))  # near end
     TURN_DONE = 0.12      # rad, how close to the new heading ends the about-face
     TURN_WZ = float(os.environ.get("TURN_WZ", "0.9"))   # rad/s asked while turning
     TURN_VX = float(os.environ.get("TURN_VX", "0.26"))  # m/s kept while turning
@@ -58,7 +58,7 @@ class Navigator:
     OBSTACLE_LOOK = float(os.environ.get("OBSTACLE_LOOK", "3.5"))   # m ahead
     OBSTACLE_CLEAR = float(os.environ.get("OBSTACLE_CLEAR", "0.45"))  # m to spare
     ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
-    GAP_CLEAR = float(os.environ.get("GAP_CLEAR", "0.20"))
+    GAP_CLEAR = float(os.environ.get("GAP_CLEAR", "0.20"))  # m each side in a gap
     # A footprint must appear in CONFIRM_MIN of the last CONFIRM_OF updates
     # before the robot acts on it. Detections flicker, and reacting to a single
     # frame made the robot escape an imaginary obstacle every 11 seconds.
@@ -73,7 +73,7 @@ class Navigator:
     # robot ping-ponged in and out of it for a minute at a time.
     STALE = float(os.environ.get("OBSTACLE_STALE", "3.0"))
     CONFIRM_OF = int(os.environ.get("CONFIRM_OF", "3"))
-    CONFIRM_MIN = int(os.environ.get("CONFIRM_MIN", "3"))  # m each side in a gap
+    CONFIRM_MIN = int(os.environ.get("CONFIRM_MIN", "3"))
     DETOUR_MAX = float(os.environ.get("DETOUR_MAX", "1.8"))  # m of lane shift
     # How much run-up to take beyond the geometric minimum. 1.0 is the pure
     # geometry and is always slightly short, the cross-track law reaching its

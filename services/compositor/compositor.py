@@ -1402,7 +1402,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             obstacle_boxes = _boxes
             poly = polygon_from_mask(mask, _tw)
             if poly:
-                _m = float(os.environ.get("ROI_MARGIN", "0.45"))
+                _m = float(os.environ.get("ROI_MARGIN", "0.25"))
                 roi_cached = shrink(poly, _m)
                 # Say what each stage costs. The ring is visibly
                 # smaller than the red floor and it matters whether
@@ -1663,7 +1663,7 @@ def main() -> None:
     # gpu.configure_floor below), using the same camera geometry.
 
     # --- GLFW window + MuJoCo GL context.
-    SCALE = int(os.environ.get("RENDER_SCALE", "2"))
+    SCALE = int(os.environ.get("RENDER_SCALE", "3"))
     if not glfw.init():
         raise RuntimeError("glfw init failed")
     # Hidden GLFW window: it exists only to provide the GL context MuJoCo renders
@@ -1697,8 +1697,8 @@ def main() -> None:
              int(mjr.offWidth), int(mjr.offHeight), WINDOW_W * SCALE, WINDOW_H * SCALE,
              int(mjr.offFBO), int(mjr.offSamples))
     if int(mjr.offWidth) < WINDOW_W * SCALE or int(mjr.offHeight) < WINDOW_H * SCALE:
-        log.warning("offscreen buffer smaller than the 2x render rect; "
-                    "falling back to render scale 1")
+        log.warning("offscreen buffer smaller than the %dx render rect; "
+                    "falling back to render scale 1", SCALE)
         SCALE = 1
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, int(mjr.offFBO))
     log.info("offFBO status=0x%x (0x8cd5 = complete)",
@@ -1989,7 +1989,7 @@ def main() -> None:
                 dist = float(np.hypot(data.qpos[0], data.qpos[1]))
                 gpu.set_scale_refs(scale_reference_rows(
                     cam_height, _cam_pitch_deg, fy, ppy, max(0.3, dist),
-                    float(os.environ.get("ROBOT_HEIGHT", "1.30"))))
+                    float(os.environ.get("ROBOT_HEIGHT", "1.31"))))
             else:
                 gpu.set_scale_refs((-1.0, -1.0, -1.0))
             out = gpu.composite_to_array()

@@ -8,10 +8,13 @@ This repo has no test suite and no CI. These three checkers plus running the dem
 ## 1. Compile every module
 
 ```bash
-python3 -m py_compile services/*/*.py services/*/**/*.py common/edgebot/*.py scripts/*.py
+PYTHONPYCACHEPREFIX="${TMPDIR:-/tmp}/edgebot-pycache" \
+  python3 -m py_compile services/*/*.py services/*/**/*.py common/edgebot/*.py scripts/*.py
 ```
 
 `make build` does **not** run this one. Syntax and indentation errors only.
+
+`PYTHONPYCACHEPREFIX` is not optional: several `services/` subdirectories carry a root-owned `__pycache__` left by container builds, and without it `py_compile` fails with `[Errno 13] Permission denied` on files that are perfectly valid.
 
 ## 2. Compose file
 
