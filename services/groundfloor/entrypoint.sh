@@ -22,9 +22,14 @@ python3 /app/bridge.py &
 BRIDGE=$!
 
 # standalone:=False because the camera is the bridge, not a RealSense node.
+# use_best_effort_qos:=True because the bridge publishes depth the way a real
+# camera driver does, BEST_EFFORT (bridge.py). Their node subscribes RELIABLE by
+# default, and DDS refuses to match the two: the first run logged "incompatible
+# QoS ... no messages will be sent" on image_rect_raw and camera_info from both
+# ends, then sat silent for 30 s. The flag moves their side, not ours.
 ros2 launch pointcloud_groundfloor_segmentation \
     realsense_groundfloor_segmentation_launch.py \
-    standalone:=False with_rviz:=False &
+    standalone:=False with_rviz:=False use_best_effort_qos:=True &
 SEG=$!
 
 trap 'kill $BRIDGE $SEG 2>/dev/null || true' INT TERM
