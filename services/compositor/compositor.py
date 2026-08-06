@@ -32,7 +32,8 @@ import mujoco
 import numpy as np
 from OpenGL import GL
 from edgebot import topics
-from edgebot.floor import polygon_from_mask, shrink, straighten
+from edgebot.floor import (box_footprints, clear_of_boxes, mask_footprints,
+                           polygon_from_mask, shrink, straighten)
 from edgebot.bus import Publisher, Subscriber
 
 
@@ -441,8 +442,6 @@ class GLCompositor:
         self._pbo_idx = 0
 
     # -- per-frame -----------------------------------------------------------
-    def set_depth_bias(self, bias_m: float) -> None:
-        self.depth_bias_m = bias_m
 
     def configure_floor(self, cam_height, pitch_rad, fx, fy, ppx, ppy,
                         cam_res, tol=0.15) -> None:
@@ -883,6 +882,18 @@ class FloorDetector:
                 out |= lab == i
         return straighten(out)
 
+    def project_many(self, u, v, dw: int, dh: int):
+        """to_world for whole arrays. Same maths, no Python loop."""
+        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
+        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        x, y = (np.asarray(u) - ppx) / fx, (np.asarray(v) - ppy) / fy
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        den = y * cp + sp
+        with np.errstate(divide="ignore", invalid="ignore"):
+            Ze = np.where(den > 1e-6, self.H / den, np.nan)
+        Ze = np.where((Ze > 0.2) & (Ze < 25.0), Ze, np.nan)
+        return Ze * (cp - y * sp), -x * Ze
+
     def to_world(self, u: float, v: float, dw: int, dh: int):
         """Ground point a pixel looks at, as (forward, lateral) in metres.
 
@@ -1003,34 +1014,6 @@ class FloorDetector:
                 f"{float(np.median(hh)):+5.2f} m")
         return out
 
-    def feet_screen_y(self, ground_dist_m: float, window_h: int) -> float:
-        """Vertical screen position (pixels) where a floor point at the given
-        horizontal ground distance appears, from camera geometry alone.
-
-        This places the robot's feet on the real floor at any distance without
-        reference objects: it inverts the floor geometry to find the image row
-        whose ground point is at ground_dist_m.
-        """
-        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
-        # For a floor point at horizontal distance d, its perpendicular depth is
-        # Z = sqrt(d^2 + H^2) * cos(angle between ray and optical axis). Rather
-        # than invert analytically, scan image rows for the matching distance.
-        vs = np.linspace(0.0, 1.0, 400)
-        best_v, best_err = 1.0, 1e9
-        for vf in vs:
-            v = vf * 480.0
-            y = (v - self.ppy) / self.fy
-            world_dir_z = y * (-cp) + 1.0 * (-sp)
-            if world_dir_z >= 0:
-                continue
-            Z = -self.H / world_dir_z              # perpendicular depth to floor
-            # Horizontal ground distance for that floor point.
-            x0 = 0.0                                # centre column
-            d = np.sqrt(max(0.0, (Z * Z) * (1 + x0 * x0 + y * y) - self.H * self.H))
-            err = abs(d - ground_dist_m)
-            if err < best_err:
-                best_err, best_v = err, vf
-        return best_v * window_h
 
 
 
@@ -1126,6 +1109,69 @@ def load_calibration() -> dict | None:
         return None
 
 
+# Margin left around every detected object, in metres of real floor.
+OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
+
+
+def _footprints(detections, detector, dw: int, dh: int):
+    """Ground footprints of the detected objects, in world metres.
+
+    Projects the BOTTOM edge of each box onto the floor plane rather than using
+    the measured range. The bottom of a box is where the object meets the floor,
+    so the plane gives its position exactly, with no dependence on a depth
+    reading that is unreliable on thin legs, dark fabric and shiny surfaces.
+    The width is projected the same way, at that same ground point.
+
+    Returns a list of (x_min, x_max, y_min, y_max) in world metres, already
+    grown by OBSTACLE_MARGIN so whoever consumes it need not know the margin.
+    """
+    out = []
+    for d in detections or []:
+        try:
+            cx, cy = float(d["cx"]), float(d["cy"])
+            w, h = float(d["w"]), float(d["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # Bottom edge, in pixels. Boxes are normalised centre plus size.
+        v_bottom = (cy + h / 2.0) * dh
+        u_centre, u_left, u_right = (cx * dw, (cx - w / 2.0) * dw,
+                                     (cx + w / 2.0) * dw)
+        centre = detector.to_world(u_centre, v_bottom, dw, dh)
+        if centre is None:
+            continue
+        left = detector.to_world(u_left, v_bottom, dw, dh)
+        right = detector.to_world(u_right, v_bottom, dw, dh)
+        if left is None or right is None:
+            continue
+        # A rectangle, not a circle. A circle around a 2.4 m dining table has a
+        # 1.28 m radius and claims 5.2 m2 where the table occupies 2.2: two and
+        # a half times too much floor, which is where the 2.36 m radii and the
+        # impossible 2.78 m detours came from. Depth is taken equal to width for
+        # want of anything better, a box saying nothing about depth, but at
+        # least it no longer inflates the width as well.
+        width = float(np.hypot(right[0] - left[0], right[1] - left[1]))
+        half_w = max(0.10, width / 2.0)
+        half_d = half_w
+        out.append([round(centre[0] - half_d - OBSTACLE_MARGIN, 3),
+                    round(centre[0] + half_d + OBSTACLE_MARGIN, 3),
+                    round(centre[1] - half_w - OBSTACLE_MARGIN, 3),
+                    round(centre[1] + half_w + OBSTACLE_MARGIN, 3)])
+    return out
+
+
+def _summarise(dets, places: int = 2):
+    """Rounded boxes, for deciding whether the scene actually changed.
+
+    Raw floats jitter on every frame even when nothing moves, and rebuilding the
+    walkable floor each time would move the boundary under the robot's feet.
+    """
+    return sorted((round(float(d.get("cx", 0)), places),
+                   round(float(d.get("cy", 0)), places),
+                   round(float(d.get("w", 0)), places),
+                   round(float(d.get("h", 0)), places))
+                  for d in dets or [] if float(d.get("score", 1.0)) >= 0.45)
+
+
 def _world_to_pixel(cam_h, pitch_deg, fx, fy, ppx, ppy, fwd, lat, w, h):
     """Project a ground point onto the composite. Inverse of to_world()."""
     p = np.radians(abs(pitch_deg))
@@ -1183,6 +1229,336 @@ def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=480.0):
         return float("nan")
     return float(cam_h + dist_m * (u * cp + sp) / den)
 
+
+class _Overlays:
+    """Cache for the 'f' overlay. refine() runs a morphological close and a
+    connected-components pass, far too slow for every frame and pointless
+    anyway: the camera does not move."""
+
+    def __init__(self):
+        self.overlay_mask = None
+        self.overlay_boxes: list = []
+        self.overlay_t = 0.0
+
+
+def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
+                   floor_paint_cpu, obstacle_boxes, roi_cached, detections,
+                   seg_mask, seg_mask_t, cam_height, cam_pitch_deg,
+                   fx, fy, ppx, ppy) -> bool:
+    """Draw whatever the operator has switched on. Returns True if it drew.
+
+    Kept out of the main loop because it is diagnostic, not part of producing a
+    frame: nothing here affects what the robot does or what a recording
+    contains. The caller presents the annotated CPU copy only when this returns
+    True, so the normal path stays on the GPU with no copy at all.
+    """
+    annotated = False
+    if show_floor and depth_metres is not None:
+        if (ov.overlay_mask is None or ov.overlay_boxes != obstacle_boxes
+                or time.perf_counter() - ov.overlay_t > 0.5):
+            ov.overlay_boxes = list(obstacle_boxes)
+            ov.overlay_t = time.perf_counter()
+            try:
+                m = floor_det.refine(floor_det.mask(depth_metres),
+                                     depth_metres)
+                # The overlay must show the floor the robot may use, so
+                # the detected objects come out of it here too.
+                if obstacle_boxes:
+                    _dh, _dw = m.shape
+                    m = clear_of_boxes(
+                        m, obstacle_boxes,
+                        lambda uu, vv: floor_det.project_many(
+                            uu, vv, _dw, _dh))
+                if floor_paint_cpu is not None:
+                    paint = floor_paint_cpu
+                    if paint.shape != m.shape:
+                        paint = cv2.resize(paint, (m.shape[1], m.shape[0]),
+                                           interpolation=cv2.INTER_NEAREST)
+                    m = m.copy()
+                    m[paint > 200] = True
+                    m[(paint > 80) & (paint <= 200)] = False
+                ov.overlay_mask = cv2.resize(
+                    m.astype(np.uint8), (out.shape[1], out.shape[0]),
+                    interpolation=cv2.INTER_NEAREST).astype(bool)
+            except Exception as exc:
+                log.warning("floor overlay failed: %s", exc)
+                ov.overlay_mask = None
+        if ov.overlay_mask is not None:
+            sel = ov.overlay_mask
+            out[sel] = (0.55 * out[sel].astype(np.float32)
+                        + 0.45 * np.array([60, 60, 235], np.float32)
+                        ).astype(np.uint8)
+            annotated = True
+    elif not show_floor:
+        ov.overlay_mask = None
+    if show_seg:
+        if seg_mask is not None and time.time() - seg_mask_t < 2.0:
+            _sm = cv2.resize(seg_mask.astype(np.uint8),
+                             (out.shape[1], out.shape[0]),
+                             interpolation=cv2.INTER_NEAREST).astype(bool)
+            out[_sm] = (0.5 * out[_sm].astype(np.float32)
+                        + 0.5 * np.array([255, 200, 0], np.float32)
+                        ).astype(np.uint8)
+            annotated = True
+        for _d in detections or []:
+            if float(_d.get("score", 0)) < 0.45:
+                continue
+            _cx, _cy = float(_d["cx"]), float(_d["cy"])
+            _w2, _h2 = float(_d["w"]) / 2, float(_d["h"]) / 2
+            _p1 = (int((_cx - _w2) * out.shape[1]),
+                   int((_cy - _h2) * out.shape[0]))
+            _p2 = (int((_cx + _w2) * out.shape[1]),
+                   int((_cy + _h2) * out.shape[0]))
+            cv2.rectangle(out, _p1, _p2, (255, 200, 0), 2)
+            cv2.putText(out, f"{_d.get('class_id', -1)}:{_d.get('score', 0):.2f}",
+                        (_p1[0], max(12, _p1[1] - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1,
+                        cv2.LINE_AA)
+            annotated = True
+    if show_floor and roi_cached:
+        pts = []
+        for fwd, lat in roi_cached:
+            uv = _world_to_pixel(cam_height, cam_pitch_deg, fx, fy,
+                                 ppx, ppy, fwd, lat,
+                                 out.shape[1], out.shape[0])
+            if uv is not None:
+                pts.append(uv)
+        if len(pts) >= 3:
+            arr = np.array(pts, np.int32)
+            cv2.polylines(out, [arr], True, (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.polylines(out, [arr], True, (60, 220, 60), 2, cv2.LINE_AA)
+            for k, (u, v) in enumerate(pts):
+                cv2.circle(out, (u, v), 5, (60, 220, 60), -1)
+                cv2.putText(out, str(k + 1), (u + 8, v - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 220, 60), 1,
+                            cv2.LINE_AA)
+            annotated = True
+    return annotated
+
+
+def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
+                        detections, roi_cached, obstacle_boxes,
+                        seg_mask=None, seg_mask_t=0.0):
+    """Send the sim the floor it may walk on, and what stands on it.
+
+    Two things go out together and neither is sufficient alone. The polygon is
+    the OUTER boundary of the free floor, and a simple polygon cannot express a
+    hole: an obstacle standing away from the walls leaves one the outline never
+    mentions. The footprints carry exactly that.
+    """
+    # Obstacles move, so this cannot be published once and cached
+    # like the floor. Every second is enough for a walking robot and
+    # costs nothing.
+    try:
+        if roi_cached is None:
+            # Reuse the detector built above rather than making a
+            # second one: it already carries the calibrated pose and
+            # the tolerances, and a duplicate would drift from it.
+            det = floor_det
+            mask = det.refine(det.mask(depth_metres), depth_metres)
+            if floor_paint_cpu is not None:
+                paint = floor_paint_cpu
+                if paint.shape != mask.shape:
+                    paint = cv2.resize(paint, (mask.shape[1], mask.shape[0]),
+                                       interpolation=cv2.INTER_NEAREST)
+                mask = mask.copy()
+                mask[paint > 200] = True     # painted floor
+                mask[(paint > 80) & (paint <= 200)] = False
+            dh_, dw_ = mask.shape
+            # A pixel belonging to a detected object is not floor, whatever
+            # the geometry says. Projecting it through the FLOOR plane puts
+            # it far behind the object it belongs to: a stool seat at 4 m
+            # lands at 6.9 m, well outside the stool's own 0.4 m footprint,
+            # so subtracting the footprint cannot reach it. The painted mask
+            # makes it worse by forcing those pixels to floor. Clearing the
+            # silhouette directly is the only thing that removes them.
+            if seg_mask is not None and time.time() - seg_mask_t < 2.0:
+                _sil = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
+                                  interpolation=cv2.INTER_NEAREST).astype(bool)
+                mask[_sil] = False
+            # Subtract what the detector sees, with a margin. The
+            # floor under a stool is floor, but it is not somewhere
+            # the robot may walk.
+            _tw = lambda u, v: det.to_world(u, v, dw_, dh_)
+            _proj = lambda uu, vv: det.project_many(uu, vv, dw_, dh_)
+            # Same source as the footprints published to the sim, so the
+            # red overlay shows exactly the floor the robot is given.
+            _boxes = []
+            if seg_mask is not None and time.time() - seg_mask_t < 2.0:
+                _sm = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
+                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+                _boxes = mask_footprints(_sm, _proj, OBSTACLE_MARGIN)
+            if not _boxes:
+                _boxes = box_footprints(
+                    detections, _tw, dw_, dh_,
+                    float(os.environ.get("OBSTACLE_MARGIN", "0.20")),
+                    float(os.environ.get("OBSTACLE_CONF", "0.45")))
+            if _boxes:
+                mask = clear_of_boxes(mask, _boxes, _proj)
+                log.info("%d obstacle(s) removed from the floor (%s), "
+                         "%.2f m margin", len(_boxes),
+                         "silhouettes" if seg_mask is not None else "boxes",
+                         OBSTACLE_MARGIN)
+            obstacle_boxes = _boxes
+            poly = polygon_from_mask(mask, _tw)
+            if poly:
+                _m = float(os.environ.get("ROI_MARGIN", "0.45"))
+                roi_cached = shrink(poly, _m)
+                # Say what each stage costs. The ring is visibly
+                # smaller than the red floor and it matters whether
+                # that is the margin doing its job or the polygon
+                # losing ground it should have kept.
+                _px = [q[0] for q in poly]; _py = [q[1] for q in poly]
+                _sx = [q[0] for q in roi_cached]
+                _sy = [q[1] for q in roi_cached]
+                log.info("floor polygon: %d vertices, %.1f-%.1f m "
+                         "ahead, %.1f-%.1f m across", len(poly),
+                         min(_px), max(_px), min(_py), max(_py))
+                log.info("  after the %.2f m margin: %.1f-%.1f m "
+                         "ahead, %.1f-%.1f m across", _m,
+                         min(_sx), max(_sx), min(_sy), max(_sy))
+                xs_ = [q[0] for q in roi_cached]
+                ys_ = [q[1] for q in roi_cached]
+                log.info("walkable floor: %d vertices, %.1f-%.1f m "
+                         "ahead, %.1f-%.1f m across",
+                         len(roi_cached), min(xs_), max(xs_),
+                         min(ys_), max(ys_))
+        if roi_cached:
+            # Merge the calibrated floor with what perception sees:
+            # the sim gets one ready-made description of where it may
+            # walk, rather than a floor from here and obstacles from
+            # there that it has to reconcile itself.
+            # Prefer the silhouettes. A box is a rectangle in the
+            # IMAGE, so its bottom edge is a single distance for the
+            # whole object and a table seen at an angle comes out as
+            # deep as it is long: measured at 4.6 m for a table whose
+            # real contact line is 0.4 m deep. The mask's lowest pixel
+            # per column follows that contact line.
+            blocked = []
+            if seg_mask is not None and time.time() - seg_mask_t < 2.0:
+                _m = cv2.resize(seg_mask.astype(np.uint8),
+                                (depth_metres.shape[1], depth_metres.shape[0]),
+                                interpolation=cv2.INTER_NEAREST).astype(bool)
+                blocked = mask_footprints(
+                    _m,
+                    lambda uu, vv: floor_det.project_many(
+                        uu, vv, depth_metres.shape[1], depth_metres.shape[0]),
+                    OBSTACLE_MARGIN)
+            if not blocked:
+                blocked = _footprints(detections, floor_det,
+                                      depth_metres.shape[1],
+                                      depth_metres.shape[0])
+            pub.send(topics.PATROL_ROI,
+                     {"roi": roi_cached, "blocked": blocked,
+                      "stamp": time.time()})
+            # The polygon carries the OUTER boundary only: an
+            # obstacle standing away from the walls becomes an
+            # interior hole, and a simple polygon cannot express a
+            # hole. That is what `blocked` is for, and why it is
+            # sent alongside rather than folded into the outline.
+            if blocked and blocked != _publish_free_floor.last_blocked:
+                _publish_free_floor.last_blocked = blocked
+                log.info("free floor: %d vertices minus %d "
+                         "footprint(s) with a %.2f m margin",
+                         len(roi_cached), len(blocked),
+                         OBSTACLE_MARGIN)
+    except Exception as exc:
+        log.warning("could not build the walkable floor: %s", exc)
+    return roi_cached, obstacle_boxes
+
+
+# Remembers the footprints last logged, so an unchanged scene is not announced
+# every second. An attribute on the function rather than a global: it belongs to
+# this one caller and nothing else should reach it.
+_publish_free_floor.last_blocked = None
+
+
+def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
+                       cam_height, cam_pitch_deg, fy, ppy, depth_metres,
+                       bg) -> None:
+    """Dump the frame and check the rendered scale against the geometry.
+
+    Diagnostic only, on the handful of frames in DIAG_FRAMES. This is what
+    established that the composition is correct to within a percent, so it stays
+    rather than being reinvented the next time a scale is doubted.
+    """
+    try:
+        outpath = f"/data/composite_frame_{frames}.png"
+        cv2.imwrite(outpath, out)
+        bgmean = float(bg.mean()) if bg is not None else -1
+        # Read the robot-only offscreen render and the camera texture back,
+        # exactly like the unit test, to see the real inputs in the loop.
+        from OpenGL import GL as _GL
+        import numpy as _np
+        _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, int(mjr.offFBO))
+        # The offscreen buffer's own size, rather than a value recomputed from
+        # constants that the caller happened to have in scope.
+        sw2, sh2 = int(mjr.offWidth), int(mjr.offHeight)
+        rbuf = _GL.glReadPixels(0, 0, sw2, sh2, _GL.GL_RGB, _GL.GL_UNSIGNED_BYTE)
+        rimg = _np.frombuffer(rbuf, _np.uint8).reshape(sh2, sw2, 3)
+        rnz = int((rimg.sum(axis=2) > 10).sum())
+        _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, 0)
+        cv2.imwrite(f"/data/comp_robot_{frames}.png", _np.flipud(rimg)[:, :, ::-1])
+
+        # Where the robot lands on screen against where the geometry says
+        # it should. glReadPixels returns rows bottom-up, so flip to image
+        # rows, then express both in the 480-row space the intrinsics are
+        # defined in. This settles the scale with a measurement.
+        rows = _np.nonzero((rimg.sum(axis=2) > 10).any(axis=1))[0]
+        if rows.size:
+            top = (sh2 - 1 - int(rows.max())) * 480.0 / sh2
+            bot = (sh2 - 1 - int(rows.min())) * 480.0 / sh2
+            dist = float(_np.hypot(data.qpos[0], data.qpos[1]))
+            hz, e_top, e_bot = scale_reference_rows(
+                cam_height, cam_pitch_deg, fy, ppy, max(0.3, dist),
+                float(os.environ.get("ROBOT_HEIGHT", "1.31")))
+            log.info("scale check at %.2f m: rendered rows %.1f..%.1f "
+                     "(%.1f tall), expected %.1f..%.1f (%.1f tall) -> "
+                     "%.0f%% of the expected height, top off by %+.1f rows",
+                     dist, top, bot, bot - top,
+                     e_top * 480.0, e_bot * 480.0,
+                     (e_bot - e_top) * 480.0,
+                     100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * 480.0),
+                     top - e_top * 480.0)
+            # The same measurement in metres, which is what a ruler in
+            # the room actually shows.
+            h_top = height_from_row(cam_height, cam_pitch_deg, fy, ppy,
+                                    max(0.3, dist), top / 480.0)
+            h_bot = height_from_row(cam_height, cam_pitch_deg, fy, ppy,
+                                    max(0.3, dist), bot / 480.0)
+            log.info("  on screen the robot spans %.3f m to %.3f m above "
+                     "the floor, so it stands %.3f m tall at %.2f m",
+                     h_bot, h_top, h_top - h_bot, dist)
+            if e_bot * 480.0 > 479.0 or e_top * 480.0 < 1.0:
+                log.info("  (the robot does not fit in frame at this "
+                         "distance, so the rendered height is clipped "
+                         "and the percentage is meaningless)")
+        # Read the camera colour TEXTURE back from the GPU. If the robot
+        # render is empty the shader must output cam_rgb, so a black
+        # composite with a non-black bg means either this texture is
+        # black (upload failed) or the draw never landed.
+        _GL.glActiveTexture(_GL.GL_TEXTURE0)
+        _GL.glBindTexture(_GL.GL_TEXTURE_2D, gpu.cam_col_tex)
+        tb = _GL.glGetTexImage(_GL.GL_TEXTURE_2D, 0, _GL.GL_RGB,
+                               _GL.GL_UNSIGNED_BYTE)
+        timg = _np.frombuffer(tb, _np.uint8).reshape(WINDOW_H, WINDOW_W, 3)
+        log.info("frame %d: composite mean=%.1f, bg mean=%.1f, robot px=%d (maxb %d), "
+                 "cam_col tex mean=%.1f (max %d), depth=%s",
+                 frames, float(out.mean()), bgmean, rnz, int(rimg.max()),
+                 float(timg.mean()), int(timg.max()),
+                 depth_metres is not None)
+        # Framing check: is the robot actually inside the frustum?
+        log.info("frame %d: scn.ngeom=%d robot xyz=(%.2f %.2f %.2f) "
+                 "cam lookat=(%.2f %.2f %.2f) dist=%.2f az=%.1f el=%.1f fovy=%.1f",
+                 frames, int(scn.ngeom),
+                 float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2]),
+                 float(cam.lookat[0]), float(cam.lookat[1]), float(cam.lookat[2]),
+                 float(cam.distance), float(cam.azimuth), float(cam.elevation),
+                 float(model.vis.global_.fovy))
+        if bg is not None:
+            cv2.imwrite(f"/data/comp_rawcam_{frames}.png", bg)
+    except Exception as exc:
+        log.warning("could not save diagnostic frame: %s", exc)
 
 def _log_floor_stats(detector, depth_metres, on: bool,
                      cam_height: float = 0.0, cam_pitch_deg: float = 0.0) -> None:
@@ -1372,7 +1748,8 @@ def main() -> None:
 
     pub = Publisher()
     cam_sub = Subscriber([topics.CAMERA_RGB, topics.CAMERA_DEPTH], rcvhwm=2)
-    sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS])
+    sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
+                      topics.OBSTACLE_MASK])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -1382,8 +1759,12 @@ def main() -> None:
     det_t = 0.0
     show_floor = False    # 'f' toggles the red floor overlay at any time
     _annotated = False    # True when the CPU copy carries the overlay or ring
-    overlay_mask = None   # cached floor overlay, recomputed a few times a second
-    overlay_t = 0.0
+    last_dets: list = []  # rounded detections, to notice when the scene moves
+    obstacle_boxes: list = []   # ground footprints currently subtracted
+    ov = _Overlays()      # cache for the 'f' overlay, see _draw_overlays
+    seg_mask = None       # latest silhouettes from perception, for the 's' key
+    seg_mask_t = 0.0
+    show_seg = False      # 's' toggles the segmentation overlay
     roi_next_t = 0.0      # next republication of the walkable floor
     roi_cached = None     # computed once: the camera does not move
     # Same geometry as the shader's expected_floor_z(), used only to report how
@@ -1408,7 +1789,7 @@ def main() -> None:
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
              2.0 * np.degrees(np.arctan(240.0 / fy)))
-    prev_keys = {"r": False, "f": False, "h": False}
+    prev_keys = {"r": False, "f": False, "h": False, "s": False}
     show_scale = False   # 'h' draws the horizon and the expected robot height
     # The walkable region is republished periodically: the floor the camera sees
     # is what bounds the robot, and it is cheap to keep in step with the scene.
@@ -1451,8 +1832,30 @@ def main() -> None:
                 depth_metres = dm
         while (msg := sub.recv(0)) is not None:
             topic, payload = msg
+            if topic == topics.OBSTACLE_MASK:
+                # Kept only for the 's' overlay. What the segmentation model
+                # actually produced is the one thing no derived number can show:
+                # a footprint that looks wrong could come from a bad mask, a bad
+                # box or a bad projection, and this separates them.
+                try:
+                    _w, _h = int(payload["w"]), int(payload["h"])
+                    _bits = np.frombuffer(payload["bits"], dtype=np.uint8)
+                    seg_mask = np.unpackbits(_bits)[:_w * _h].reshape(_h, _w).astype(bool)
+                    seg_mask_t = time.time()
+                except Exception as exc:
+                    log.warning("could not read the obstacle mask: %s", exc)
+                continue
+
             if topic == topics.DETECTIONS:
-                detections = payload.get("detections", [])
+                _dets = payload.get("detections", [])
+                # Anything moving changes the free floor, so the polygon is
+                # rebuilt. Compared rather than rebuilt unconditionally: an
+                # unchanged scene should not make the boundary the robot is
+                # following shift under its feet every frame.
+                if _summarise(_dets) != last_dets:
+                    last_dets = _summarise(_dets)
+                    roi_cached = None
+                detections = _dets
                 det_t = payload.get("t", time.time())
             elif topic == topics.ROBOT_STATE:
                 qpos = np.asarray(payload["qpos"], dtype=np.float64)
@@ -1570,39 +1973,17 @@ def main() -> None:
             # would only make the boundary the robot is following shift under
             # its feet. Republished periodically so a restarted sim gets it.
             if depth_metres is not None and time.perf_counter() >= roi_next_t:
-                roi_next_t = time.perf_counter() + 5.0
-                try:
-                    if roi_cached is None:
-                        # Reuse the detector built above rather than making a
-                        # second one: it already carries the calibrated pose and
-                        # the tolerances, and a duplicate would drift from it.
-                        det = floor_det
-                        mask = det.refine(det.mask(depth_metres), depth_metres)
-                        if floor_paint_cpu is not None:
-                            paint = floor_paint_cpu
-                            if paint.shape != mask.shape:
-                                paint = cv2.resize(paint, (mask.shape[1], mask.shape[0]),
-                                                   interpolation=cv2.INTER_NEAREST)
-                            mask = mask.copy()
-                            mask[paint > 200] = True     # painted floor
-                            mask[(paint > 80) & (paint <= 200)] = False
-                        dh_, dw_ = mask.shape
-                        poly = polygon_from_mask(
-                            mask, lambda u, v: det.to_world(u, v, dw_, dh_))
-                        if poly:
-                            roi_cached = shrink(poly, float(
-                                os.environ.get("ROI_MARGIN", "0.45")))
-                            xs_ = [q[0] for q in roi_cached]
-                            ys_ = [q[1] for q in roi_cached]
-                            log.info("walkable floor: %d vertices, %.1f-%.1f m "
-                                     "ahead, %.1f-%.1f m across",
-                                     len(roi_cached), min(xs_), max(xs_),
-                                     min(ys_), max(ys_))
-                    if roi_cached:
-                        pub.send(topics.PATROL_ROI,
-                                 {"roi": roi_cached, "stamp": time.time()})
-                except Exception as exc:
-                    log.warning("could not build the walkable floor: %s", exc)
+                # Republish at 1 Hz, not every 5 s. The navigator has to treat
+                # a footprint as stale eventually, and a 5 s period forced that
+                # limit so high that a person who moved was chased for seconds
+                # after leaving. The heavy part, refine(), only runs when the
+                # scene actually changed; the rest is a message.
+                roi_next_t = time.perf_counter() + float(
+                    os.environ.get("ROI_PERIOD", "1.0"))
+                roi_cached, obstacle_boxes = _publish_free_floor(
+                    pub, floor_det, depth_metres, floor_paint_cpu,
+                    detections, roi_cached, obstacle_boxes,
+                    seg_mask, seg_mask_t)
 
             if show_scale:
                 dist = float(np.hypot(data.qpos[0], data.qpos[1]))
@@ -1617,139 +1998,19 @@ def main() -> None:
             # couple of times a second: refine() runs a morphological close and a
             # connected-components pass, which is far too slow for every frame
             # and pointless anyway since the camera does not move.
-            if show_floor and depth_metres is not None:
-                if (overlay_mask is None
-                        or time.perf_counter() - overlay_t > 0.5):
-                    overlay_t = time.perf_counter()
-                    try:
-                        m = floor_det.refine(floor_det.mask(depth_metres),
-                                             depth_metres)
-                        if floor_paint_cpu is not None:
-                            paint = floor_paint_cpu
-                            if paint.shape != m.shape:
-                                paint = cv2.resize(paint, (m.shape[1], m.shape[0]),
-                                                   interpolation=cv2.INTER_NEAREST)
-                            m = m.copy()
-                            m[paint > 200] = True
-                            m[(paint > 80) & (paint <= 200)] = False
-                        overlay_mask = cv2.resize(
-                            m.astype(np.uint8), (out.shape[1], out.shape[0]),
-                            interpolation=cv2.INTER_NEAREST).astype(bool)
-                    except Exception as exc:
-                        log.warning("floor overlay failed: %s", exc)
-                        overlay_mask = None
-                if overlay_mask is not None:
-                    sel = overlay_mask
-                    out[sel] = (0.55 * out[sel].astype(np.float32)
-                                + 0.45 * np.array([60, 60, 235], np.float32)
-                                ).astype(np.uint8)
-                    _annotated = True
-            elif not show_floor:
-                overlay_mask = None
-
-            # Draw the polygon the robot is actually following. The 'f' overlay
-            # shows the floor MASK, which is not the same thing: the mask is what
-            # the depth sensor calls floor, while this ring is that boundary
-            # simplified, projected to the ground and pulled inward by
-            # ROI_MARGIN. Seeing the ring is what makes the robot's path legible.
-            if show_floor and roi_cached:
-                pts = []
-                for fwd, lat in roi_cached:
-                    uv = _world_to_pixel(cam_height, _cam_pitch_deg, fx, fy,
-                                         ppx, ppy, fwd, lat,
-                                         out.shape[1], out.shape[0])
-                    if uv is not None:
-                        pts.append(uv)
-                if len(pts) >= 3:
-                    arr = np.array(pts, np.int32)
-                    cv2.polylines(out, [arr], True, (0, 0, 0), 5, cv2.LINE_AA)
-                    cv2.polylines(out, [arr], True, (60, 220, 60), 2, cv2.LINE_AA)
-                    for k, (u, v) in enumerate(pts):
-                        cv2.circle(out, (u, v), 5, (60, 220, 60), -1)
-                        cv2.putText(out, str(k + 1), (u + 8, v - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 220, 60), 1,
-                                    cv2.LINE_AA)
-                    _annotated = True
+            _annotated = _draw_overlays(
+                out, ov, show_floor, show_seg, floor_det, depth_metres,
+                floor_paint_cpu, obstacle_boxes, roi_cached, detections,
+                seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
+                fx, fy, ppx, ppy) or _annotated
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
             raise
 
-        if frames in DIAG_FRAMES:
-            try:
-                outpath = f"/data/composite_frame_{frames}.png"
-                cv2.imwrite(outpath, out)
-                bgmean = float(bg.mean()) if bg is not None else -1
-                # Read the robot-only offscreen render and the camera texture back,
-                # exactly like the unit test, to see the real inputs in the loop.
-                from OpenGL import GL as _GL
-                import numpy as _np
-                sw2, sh2 = WINDOW_W * SCALE, WINDOW_H * SCALE
-                _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, int(mjr.offFBO))
-                rbuf = _GL.glReadPixels(0, 0, sw2, sh2, _GL.GL_RGB, _GL.GL_UNSIGNED_BYTE)
-                rimg = _np.frombuffer(rbuf, _np.uint8).reshape(sh2, sw2, 3)
-                rnz = int((rimg.sum(axis=2) > 10).sum())
-                _GL.glBindFramebuffer(_GL.GL_READ_FRAMEBUFFER, 0)
-                cv2.imwrite(f"/data/comp_robot_{frames}.png", _np.flipud(rimg)[:, :, ::-1])
-
-                # Where the robot lands on screen against where the geometry says
-                # it should. glReadPixels returns rows bottom-up, so flip to image
-                # rows, then express both in the 480-row space the intrinsics are
-                # defined in. This settles the scale with a measurement.
-                rows = _np.nonzero((rimg.sum(axis=2) > 10).any(axis=1))[0]
-                if rows.size:
-                    top = (sh2 - 1 - int(rows.max())) * 480.0 / sh2
-                    bot = (sh2 - 1 - int(rows.min())) * 480.0 / sh2
-                    dist = float(_np.hypot(data.qpos[0], data.qpos[1]))
-                    hz, e_top, e_bot = scale_reference_rows(
-                        cam_height, _cam_pitch_deg, fy, ppy, max(0.3, dist),
-                        float(os.environ.get("ROBOT_HEIGHT", "1.31")))
-                    log.info("scale check at %.2f m: rendered rows %.1f..%.1f "
-                             "(%.1f tall), expected %.1f..%.1f (%.1f tall) -> "
-                             "%.0f%% of the expected height, top off by %+.1f rows",
-                             dist, top, bot, bot - top,
-                             e_top * 480.0, e_bot * 480.0,
-                             (e_bot - e_top) * 480.0,
-                             100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * 480.0),
-                             top - e_top * 480.0)
-                    # The same measurement in metres, which is what a ruler in
-                    # the room actually shows.
-                    h_top = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
-                                            max(0.3, dist), top / 480.0)
-                    h_bot = height_from_row(cam_height, _cam_pitch_deg, fy, ppy,
-                                            max(0.3, dist), bot / 480.0)
-                    log.info("  on screen the robot spans %.3f m to %.3f m above "
-                             "the floor, so it stands %.3f m tall at %.2f m",
-                             h_bot, h_top, h_top - h_bot, dist)
-                    if e_bot * 480.0 > 479.0 or e_top * 480.0 < 1.0:
-                        log.info("  (the robot does not fit in frame at this "
-                                 "distance, so the rendered height is clipped "
-                                 "and the percentage is meaningless)")
-                # Read the camera colour TEXTURE back from the GPU. If the robot
-                # render is empty the shader must output cam_rgb, so a black
-                # composite with a non-black bg means either this texture is
-                # black (upload failed) or the draw never landed.
-                _GL.glActiveTexture(_GL.GL_TEXTURE0)
-                _GL.glBindTexture(_GL.GL_TEXTURE_2D, gpu.cam_col_tex)
-                tb = _GL.glGetTexImage(_GL.GL_TEXTURE_2D, 0, _GL.GL_RGB,
-                                       _GL.GL_UNSIGNED_BYTE)
-                timg = _np.frombuffer(tb, _np.uint8).reshape(WINDOW_H, WINDOW_W, 3)
-                log.info("frame %d: composite mean=%.1f, bg mean=%.1f, robot px=%d (maxb %d), "
-                         "cam_col tex mean=%.1f (max %d), depth=%s",
-                         frames, float(out.mean()), bgmean, rnz, int(rimg.max()),
-                         float(timg.mean()), int(timg.max()),
-                         depth_metres is not None)
-                # Framing check: is the robot actually inside the frustum?
-                log.info("frame %d: scn.ngeom=%d robot xyz=(%.2f %.2f %.2f) "
-                         "cam lookat=(%.2f %.2f %.2f) dist=%.2f az=%.1f el=%.1f fovy=%.1f",
-                         frames, int(scn.ngeom),
-                         float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2]),
-                         float(cam.lookat[0]), float(cam.lookat[1]), float(cam.lookat[2]),
-                         float(cam.distance), float(cam.azimuth), float(cam.elevation),
-                         float(model.vis.global_.fovy))
-                if bg is not None:
-                    cv2.imwrite(f"/data/comp_rawcam_{frames}.png", bg)
-            except Exception as exc:
-                log.warning("could not save diagnostic frame: %s", exc)
+            if frames in DIAG_FRAMES:
+                _write_diagnostics(frames, gpu, out, data, model, scn, cam,
+                                   mjr, cam_height, _cam_pitch_deg,
+                                   fy, ppy, depth_metres, bg)
         if DISPLAY_MODE == "glfw":
             _fbw, _fbh = glfw.get_framebuffer_size(window)
             if _annotated:
@@ -1785,6 +2046,7 @@ def main() -> None:
             _r = glfw.get_key(window, glfw.KEY_R) == glfw.PRESS
             _f = glfw.get_key(window, glfw.KEY_F) == glfw.PRESS
             _h = glfw.get_key(window, glfw.KEY_H) == glfw.PRESS
+            _s = glfw.get_key(window, glfw.KEY_S) == glfw.PRESS
             if _r and not prev_keys["r"]:
                 pub.send(topics.CMD_RESET, {"stamp": time.time()})
             if _f and not prev_keys["f"]:
@@ -1794,7 +2056,13 @@ def main() -> None:
             if _h and not prev_keys["h"]:
                 show_scale = not show_scale
                 log.info("scale reference lines %s", "on" if show_scale else "off")
-            prev_keys["r"], prev_keys["f"], prev_keys["h"] = _r, _f, _h
+            if _s and not prev_keys["s"]:
+                show_seg = not show_seg
+                log.info("segmentation overlay %s%s", "on" if show_seg else "off",
+                         "" if seg_mask is not None else
+                         " (no mask received: is the model a -seg one?)")
+            prev_keys["r"], prev_keys["f"], prev_keys["h"], prev_keys["s"] = \
+                _r, _f, _h, _s
         elif DISPLAY_MODE == "cv2":
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):

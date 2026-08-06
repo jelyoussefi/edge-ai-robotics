@@ -20,6 +20,12 @@ KEEPOUT_ZONES = "keepout.zones"
 # Patrol ROI: the polygon the robot must stay inside (replaces distance bounds).
 PATROL_ROI = "patrol.roi"
 
+# Silhouettes of everything the segmentation model found, as one packed boolean
+# image. Sent as bits rather than a list of per-object masks: the consumer only
+# needs to know which pixels are occupied, and packbits makes a 160x120 mask
+# 2400 bytes, small enough to publish every frame.
+OBSTACLE_MASK = "perception.mask"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

@@ -5,7 +5,7 @@
         "width": 640,
         "height": 480,
         "fps": 30,
-        "model": "/assets/models/yolo11m/FP16/yolo11m.xml",
+        "model": "/assets/models/yolo11m-seg/FP16/yolo11m-seg.xml",
         "device": "NPU",
         "confidence": 0.25,
         "depth_width": 640,

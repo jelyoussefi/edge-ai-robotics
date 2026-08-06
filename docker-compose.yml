@@ -61,6 +61,25 @@ services:
       LANE: ${LANE:-0.39}
       # How close a corner has to be before the robot turns onto the next edge.
       CORNER_R: ${CORNER_R:-0.5}
+      # Une empreinte doit apparaitre dans les CONFIRM_MIN dernieres mises a
+      # jour sur CONFIRM_OF avant que le robot n'y reagisse. Les detections
+      # clignotent, et reagir a une seule trame le faisait fuir un obstacle
+      # imaginaire toutes les 11 secondes.
+      # Duree de validite d'une empreinte. Doit depasser ROI_PERIOD, sinon les
+      # obstacles perimenent entre deux messages et la voie revient dedans.
+      OBSTACLE_STALE: ${OBSTACLE_STALE:-3.0}
+      CONFIRM_OF: ${CONFIRM_OF:-3}
+      CONFIRM_MIN: ${CONFIRM_MIN:-3}
+      # Step 5: go around what YOLO sees. The lane is shifted sideways rather
+      # than the robot stopping, so avoiding is the same motion as lane keeping.
+      # "axis" paces the optical axis; "perimeter" follows the floor's boundary.
+      PATROL_MODE: ${PATROL_MODE:-axis}
+      OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
+      ROBOT_HALF_WIDTH: ${ROBOT_HALF_WIDTH:-0.22}
+      GAP_CLEAR: ${GAP_CLEAR:-0.20}
+      OBSTACLE_CLEAR: ${OBSTACLE_CLEAR:-0.45}
+      OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
+      DETOUR_MAX: ${DETOUR_MAX:-1.8}
       # How much the controller ignores the gait's own sway. Longer is calmer
       # but slower to correct a real drift.
       SMOOTH_TAU: ${SMOOTH_TAU:-0.5}
@@ -75,7 +94,7 @@ services:
       CONTROL_HZ: "50"
       PUBLISH_HZ: "60"
       POLICY_PATH: /policies/g1_walker/walker.onnx
-      OV_DEVICE: ${OV_DEVICE:-GPU}
+      OV_DEVICE: ${OV_DEVICE:-NPU}
     devices:
       - /dev/dri:/dev/dri
       # The NPU lives on /dev/accel, not /dev/dri. Without it the policy
@@ -131,8 +150,18 @@ services:
     # No camera: the compositor receives RGB + depth from the source over the
     # bus. It only needs the GPU for rendering and the display.
     environment:
-      # Distance kept from the floor's edge while walking its perimeter.
-      ROI_MARGIN: ${ROI_MARGIN:-0.45}
+      # Distance kept from the floor's edge while walking its perimeter. It
+      # costs twice this in each dimension, which on a 3 m region is a lot:
+      # 0.45 turned a 3.3 by 3.4 m floor into a 2.4 by 2.5 m ring. Enough to
+      # clear the robot's own width and the stereo noise at the boundary is
+      # what is actually needed.
+      ROI_MARGIN: ${ROI_MARGIN:-0.25}
+      # Detected objects are cut out of the walkable floor with this margin, so
+      # the robot neither walks into them nor squeezes past them.
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      # Periode de republication du sol praticable et des empreintes.
+      ROI_PERIOD: ${ROI_PERIOD:-1.0}
+      OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
       # Straighten the floor boundary: stereo depth is noisy where the floor
       # meets a wall, so the raw edge wobbles although the real one is a line.
       # STRAIGHTEN=0 keeps the raw boundary; STRAIGHTEN_TOL raises or lowers how
@@ -187,6 +216,9 @@ services:
     volumes:
       - ./config:/config:ro
       - ./assets:/assets:ro
+      # seg-test writes annotated frames here and, when run without --image,
+      # opens the camera itself. Neither is needed by the service proper.
+      - ./data:/data
     restart: unless-stopped
 
   # Recorder. Persists calibration and runtime telemetry to a SQLite file on a

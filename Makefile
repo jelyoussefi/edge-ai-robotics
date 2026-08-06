@@ -27,7 +27,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test logs ps shell clean distclean
 default: run
 
 help:
@@ -36,13 +36,14 @@ help:
 	@echo "  make down       Stop the stack"
 	@echo "  make restart    Same as run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
+	@echo "  make seg-test   What the segmentation model sees, as an image"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
 	@echo "  make shell      Shell inside a service                     [S=sim]"
 	@echo "  make clean      Remove containers and build stamps"
 	@echo "  make distclean  Also remove images and fetched assets"
 	@echo ""
-	@echo "  In the compositor window:  f  floor + patrol ring   h  scale   r  reset   q  quit"
+	@echo "  In the compositor window:  f  floor   s  detections   h  scale   r  reset   q  quit"
 
 $(ASSETS_STAMP): scripts/fetch_assets.sh
 	@$(call msg, Fetching perception assets ...)
@@ -59,7 +60,21 @@ $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
 .env:
 	@cp .env.example .env
 
+seg-test: $(IMAGES_STAMP)
+	@$(call msg, Running the segmentation model on the live camera feed ...)
+	@# Frames come from the running source service over the bus, not from the
+	@# camera directly: a RealSense has one client, so opening it here would
+	@# fail whenever the demo holds it, which is exactly when you want to look.
+	@$(COMPOSE) run --rm --entrypoint python3 \
+		perception /app/seg_test.py $(SEG_ARGS)
+
 $(IMAGES_STAMP): .env $(DOCKERFILES) $(REQ_FILES) $(SRC_FILES)
+	@# A repeated key parses fine in Python and is rejected by Docker, so it
+	@# only shows up after the long asset fetch. Check it first.
+	@python3 scripts/check_compose.py docker-compose.yml >/dev/null
+	@# py_compile accepts a function that reads a name defined nowhere; the
+	@# error only surfaces when that line runs. Catch it before the build.
+	@python3 scripts/check_names.py services/*/*.py common/edgebot/*.py >/dev/null
 	@$(call msg, Building container images ...)
 	@mkdir -p $(STAMP_DIR)
 	@$(COMPOSE) build

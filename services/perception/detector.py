@@ -74,6 +74,23 @@ class Detector:
         self.compiled = core.compile_model(model, device)
         self.input_port = self.compiled.input(0)
         self.output_port = self.compiled.output(0)
+        # A -seg model has a second output, the mask prototypes: (1, 32, h, w).
+        # Its first output carries 32 extra channels per anchor, the coefficients
+        # that combine those prototypes into one mask. Detect this rather than
+        # requiring the caller to say which kind of model it loaded, so the same
+        # code runs either way and a plain detector still works.
+        self.proto_port = None
+        self.nm = 0
+        if len(self.compiled.outputs) > 1:
+            for port in list(self.compiled.outputs)[1:]:
+                shape = list(port.partial_shape)
+                if len(shape) == 4 and shape[1].is_static:
+                    self.proto_port = port
+                    self.nm = int(shape[1].get_length())
+                    break
+        if self.proto_port is not None:
+            log.info("segmentation model: %d mask prototypes, silhouettes "
+                     "instead of boxes", self.nm)
         _, _, self.net_h, self.net_w = self.input_port.shape
         self.device = device
         log.info("%s compiled for %s, input %dx%d", model_path, device, self.net_w, self.net_h)
@@ -116,17 +133,59 @@ class Detector:
             return UNKNOWN_RANGE
         return float(np.median(valid) * scale)
 
+    def _add_mask(self, protos, coeff, box, scale, pad_x, pad_y, fw, fh) -> None:
+        """Add one object's silhouette to the combined mask.
+
+        The prototypes are a small basis, 32 images at a quarter of the network
+        input; a detection's mask is their weighted sum through a sigmoid. It is
+        computed in the network's letterboxed frame, then cropped to the box and
+        mapped back to the camera frame, undoing the letterbox padding and scale.
+
+        Cropping to the box matters: the prototype combination responds weakly
+        all over the image, and without the crop a chair's mask would smear onto
+        every other chair-like patch in the scene.
+        """
+        p = np.squeeze(protos)                    # (nm, ph, pw)
+        nmk, ph, pw = p.shape
+        m = 1.0 / (1.0 + np.exp(-(coeff @ p.reshape(nmk, -1)).reshape(ph, pw)))
+        # Box in letterboxed coordinates, then in prototype coordinates.
+        x1, y1, x2, y2 = box
+        sx, sy = pw / float(self.net_w), ph / float(self.net_h)
+        bx1 = int(np.clip((x1 * scale + pad_x) * sx, 0, pw - 1))
+        by1 = int(np.clip((y1 * scale + pad_y) * sy, 0, ph - 1))
+        bx2 = int(np.clip((x2 * scale + pad_x) * sx, bx1 + 1, pw))
+        by2 = int(np.clip((y2 * scale + pad_y) * sy, by1 + 1, ph))
+        crop = np.zeros_like(m, dtype=bool)
+        crop[by1:by2, bx1:bx2] = m[by1:by2, bx1:bx2] > 0.5
+        # Prototypes -> letterboxed input -> original frame.
+        big = cv2.resize(crop.astype(np.uint8), (self.net_w, self.net_h),
+                         interpolation=cv2.INTER_NEAREST)
+        ix1, iy1 = int(round(pad_x)), int(round(pad_y))
+        ix2 = int(round(self.net_w - pad_x)); iy2 = int(round(self.net_h - pad_y))
+        inner = big[max(0, iy1):max(iy1 + 1, iy2), max(0, ix1):max(ix1 + 1, ix2)]
+        if inner.size == 0:
+            return
+        self.mask |= cv2.resize(inner, (fw, fh),
+                                interpolation=cv2.INTER_NEAREST).astype(bool)
+
     def infer(self, frame) -> list[Obstacle]:
-        """frame is an rs_source.Frame. Uses frame.color for detection and
+        """frame carries colour and optional depth. Uses frame.color for detection and
         frame.depth (if present) for distance."""
         color = frame.color
         frame_h, frame_w = color.shape[:2]
         blob, scale, pad_x, pad_y = self._letterbox(color)
 
-        raw = self.compiled([blob])[self.output_port]
+        result = self.compiled([blob])
+        raw = result[self.output_port]
+        protos = result[self.proto_port] if self.proto_port is not None else None
 
-        preds = np.squeeze(raw).T  # [anchors, 4+nc]
-        class_scores = preds[:, 4:]
+        preds = np.squeeze(raw).T  # [anchors, 4 + nc (+ nm)]
+        # With a seg model the last nm columns are mask coefficients, not
+        # classes; including them in the argmax would invent classes that do not
+        # exist and wreck the scores.
+        nc = preds.shape[1] - 4 - self.nm
+        coeffs = preds[:, 4 + nc:] if self.nm else None
+        class_scores = preds[:, 4:4 + nc]
         class_ids = np.argmax(class_scores, axis=1)
         scores = class_scores[np.arange(len(class_ids)), class_ids]
 
@@ -137,6 +196,8 @@ class Detector:
             return []
 
         boxes_xywh = preds[keep, :4]
+        if coeffs is not None:
+            coeffs = coeffs[keep]
         scores = scores[keep]
         class_ids = class_ids[keep]
 
@@ -162,6 +223,12 @@ class Detector:
 
         hfov = frame.intrinsics["hfov_deg"] if frame.intrinsics else 65.0
 
+        # One combined silhouette for the whole frame. Per-object masks are not
+        # needed downstream and a single boolean image is far cheaper to send
+        # than a list of them.
+        self.mask = (np.zeros((frame_h, frame_w), bool)
+                     if protos is not None else None)
+
         results: list[Obstacle] = []
         for i in np.asarray(idx).reshape(-1):
             x1, y1, x2, y2 = [int(round(v)) for v in boxes_xyxy[i]]
@@ -170,6 +237,10 @@ class Detector:
 
             cx_norm = ((x1 + x2) / 2) / frame_w
             bearing = (cx_norm - 0.5) * hfov  # + right, - left
+
+            if protos is not None and x2 > x1 and y2 > y1:
+                self._add_mask(protos, coeffs[i], (x1, y1, x2, y2),
+                               scale, pad_x, pad_y, frame_w, frame_h)
 
             if frame.has_depth:
                 rng = self._sample_depth(frame.depth, frame.depth_scale, x1, y1, x2, y2)

@@ -24,7 +24,7 @@ log = logging.getLogger("controllers")
 
 POLICY = os.environ.get("POLICY", "kinematic")
 POLICY_PATH = os.environ.get("POLICY_PATH", "")
-OV_DEVICE = os.environ.get("OV_DEVICE", "GPU")
+OV_DEVICE = os.environ.get("OV_DEVICE", "NPU")
 
 
 class KinematicController:

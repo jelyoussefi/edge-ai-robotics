@@ -51,7 +51,10 @@ fi
 # 2. YOLO as OpenVINO IR (model chosen via YOLO_MODEL, default yolo11m for
 #    better detection of small/distant objects; yolo11n is faster if needed).
 # ----------------------------------------------------------------------------
-YOLO_MODEL="${YOLO_MODEL:-yolo11m}"
+# -seg by default: the silhouettes let the compositor keep the parts of the
+# robot visible through an object's gaps, which a bounding box cannot express.
+# YOLO_MODEL=yolo11m falls back to plain detection; the detector handles both.
+YOLO_MODEL="${YOLO_MODEL:-yolo11m-seg}"
 if [ -f "$ASSETS/models/$YOLO_MODEL/FP16/$YOLO_MODEL.xml" ]; then
     echo "  $YOLO_MODEL IR already present, skipping."
 else

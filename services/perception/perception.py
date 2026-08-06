@@ -21,6 +21,11 @@ import cv2
 import numpy as np
 
 from edgebot import topics
+# Resolution the obstacle silhouettes are published at. A quarter of the camera
+# frame is plenty: the mask only decides which floor cells are occupied, and the
+# world grid it feeds is coarser still.
+MASK_W, MASK_H = 160, 120
+
 from edgebot.bus import Publisher, Subscriber
 
 from detector import Detector
@@ -90,6 +95,17 @@ def main() -> None:
             for d in dets
         ]
         pub.send(topics.DETECTIONS, {"detections": detections, "t": frame_t})
+
+        # The silhouettes, when the model provides them. Downscaled and packed
+        # into bits: the consumer wants to know which floor pixels are occupied,
+        # not the mask at full resolution, and this keeps the message tiny.
+        mask = getattr(detector, "mask", None)
+        if mask is not None:
+            small = cv2.resize(mask.astype(np.uint8), (MASK_W, MASK_H),
+                               interpolation=cv2.INTER_NEAREST)
+            pub.send(topics.OBSTACLE_MASK, {
+                "w": MASK_W, "h": MASK_H, "t": frame_t,
+                "bits": np.packbits(small.astype(bool)).tobytes()})
 
         count += 1
         now = time.perf_counter()
