@@ -92,6 +92,7 @@ Load-bearing relationships:
 ## Working agreement
 
 - **Commit before any local intervention.** Deliveries arrive as `edge-ai-robotics-<etape>.tar.gz` archives that are extracted over the tree and **overwrite without warning**; an uncommitted edit is simply lost.
+- **`git push` after every commit.** `origin` is a private GitHub repo over SSH (`git@github.com:jelyoussefi/edge-ai-robotics.git`). A commit that only exists locally is still one archive extraction away from being lost, which is the same reason the rule above exists.
 - **Never edit the same file from the chat side and from Claude Code in parallel** — same reason.
 - `models/`, `policies/`, `assets/`, `data/` are gitignored and fetched by `make` (several GB). `models/mujoco_menagerie/` is a vendored DeepMind checkout: its `pyproject.toml`, `.pre-commit-config.yaml` and `Makefile` are **not** project config.
 
