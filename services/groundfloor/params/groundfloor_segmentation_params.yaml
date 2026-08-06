@@ -1,0 +1,33 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# Our copy of the suite's node parameters, mounted over theirs so a knob can be
+# turned without rebuilding a 4.8 GB image. Their original ships at
+# /ws/install/pointcloud_groundfloor_segmentation/share/
+#   pointcloud_groundfloor_segmentation/params/groundfloor_segmentation_params.yaml
+# and is left in place; only `node_params_file` points here.
+#
+# The top-level key must stay `groundfloor_segmentation`, matching the node
+# name, or every value below is silently ignored and the node runs on its
+# built-in defaults.
+---
+groundfloor_segmentation:
+  ros__parameters:
+    base_frame: base_link
+    # Left False on purpose. entrypoint.sh passes use_best_effort_qos:=True as
+    # a launch argument, which overrides this; keeping the file at their
+    # default means the QoS decision lives in one place, not two.
+    use_best_effort_qos: False
+    sensor:
+      name: 'camera'
+      # Their default is 0.05. Measured on the live cloud, their own ground
+      # class sits at z median +0.060 m with sd 0.094, so a 5 cm cutoff falls
+      # BELOW the median of the floor it is meant to accept and discards more
+      # than half of it. 0.08 is this project's floor_h_tol_m from
+      # config/camera_calibration.json, so both detections now tolerate the
+      # same deviation from the ground plane and the comparison is like for
+      # like.
+      max_surface_height: 0.08
+      min_distance_to_ego: 0.4    # Minimum distance to robot [m]
+      max_incline: 15.0           # Maximum tolerated incline angle [degrees]
+      robot_height: 2.0           # Height of robot [m]

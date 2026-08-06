@@ -254,8 +254,12 @@ services:
       # alors que le mur du fond est a 6,2 m.
       GF_Z_MIN: ${GF_Z_MIN:--0.3}
       GF_X_MAX: ${GF_X_MAX:-8.0}
+      GF_PARAMS: ${GF_PARAMS:-/params/groundfloor_segmentation_params.yaml}
     volumes:
       - ./config:/config:ro
+      # Mounted rather than baked so max_surface_height can be changed and the
+      # node restarted without rebuilding the 4.8 GB ROS image.
+      - ./services/groundfloor/params:/params:ro
 
   recorder:
     build:

@@ -27,9 +27,18 @@ BRIDGE=$!
 # default, and DDS refuses to match the two: the first run logged "incompatible
 # QoS ... no messages will be sent" on image_rect_raw and camera_info from both
 # ends, then sat silent for 30 s. The flag moves their side, not ours.
+# node_params_file points at a mounted copy rather than the one baked into the
+# image, so a parameter can be changed and the node restarted without a 4.8 GB
+# rebuild. Falls back to their installed file if the mount is missing.
+GF_PARAMS="${GF_PARAMS:-/params/groundfloor_segmentation_params.yaml}"
+if [ ! -f "$GF_PARAMS" ]; then
+    echo "no params at $GF_PARAMS, using the node's built-in defaults" >&2
+    GF_PARAMS="/ws/install/pointcloud_groundfloor_segmentation/share/pointcloud_groundfloor_segmentation/params/groundfloor_segmentation_params.yaml"
+fi
 ros2 launch pointcloud_groundfloor_segmentation \
     realsense_groundfloor_segmentation_launch.py \
-    standalone:=False with_rviz:=False use_best_effort_qos:=True &
+    standalone:=False with_rviz:=False use_best_effort_qos:=True \
+    node_params_file:="$GF_PARAMS" &
 SEG=$!
 
 trap 'kill $BRIDGE $SEG 2>/dev/null || true' INT TERM
