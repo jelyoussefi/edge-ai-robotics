@@ -244,6 +244,16 @@ services:
       # empreintes des deux cotes ne seraient pas comparables.
       OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
+      # Classe du sol dans leur nuage etiquete. Mesuree, pas lue dans une
+      # config : sur 1,5 M de points la classe 3 est a z median 0,060 m avec
+      # 0,094 m d'ecart type, toutes les autres sont a 0,77 m ou plus.
+      GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
+      GF_FLOOR_CELL: ${GF_FLOOR_CELL:-0.10}
+      # Retours physiquement impossibles, ecartes avant toute construction.
+      # Mesures sur le nuage : z descendait a -6,096 m et x montait a 14,378 m
+      # alors que le mur du fond est a 6,2 m.
+      GF_Z_MIN: ${GF_Z_MIN:--0.3}
+      GF_X_MAX: ${GF_X_MAX:-8.0}
     volumes:
       - ./config:/config:ro
 

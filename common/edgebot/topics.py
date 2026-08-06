@@ -34,6 +34,18 @@ OBSTACLE_MASK = "perception.mask"
 #   {"blocked": [[x0, x1, y0, y1], ...], "points": int, "stamp": float}
 GROUNDFLOOR_OBSTACLES = "groundfloor.obstacles"
 
+# groundfloor -> anyone. The GROUND the suite's node labelled, as a world-plane
+# outline in the same (forward, lateral) metres as PATROL_ROI's `roi`. This is
+# the topic etape B's criterion is actually about: the node's primary product is
+# a labelled cloud, and its floor class is what our floor detection should be
+# measured against. The obstacle footprints are a derived view and comparing
+# those instead measured the wrong thing.
+#
+# Outer boundary only, exactly like `roi`: a simple polygon cannot express a
+# hole, and obstacles are carried separately on GROUNDFLOOR_OBSTACLES.
+#   {"poly": [[x, y], ...], "points": int, "stamp": float}
+GROUNDFLOOR_FLOOR = "groundfloor.floor"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

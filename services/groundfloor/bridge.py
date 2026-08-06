@@ -40,11 +40,23 @@ from tf2_ros import StaticTransformBroadcaster
 sys.path.insert(0, "/opt/edgebot")
 from edgebot import topics                                    # noqa: E402
 from edgebot.bus import Publisher, Subscriber                 # noqa: E402
-from edgebot.pointcloud import footprints, read_xyz           # noqa: E402
+from edgebot.pointcloud import (footprints, floor_polygon,   # noqa: E402
+                                read_xyz, read_xyz_label)
 
 CALIB = os.environ.get("CAMERA_CALIBRATION", "/config/camera_calibration.json")
 SENSOR = os.environ.get("GF_SENSOR_NAME", "camera")
 MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
+# Which class in their labelled cloud is the ground. Measured rather than read
+# out of a config: over 1.5 M points the label-3 class sits at z median 0.060 m
+# with a 0.094 m spread, while every other class sits at 0.77 m or above.
+GROUND_LABEL = int(os.environ.get("GF_GROUND_LABEL", "3"))
+FLOOR_CELL = float(os.environ.get("GF_FLOOR_CELL", "0.10"))
+# Physically impossible returns, dropped before anything is built from them.
+# Measured on the live cloud: z reached -6.096 m, six metres below a floor the
+# camera is standing on, and x reached 14.378 m in a room whose far wall is at
+# 6.2 m. Both are depth noise, and both inflate a bounding box for free.
+Z_MIN = float(os.environ.get("GF_Z_MIN", "-0.3"))
+X_MAX = float(os.environ.get("GF_X_MAX", "8.0"))
 
 
 def _quaternion_from_pitch(pitch_rad: float):
@@ -87,6 +99,10 @@ class GroundfloorBridge(Node):
             CameraInfo, f"/{SENSOR}/depth/camera_info", qos)
         self.create_subscription(
             PointCloud2, "/segmentation/obstacle_points", self._on_obstacles, qos)
+        # Their primary product. obstacle_points is a filtered view of this, so
+        # the ground class exists only here.
+        self.create_subscription(
+            PointCloud2, "/segmentation/labeled_points", self._on_labeled, qos)
 
         self._publish_static_tf()
 
@@ -96,6 +112,11 @@ class GroundfloorBridge(Node):
 
         self._sent = 0
         self._got = 0
+        self._floor = 0
+        self._floor_pts = 0
+        self._floor_vertices = 0
+        self._floor_dropped = 0
+        self._obs_dropped = 0
         self._stamps: dict = {}
         self._last_report = time.time()
         self.get_logger().info(
@@ -194,11 +215,51 @@ class GroundfloorBridge(Node):
             if len(self._stamps) > 64:
                 self._stamps.pop(next(iter(self._stamps)))
 
+    @staticmethod
+    def _plausible(pts):
+        """Drop returns the room cannot contain. Returns (kept, n_dropped).
+
+        A depth sensor emits some points that no geometry explains: measured on
+        this cloud, z went down to -6.096 m and x out to 14.378 m, against a
+        floor at 0 and a far wall at 6.2 m. They are a small fraction of the
+        cloud and they do not move a median, but a bounding box is a max, so a
+        single one of them stretches a footprint across the room for free.
+
+        Only the two impossible directions are cut. Points ABOVE the robot are
+        left alone: a low ceiling or a shelf is a real obstacle to a walking
+        machine, and deciding what is too high is the navigator's business.
+        """
+        if pts.size == 0:
+            return pts, 0
+        ok = np.isfinite(pts).all(axis=1)
+        ok &= pts[:, 2] >= Z_MIN
+        ok &= pts[:, 0] <= X_MAX
+        return pts[ok], int((~ok).sum())
+
+    def _on_labeled(self, msg: PointCloud2) -> None:
+        """Turn the ground class of their labelled cloud into a floor outline."""
+        pts, labels = read_xyz_label(msg.fields, msg.point_step, msg.row_step,
+                                     msg.width, msg.height, bytes(msg.data),
+                                     bool(msg.is_bigendian))
+        if pts.shape[0] == 0:
+            return
+        ground, dropped = self._plausible(pts[labels == GROUND_LABEL])
+        poly = floor_polygon(ground, cell=FLOOR_CELL)
+        self._floor_dropped += dropped
+        self._floor_pts = int(ground.shape[0])
+        self._floor_vertices = len(poly)
+        self._floor += 1
+        self.bus_pub.send(topics.GROUNDFLOOR_FLOOR, {
+            "poly": poly, "points": int(ground.shape[0]),
+            "stamp": time.time()})
+
     def _on_obstacles(self, msg: PointCloud2) -> None:
         """Turn their obstacle cloud into footprints and put it on the bus."""
         pts = read_xyz(msg.fields, msg.point_step, msg.row_step,
                        msg.width, msg.height, bytes(msg.data),
                        bool(msg.is_bigendian))
+        pts, dropped = self._plausible(pts)
+        self._obs_dropped += dropped
         boxes = footprints(pts, margin=MARGIN)
         self.bus_pub.send(topics.GROUNDFLOOR_OBSTACLES, {
             "blocked": boxes, "points": int(pts.shape[0]),
@@ -215,7 +276,11 @@ class GroundfloorBridge(Node):
             self.get_logger().info(
                 f"{self._sent} depth frames in, {self._got} segmentations out, "
                 f"{pts.shape[0]} obstacle points, {len(boxes)} footprint(s), "
-                f"round trip {lat:.0f} ms")
+                f"round trip {lat:.0f} ms | floor: {self._floor} msg(s), "
+                f"{self._floor_pts} ground points, {self._floor_vertices} "
+                f"vertices | dropped as impossible: {self._obs_dropped} "
+                f"obstacle, {self._floor_dropped} ground "
+                f"(z < {Z_MIN} or x > {X_MAX})")
 
 
 def main() -> None:
