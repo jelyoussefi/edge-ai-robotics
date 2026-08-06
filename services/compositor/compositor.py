@@ -1039,8 +1039,17 @@ WINDOW_NAME = "Edge AI Robotics"
 # Frames at which the full GPU diagnostic block runs. Frame 0 happens before the
 # first cv2.imshow/waitKey, so comparing frame 0 with frame 1 isolates whatever
 # the HighGUI window does to the GL state between iterations.
-DIAG_FRAMES = {int(f) for f in os.environ.get(
-    "DIAG_FRAMES", "30,120,300,600,900,1200").split(",")}
+# How many diagnostic frames to write to /data before stopping. 0 is off, and
+# off is the default: this used to be a list of frame numbers that fired on
+# every run, which was harmless only because the call site was unreachable (it
+# sat inside an except handler after the raise, so DIAG_FRAMES had never written
+# anything). Fixing that made the gate matter -- a demo left running would
+# otherwise fill /data with 4K PNGs nobody asked for.
+DIAG_FRAMES = int(os.environ.get("DIAG_FRAMES", "0") or 0)
+# Overlays on from the first frame, without anyone at the keyboard. 'f' still
+# toggles them; this only sets the initial state, so a diagnostic capture can be
+# scripted on a machine whose X display is not the one this renders to.
+SHOW_FLOOR_AT_START = os.environ.get("SHOW_FLOOR", "0") not in ("", "0")
 # Run headless: no cv2 window at all. The unit test passes without one, so this
 # tells us directly whether cv2 HighGUI is what breaks the GPU writes.
 # Display path. "glfw" presents the composite straight to the GL window that
@@ -1534,9 +1543,10 @@ def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
                        bg) -> None:
     """Dump the frame and check the rendered scale against the geometry.
 
-    Diagnostic only, on the handful of frames in DIAG_FRAMES. This is what
-    established that the composition is correct to within a percent, so it stays
-    rather than being reinvented the next time a scale is doubted.
+    Diagnostic only, for the first DIAG_FRAMES annotated frames and then never
+    again. This is what established that the composition is correct to within a
+    percent, so it stays rather than being reinvented the next time a scale is
+    doubted.
     """
     try:
         outpath = f"/data/composite_frame_{frames}.png"
@@ -1813,9 +1823,10 @@ def main() -> None:
     depth_metres = None  # latest depth in metres (float32), for the GPU compositor
     detections = []     # latest bbox+conf+label
     det_t = 0.0
-    show_floor = False    # 'f' toggles the red floor overlay at any time
+    show_floor = SHOW_FLOOR_AT_START   # 'f' toggles it at any time
     suite_floor: list = []      # the suite's floor outline, drawn under 'f'
     suite_floor_t = 0.0
+    _diag_written = 0           # diagnostic PNGs written so far, capped above
     _annotated = False    # True when the CPU copy carries the overlay or ring
     last_dets: list = []  # rounded detections, to notice when the scene moves
     obstacle_boxes: list = []   # ground footprints currently subtracted
@@ -2076,10 +2087,21 @@ def main() -> None:
             log.error("GPU compositing failed: %s", exc)
             raise
 
-            if frames in DIAG_FRAMES:
-                _write_diagnostics(frames, gpu, out, data, model, scn, cam,
-                                   mjr, cam_height, _cam_pitch_deg,
-                                   fy, ppy, depth_metres, bg)
+        # Dedented out of the except handler above, where it sat after the
+        # raise and could never run. Gated on a count rather than a frame list:
+        # every diagnostic frame is a full-size PNG, and the old list fired on
+        # any run that happened to reach frame 30.
+        if _diag_written < DIAG_FRAMES and _annotated:
+            # Only annotated frames are worth keeping -- an unannotated one is
+            # the composite the window already shows. Waiting for _annotated
+            # also means the overlays have had a chance to appear.
+            _write_diagnostics(_diag_written + 1, gpu, out, data, model, scn,
+                               cam, mjr, cam_height, _cam_pitch_deg,
+                               fy, ppy, depth_metres, bg)
+            _diag_written += 1
+            if _diag_written >= DIAG_FRAMES:
+                log.info("wrote %d diagnostic frame(s) to /data, stopping",
+                         _diag_written)
         if DISPLAY_MODE == "glfw":
             _fbw, _fbh = glfw.get_framebuffer_size(window)
             if _annotated:

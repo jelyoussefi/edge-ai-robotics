@@ -120,7 +120,32 @@ Les deux seuils sont franchis. L'IoU passe de 0,315 à 0,530 et la frontière
 médiane est divisée par deux, **uniquement en retirant nos propres définitions**
 de la comparaison — la perception sous-jacente n'a pas changé.
 
-## 5. Les trois désaccords résiduels
+## 5. Les deux sols superposés
+
+Contour vert : le nôtre (`roi`, sol praticable). Contour cyan : le leur (classe
+sol de `labeled_points`). Les deux passent par **la même** projection
+`_world_to_pixel`, donc un écart visible vient des deux détections et non de
+deux façons de dessiner un polygone. Le rouge est la superposition de sol
+existante de la touche `f`.
+
+![Les deux sols, pièce occupée](images/etape-b-floors-occupied.png)
+
+Pièce occupée. Au centre les deux contours se suivent de près — c'est la zone
+« both » de 4,3 m². Le cyan déborde nettement vers la gauche et vers la droite,
+au-delà de ce que le vert retient.
+
+![Les deux sols, pièce vide](images/etape-b-floors-empty.png)
+
+Pièce vide, le désaccord de champ proche est le plus lisible : le cyan balaie
+tout l'avant-plan gauche, passe sous la table et contourne la colonne de droite,
+là où le vert s'arrête bien avant. C'est le §6.2 ci-dessous — leur sol commence
+à 1,30 m, le nôtre à 1,7 m après `ROI_MARGIN`. Vers le fond, à l'inverse, le
+vert monte vers la cuisine plus loin que le cyan (§6.1).
+
+Ces images ont été produites avec `DIAG_FRAMES=5 SHOW_FLOOR=1` (voir §9), puis
+les deux réglages remis à zéro.
+
+## 6. Les trois désaccords résiduels
 
 Analysés sur 633 paires de polygones (~190 s). Le désaccord est **en
 profondeur, pas latéral** : la bande centrale (−1,5 à +1,5 m) contient 3,57 des
@@ -155,7 +180,7 @@ TF étant vérifiée correcte, ce n'est pas la transformation statique. Trancher
 demanderait d'instrumenter leur nœud, ou d'ajuster nous-mêmes un plan sur leurs
 points de sol.
 
-## 6. Latence — avec réserve
+## 7. Latence — avec réserve
 
 Sur 41 échantillons, 120 s :
 
@@ -175,24 +200,35 @@ trois** (277 trames de profondeur entrantes pour 91 segmentations sur 30 s,
 profondeur 2 ; ce n'est pas une perte erratique, mais la suite ne voit qu'un
 tiers de ce que la caméra produit.
 
-## 7. Deux défauts connus, non corrigés
+## 8. Défauts connus
 
-**a. La latence par trame n'est pas instrumentée.** `bridge.py` conserve un seul
-`_latency` écrasé à chaque aller-retour et n'en imprime la valeur qu'une fois
-par intervalle. Tout ce qui précède en dérive. Corriger demande d'accumuler les
-allers-retours individuels et d'en publier la distribution ; tant que ce n'est
-pas fait, aucun p95 par trame n'est disponible.
+**a. La latence par trame n'est pas instrumentée — toujours ouvert.**
+`bridge.py` conserve un seul `_latency` écrasé à chaque aller-retour et n'en
+imprime la valeur qu'une fois par intervalle. Tout le §7 en dérive. Corriger
+demande d'accumuler les allers-retours individuels et d'en publier la
+distribution ; tant que ce n'est pas fait, aucun p95 par trame n'est disponible.
 
-**b. `_write_diagnostics` est du code mort.** Dans `services/compositor/compositor.py`,
-le bloc `if frames in DIAG_FRAMES:` (ligne 2079) se trouve **à l'intérieur du
-gestionnaire `except`, après le `raise`** de la ligne 2077 : il est
-inatteignable. `DIAG_FRAMES` (30, 120, 300, 600, 900, 1200) n'a donc jamais rien
-écrit. Défaut préexistant. Le corriger — une désindentation de quatre espaces —
-remettrait en route l'écriture de PNG dans `/data`, ce qui est un changement de
-comportement à décider ; c'est aussi le mécanisme qui aurait permis de capturer
-une copie d'écran de la superposition sans clavier.
+**b. `_write_diagnostics` était du code mort — corrigé.** Le bloc
+`if frames in DIAG_FRAMES:` se trouvait **à l'intérieur du gestionnaire
+`except`, après le `raise`** : inatteignable, et `DIAG_FRAMES` (alors la liste
+30, 120, 300, 600, 900, 1200) n'avait jamais rien écrit. Désindenté, et
+**verrouillé** au passage, parce que le remettre en route sans garde aurait
+rempli `/data` de PNG pleine taille à chaque démonstration :
 
-## 8. Reproduire
+- `DIAG_FRAMES` est désormais un **nombre**, plus une liste de numéros de trame :
+  le compositeur écrit ce nombre d'images puis s'arrête définitivement.
+- **0 par défaut**, donc rien ne s'écrit sans demande explicite.
+- Seules les trames **annotées** sont retenues : une trame sans superposition
+  est le composite que la fenêtre affiche déjà, et attendre l'annotation laisse
+  aux contours le temps d'apparaître.
+
+Les figures du §5 ont été produites ainsi. À noter, observé en les capturant :
+sur cinq trames consécutives au démarrage, deux seulement portaient les **deux**
+contours — `roi_cached` est reconstruit à chaque changement de détections et
+reste vide un instant, pendant lequel seul le cyan est présent. Ce n'est pas un
+défaut de la superposition, mais il faut le savoir avant de capturer.
+
+## 9. Reproduire
 
 ```bash
 make                                     # la démo
@@ -206,6 +242,19 @@ vert, le leur en cyan, avec une légende.
 `max_surface_height` se règle dans
 `services/groundfloor/params/groundfloor_segmentation_params.yaml` (monté, pas
 cuit dans l'image) ; il suffit de redémarrer `groundfloor`.
+
+Pour refaire les figures du §5, `groundfloor` devant déjà tourner :
+
+```bash
+DIAG_FRAMES=5 SHOW_FLOOR=1 docker compose up -d --force-recreate compositor
+ls data/composite_frame_*.png
+docker compose up -d --force-recreate compositor   # remet les deux a zero
+```
+
+`DIAG_FRAMES` est un **nombre** d'images, pas une liste de numéros de trame, et
+les deux réglages valent 0 par défaut. Le compositeur s'arrête définitivement
+après ce nombre d'images ; garder plus d'une ou deux trames avec les **deux**
+contours demande souvent deux passes (voir §8b).
 
 > Modifier `common/` invalide toutes les images de service, et `suite-compare`
 > ne reconstruit rien. Reconstruire `perception` et `compositor` à la main après

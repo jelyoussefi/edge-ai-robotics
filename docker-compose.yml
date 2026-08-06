@@ -177,6 +177,13 @@ services:
       # levels per output pixel: 4 at scale 2, 9 at scale 3, 16 at scale 4.
       # Cost grows with the square, and so does the offscreen buffer.
       RENDER_SCALE: ${RENDER_SCALE:-3}
+      # Diagnostics, off by default. DIAG_FRAMES is a COUNT: the compositor
+      # writes that many annotated frames to /data and then stops for good.
+      # SHOW_FLOOR=1 starts with the 'f' overlays already on, so a capture can
+      # be scripted without a keyboard. Both exist for the etape B figures, see
+      # docs/ETAPE-B-RESULTS.md.
+      DIAG_FRAMES: ${DIAG_FRAMES:-0}
+      SHOW_FLOOR: ${SHOW_FLOOR:-0}
       <<: *bus-env
       ROBOT: g1_walker
       DISPLAY: ${DISPLAY:-:0}
