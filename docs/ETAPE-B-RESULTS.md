@@ -8,6 +8,13 @@ flux de profondeur, en direct.
 IoU médiane **0,530** (seuil 0,5) et frontière médiane **0,164 m** (seuil
 0,20 m). Les deux détections voient le même sol.
 
+> **Ces chiffres sont ceux d'une session.** Rejoués dans la même pièce des
+> semaines plus tard, sans changement de code ni de calibration, ils descendent
+> à 0,36–0,39 d'IoU brute. L'écart vient entièrement d'un côté : **leur**
+> couverture de sol dérive d'une session à l'autre, la nôtre non. C'est un
+> résultat sur leur ajustement de plan en direct, pas une correction du chiffre
+> ci-dessus — le §7 le mesure et le démontre.
+
 ---
 
 ## 1. Le critère
@@ -120,6 +127,10 @@ Les deux seuils sont franchis. L'IoU passe de 0,315 à 0,530 et la frontière
 médiane est divisée par deux, **uniquement en retirant nos propres définitions**
 de la comparaison — la perception sous-jacente n'a pas changé.
 
+Ce tableau est **une session**. Les colonnes qui bougent d'une session à l'autre
+sont « leur surface » et, mécaniquement, l'IoU et la frontière ; « notre
+surface » ne bouge pas. Voir §7 avant de citer 0,530 ailleurs.
+
 ## 5. Les deux sols superposés
 
 Contour vert : le nôtre (`roi`, sol praticable). Contour cyan : le leur (classe
@@ -142,7 +153,7 @@ là où le vert s'arrête bien avant. C'est le §6.2 ci-dessous — leur sol com
 à 1,30 m, le nôtre à 1,7 m après `ROI_MARGIN`. Vers le fond, à l'inverse, le
 vert monte vers la cuisine plus loin que le cyan (§6.1).
 
-Ces images ont été produites avec `DIAG_FRAMES=5 SHOW_FLOOR=1` (voir §9), puis
+Ces images ont été produites avec `DIAG_FRAMES=5 SHOW_FLOOR=1` (voir §10), puis
 les deux réglages remis à zéro.
 
 ## 6. Les trois désaccords résiduels
@@ -180,7 +191,56 @@ TF étant vérifiée correcte, ce n'est pas la transformation statique. Trancher
 demanderait d'instrumenter leur nœud, ou d'ajuster nous-mêmes un plan sur leurs
 points de sol.
 
-## 7. Latence — avec réserve
+## 7. Sensibilité temporelle de leur plan estimé
+
+Le §4 a été mesuré en une session. Rejoué dans la même pièce, avec la même
+calibration, le même `SUITE_COMMIT` et le même `max_surface_height = 0.08`, il
+ne se reproduit pas — et l'écart vient d'un seul côté.
+
+| | étape B | étape C (`e800f6b`) | août 2026, 3 passes |
+|---|---|---|---|
+| IoU brute médiane | **0,530** | 0,478 / 0,479 | **0,354 / 0,387 / 0,377** |
+| **leur surface** | **9,33 m²** | ~6,2 m² | **5,95 / 6,35 / 6,42 m²** |
+| notre surface brute | 14,17 m² | 14,17 m² | 14,46 / 14,46 / 14,87 m² |
+| frontière médiane | 0,164 m | 0,294 m | 0,430 / 0,379 / 0,403 m |
+
+Notre sol tient dans ±0,5 m² sur l'ensemble : c'est une géométrie de plan issue
+d'une calibration fixe, elle ne dépend pas de ce que la caméra voit ce jour-là.
+Leur surface a perdu **un tiers**. L'IoU suit mécaniquement — l'intersection est
+bornée par le plus petit des deux sols — et la frontière médiane monte pour la
+même raison, leur contour reculant à l'intérieur du nôtre. Une seule grandeur
+dérive ; les trois autres lignes en sont la conséquence arithmétique.
+
+**Ce n'est pas une dérive de notre code.** L'image `groundfloor` d'avant le
+refactoring `docker/ros-base` a été reconstruite depuis `git archive HEAD` — le
+build est reparti entièrement du cache, donc le binaire est celui d'origine — et
+remise sur la scène en direct à quelques minutes des passes d'août : **IoU brute
+0,352, leur surface 5,76 m², frontière médiane 0,355 m**. L'ancien binaire
+mesure la même chose que le nouveau. Les paquets ROS des deux images sont
+l'instantané de juin 2026.
+
+La cause tient à ce que le §6.3 décrit déjà, vue dans le temps : leur sol est une
+**classification point par point contre un plan réestimé en direct**, le nôtre
+une géométrie issue d'une calibration. Un plan réestimé dépend de la couverture
+de profondeur du moment — éclairage, objets posés, surfaces rasantes ou
+brillantes — là où une calibration n'en dépend pas. Le décalage de +0,06 m
+relevé au §6 dit que ce plan est biaisé de façon stable ; ces chiffres-ci disent
+qu'il est en plus sensible à la scène, et que cette sensibilité déplace le
+résultat de comparaison plus que n'importe quel réglage tourné jusqu'ici — à
+comparer aux +0,20 d'IoU du seul bouton qui ait vraiment compté (§3).
+
+**Conséquences pratiques.**
+
+- Le seuil de 0,50 du §1 est franchi **par une session, pas par la méthode**.
+  Une reprise doit republier ses propres chiffres plutôt que citer 0,530.
+- **Rapporter leur surface de sol à côté de toute IoU.** C'est la grandeur qui
+  l'explique ; sans elle, une dérive de scène est indiscernable d'une régression
+  de code — c'est exactement ce qui a demandé l'A/B ci-dessus pour être tranché.
+- Comparer deux versions du code exige de les mesurer **sur la même scène, à
+  quelques minutes d'intervalle**. Un chiffre relevé un autre jour n'est pas une
+  référence utilisable.
+
+## 8. Latence — avec réserve
 
 Sur 41 échantillons, 120 s :
 
@@ -200,11 +260,11 @@ trois** (277 trames de profondeur entrantes pour 91 segmentations sur 30 s,
 profondeur 2 ; ce n'est pas une perte erratique, mais la suite ne voit qu'un
 tiers de ce que la caméra produit.
 
-## 8. Défauts connus
+## 9. Défauts connus
 
 **a. La latence par trame n'est pas instrumentée — toujours ouvert.**
 `bridge.py` conserve un seul `_latency` écrasé à chaque aller-retour et n'en
-imprime la valeur qu'une fois par intervalle. Tout le §7 en dérive. Corriger
+imprime la valeur qu'une fois par intervalle. Tout le §8 en dérive. Corriger
 demande d'accumuler les allers-retours individuels et d'en publier la
 distribution ; tant que ce n'est pas fait, aucun p95 par trame n'est disponible.
 
@@ -228,7 +288,7 @@ contours — `roi_cached` est reconstruit à chaque changement de détections et
 reste vide un instant, pendant lequel seul le cyan est présent. Ce n'est pas un
 défaut de la superposition, mais il faut le savoir avant de capturer.
 
-## 9. Reproduire
+## 10. Reproduire
 
 ```bash
 make                                     # la démo
@@ -254,7 +314,7 @@ docker compose up -d --force-recreate compositor   # remet les deux a zero
 `DIAG_FRAMES` est un **nombre** d'images, pas une liste de numéros de trame, et
 les deux réglages valent 0 par défaut. Le compositeur s'arrête définitivement
 après ce nombre d'images ; garder plus d'une ou deux trames avec les **deux**
-contours demande souvent deux passes (voir §8b).
+contours demande souvent deux passes (voir §9b).
 
 > Modifier `common/` invalide toutes les images de service, et `suite-compare`
 > ne reconstruit rien. Reconstruire `perception` et `compositor` à la main après
