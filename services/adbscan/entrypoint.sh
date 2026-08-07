@@ -2,16 +2,22 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
-# Three processes, stopped together when any one dies. Run separately, a
-# crashed clusterer would leave the bridge forwarding depth to nobody, which
+# Two processes, stopped together when either dies. Run separately, a crashed
+# clusterer would leave the bridge waiting on a topic nobody publishes, which
 # reads as "working" in the logs -- the failure mode that cost the most time on
 # the groundfloor service.
 #
-#   bridge.py             bus depth -> ROS depth image + camera_info + TF,
-#                         and ROS obstacle_array -> bus footprints
-#   point_cloud_xyz_node  depth image -> PointCloud2, because ADBSCAN consumes
-#                         a cloud and our bus carries an image
-#   adbscan_sub           the clusterer itself
+#   bridge.py     ROS obstacle_array -> bus footprints
+#   adbscan_sub   the clusterer
+#
+# REQUIRES services/groundfloor TO BE RUNNING. ADBSCAN is fed
+# /segmentation/obstacle_points, the groundfloor node's output, rather than a
+# cloud built here: see params.yaml.in for why a single height threshold cannot
+# remove a floor seen by a pitched camera. That container owns the depth path --
+# it publishes the depth image, the camera_info and the TF -- so this one
+# publishes none of them, and there is exactly one producer of each.
+#
+# compose enforces the order with depends_on; `make adbscan` brings both up.
 set -euo pipefail
 
 # ROS setup scripts are not nounset-clean: setup.bash reads
@@ -22,52 +28,34 @@ source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 source /ws/install/setup.bash
 set -u
 
-# z_filter cannot be a constant: it is the ground plane's height in a
-# CAMERA-CENTRED frame, so it depends on how high this camera is mounted. See
-# params.yaml.in. Rendered here rather than baked so `make calibrate` stays the
-# single source of truth for the mounting.
+# The ground is at z = 0 now that the input is in base_link, so this is a plain
+# height above the floor rather than a value derived from the mounting. Kept as
+# a template substitution anyway: it is the one number that has to move if the
+# floor tolerance changes, and rendering it keeps that in one place.
 PARAMS=/tmp/adbscan_params.yaml
 python3 - "$PARAMS" <<'PY'
-import json, os, sys
+import os, sys
 
-calib = os.environ.get("CAMERA_CALIBRATION", "/config/camera_calibration.json")
 tol = float(os.environ.get("ADBSCAN_Z_TOL", "0.08"))
-try:
-    with open(calib) as fh:
-        height = float(json.load(fh).get("camera_height_m", 1.56))
-except Exception as exc:                                        # noqa: BLE001
-    print(f"no calibration at {calib} ({exc}); assuming 1.56 m", file=sys.stderr)
-    height = 1.56
-z = -(height - tol)
 with open("/app/params.yaml.in") as fh:
-    text = fh.read().replace("@Z_FILTER@", f"{z:.4f}")
+    text = fh.read().replace("@Z_FILTER@", f"{tol:.4f}")
 with open(sys.argv[1], "w") as fh:
     fh.write(text)
-print(f"adbscan z_filter = {z:.4f} (camera {height:.2f} m, tolerance {tol:.2f} m)",
-      file=sys.stderr)
+print(f"adbscan z_filter = {tol:.4f} m above the floor (backstop only; the "
+      f"floor itself is removed upstream by groundfloor)", file=sys.stderr)
 PY
 
 python3 /app/bridge.py &
 BRIDGE=$!
 
-# ADBSCAN wants a cloud in the OPTICAL frame: it applies its own RS rotation
-# (z,-y,-x -> x,y,z) internally, so handing it an already-rotated cloud would
-# rotate it twice. point_cloud_xyz_node emits exactly that, in the frame the
-# depth image declares.
-ros2 run depth_image_proc point_cloud_xyz_node --ros-args \
-    -r image_rect:="/${GF_SENSOR_NAME:-camera}/depth/image_rect_raw" \
-    -r camera_info:="/${GF_SENSOR_NAME:-camera}/depth/camera_info" \
-    -r points:=/camera/depth/color/points &
-CLOUD=$!
-
-# No use_best_effort_qos to pass: unlike the groundfloor node, this one
-# subscribes with rclcpp::SensorDataQoS() unconditionally, which is already
-# BEST_EFFORT and therefore already matches what the bridge publishes.
+# No use_best_effort_qos to pass, and none exists: adbscan_sub subscribes with
+# rclcpp::SensorDataQoS(), already BEST_EFFORT, which is what the groundfloor
+# node publishes its obstacle cloud with.
 ros2 run adbscan_ros2 adbscan_sub --ros-args --params-file "$PARAMS" &
 SEG=$!
 
-trap 'kill $BRIDGE $CLOUD $SEG 2>/dev/null || true' INT TERM
-wait -n $BRIDGE $CLOUD $SEG
-echo "one of the three processes exited, stopping the others" >&2
-kill $BRIDGE $CLOUD $SEG 2>/dev/null || true
+trap 'kill $BRIDGE $SEG 2>/dev/null || true' INT TERM
+wait -n $BRIDGE $SEG
+echo "one of the two processes exited, stopping the other" >&2
+kill $BRIDGE $SEG 2>/dev/null || true
 wait || true

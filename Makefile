@@ -67,9 +67,11 @@ $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
 
 adbscan:
 	@$(call msg, Starting the Robotics AI Suite ADBSCAN clustering ...)
-	@# Same profile as groundfloor, and independent of it: either brick can be
-	@# run on its own against the same depth path.
-	@$(COMPOSE) --profile suite up --build adbscan
+	@# Brings groundfloor up with it, and not for tidiness: ADBSCAN clusters
+	@# /segmentation/obstacle_points, which is the groundfloor node's output.
+	@# Its own ground removal is a single height threshold and cannot handle a
+	@# pitched camera. compose's depends_on enforces the order.
+	@$(COMPOSE) --profile suite up --build adbscan groundfloor
 
 groundfloor:
 	@$(call msg, Starting the Robotics AI Suite floor segmentation ...)

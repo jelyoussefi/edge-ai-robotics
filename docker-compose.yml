@@ -294,7 +294,12 @@ services:
     build:
       context: .
       dockerfile: services/adbscan/Dockerfile
-    depends_on: [bus, source]
+    # Depend sur groundfloor, pas seulement sur le bus : ADBSCAN est branche
+    # sur /segmentation/obstacle_points, la sortie du noeud groundfloor. Son
+    # unique seuil de hauteur ne peut pas enlever un sol vu par une camera
+    # inclinee de 14 deg (le sol rampe sur 1,22 m de z dans l'arene), et le sol
+    # restant ressortait comme un cluster de la taille de la piece.
+    depends_on: [bus, source, groundfloor]
     environment:
       BUS_PUB: tcp://bus:5555
       BUS_SUB: tcp://bus:5556

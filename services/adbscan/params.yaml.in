@@ -1,35 +1,53 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 #
-# Template. entrypoint.sh substitutes @Z_FILTER@ from the calibration before
-# handing this to the node -- see below for why it cannot be a constant.
+# Template. entrypoint.sh substitutes @Z_FILTER@ before handing this to the
+# node. Algorithm parameters (subsample_ratio, base, coeff_1, coeff_2,
+# scale_factor) are exactly Intel's adbscan_sub_RS.yaml values; only the input
+# and the geometry differ, and every difference is recorded below.
 #
-# Algorithm parameters (subsample_ratio, base, coeff_1, coeff_2, scale_factor)
-# are left exactly at Intel's adbscan_sub_RS.yaml values. Only the geometry is
-# changed, and only where their defaults describe a different robot:
+# INPUT: the groundfloor node's output, not the raw depth cloud.
 #
-#   x_filter_back  3.0 -> 6.5   their demo robot looks 3 m ahead, which would
-#                               truncate the comparison before it started. 6.5
-#                               is this room's far wall at 6.2 m plus a little.
-#                               First tried at 8.0, which let through two
-#                               clusters at 7.4 and 6.9 m -- plausible-looking
-#                               boxes 0.6-0.8 m on a side, standing behind a
-#                               solid wall. They are depth returns, not objects.
-#   y_filter_*    +-2.0 -> +-4.0  our floor spans -2.6 to +1.5 m across, so the
-#                               default clips both sides of the room.
-#   z_filter      -0.1 -> computed. THIS one is not a preference. Their frame
-#                               after the RS rotation is camera-centred with z
-#                               up, so the ground sits at z = -camera_height.
-#                               On the AAEON robot the camera is ~0.2 m up and
-#                               -0.1 is just below it; on our 1.56 m tripod the
-#                               same -0.1 would classify the entire room as
-#                               ground and remove it. Rendered as
-#                               -(camera_height - ADBSCAN_Z_TOL).
+# ADBSCAN removes the ground with a single height threshold, z_filter, applied
+# in the frame it is given. That works on their AAEON robot, where the camera is
+# level and the floor really is one z. This camera is pitched 14.08 deg down,
+# and in a camera-centred frame the floor then RAMPS: measured on this room,
+#
+#   world x = 1.5 m  ->  z = -1.148     world x = 4.5 m  ->  z = -0.418
+#   world x = 3.0 m  ->  z = -0.783     world x = 6.5 m  ->  z = +0.068
+#
+# a 1.22 m span across the arena (x*tan(14.08)). No single threshold can cut
+# that: the value that clears the near floor keeps the far floor, and the far
+# floor is a large connected sheet of points -- which is precisely the
+# 6.14 x 6.22 m room-spanning cluster ADBSCAN reported on the raw cloud.
+#
+# The suite's own answer is to compose the bricks: groundfloor removes the floor
+# with a tilt-aware plane fit and publishes what is left on
+# /segmentation/obstacle_points, already in base_link. ADBSCAN then clusters
+# points that are known not to be floor.
+#
+# Lidar_type is 3D, not RS. The RS path rotates every input point by
+# (x,y,z) <- (z,-x,-y), the optical-to-body swap, because it expects a raw
+# RealSense cloud in the optical frame. groundfloor's output is ALREADY in
+# base_link (x forward, y left, z up, origin on the ground under the camera), so
+# the RS rotation would scramble it. 3D takes the cloud as given.
+#
+# That also makes base_link this project's world frame by construction, so the
+# cluster positions come back needing no transform at all.
+#
+#   x_filter_back  3.0 -> 6.5   now measured from the ground origin, so it is
+#                               directly the far wall at 6.2 m plus a little.
+#   y_filter_*    +-2.0 -> +-4.0  our floor spans -2.6 to +1.5 m across.
+#   z_filter      -0.1 -> +tol  KEPT AS A BACKSTOP, not as the ground removal.
+#                               FILTER_OP_LESS_THAN drops points BELOW it, and
+#                               with the floor already gone and the ground at
+#                               z = 0, a small positive value only catches
+#                               whatever the plane fit left behind.
 ---
 adbscan_sub_node:
   ros__parameters:
-    Lidar_type: RS
-    Lidar_topic: /camera/depth/color/points
+    Lidar_type: 3D
+    Lidar_topic: /segmentation/obstacle_points
     # Their Verbose logs every cluster's centre and size on every frame, which
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.
     Verbose: False
