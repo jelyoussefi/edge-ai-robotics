@@ -32,8 +32,9 @@ import mujoco
 import numpy as np
 from OpenGL import GL
 from edgebot import topics
-from edgebot.floor import (box_footprints, clear_of_boxes, mask_footprints,
-                           polygon_from_mask, shrink, straighten)
+from edgebot.floor import (box_footprints, clear_of_boxes, clip_footprints,
+                           mask_footprints, polygon_from_mask, shrink,
+                           straighten)
 from edgebot.bus import Publisher, Subscriber
 
 
@@ -1127,6 +1128,12 @@ def load_calibration() -> dict | None:
 
 # Margin left around every detected object, in metres of real floor.
 OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
+# Far wall of this room, measured at 6.2 m. Footprints are truncated here for
+# the reason clip_footprints() gives: the ground-plane projection has no notion
+# of where the room ends, and one stray mask column stretched a published
+# footprint to 11.12 m. The bridge already guards its own side with GF_X_MAX;
+# this is the same guard on ours.
+FOOTPRINT_X_MAX = float(os.environ.get("FOOTPRINT_X_MAX", "6.5"))
 
 
 def _footprints(detections, detector, dw: int, dh: int):
@@ -1549,6 +1556,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                     detections, _tw, dw_, dh_,
                     float(os.environ.get("OBSTACLE_MARGIN", "0.20")),
                     float(os.environ.get("OBSTACLE_CONF", "0.45")))
+            _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
             if _boxes:
                 mask = clear_of_boxes(mask, _boxes, _proj)
                 log.info("%d obstacle(s) removed from the floor (%s), "
@@ -1611,6 +1619,10 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                 blocked = _footprints(detections, floor_det,
                                       depth_metres.shape[1],
                                       depth_metres.shape[0])
+            # Same guard as above, on the set actually published to the sim.
+            # This is the one that mattered: the 11.12 m footprint went out on
+            # the bus and the navigator planned around it.
+            blocked = clip_footprints(blocked, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
             pub.send(topics.PATROL_ROI,
                      {"roi": roi_cached, "blocked": blocked,
                       "raw": getattr(_publish_free_floor, "raw_poly", []),

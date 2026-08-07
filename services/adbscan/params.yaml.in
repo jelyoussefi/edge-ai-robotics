@@ -8,10 +8,13 @@
 # are left exactly at Intel's adbscan_sub_RS.yaml values. Only the geometry is
 # changed, and only where their defaults describe a different robot:
 #
-#   x_filter_back  3.0 -> 8.0   their demo robot looks 3 m ahead; this room's
-#                               far wall is at 6.2 m and our own pipeline is
-#                               capped at 8.0 (GF_X_MAX). At 3.0 the comparison
-#                               would be truncated before it started.
+#   x_filter_back  3.0 -> 6.5   their demo robot looks 3 m ahead, which would
+#                               truncate the comparison before it started. 6.5
+#                               is this room's far wall at 6.2 m plus a little.
+#                               First tried at 8.0, which let through two
+#                               clusters at 7.4 and 6.9 m -- plausible-looking
+#                               boxes 0.6-0.8 m on a side, standing behind a
+#                               solid wall. They are depth returns, not objects.
 #   y_filter_*    +-2.0 -> +-4.0  our floor spans -2.6 to +1.5 m across, so the
 #                               default clips both sides of the room.
 #   z_filter      -0.1 -> computed. THIS one is not a preference. Their frame
@@ -31,7 +34,7 @@ adbscan_sub_node:
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.
     Verbose: False
     subsample_ratio: 150.0
-    x_filter_back: 8.0
+    x_filter_back: 6.5
     y_filter_left: 4.0
     y_filter_right: -4.0
     z_filter: @Z_FILTER@

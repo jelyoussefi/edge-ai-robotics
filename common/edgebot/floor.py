@@ -308,3 +308,32 @@ def mask_footprints(mask, project, margin: float, min_px: int = 60,
         out.append((round(float(x0) - margin, 3), round(float(x1) + margin, 3),
                     round(float(y0) - margin, 3), round(float(y1) + margin, 3)))
     return out
+
+
+def clip_footprints(boxes, x_max: float, margin: float = 0.0):
+    """Truncate footprints at the far wall, dropping any that start beyond it.
+
+    The projection through the ground plane has no idea where the room ends. A
+    mask pixel a few rows above the true contact line lands arbitrarily far
+    away, and because a footprint is built from percentiles of those projected
+    points, one bad column stretches the rectangle past anything real. Measured
+    on this room, whose far wall is at 6.2 m: a published footprint reached
+    11.12 m, and the suite's clusterer produced two "objects" at 7.4 and 6.9 m
+    that cannot exist.
+
+    Truncating rather than dropping, because the near part of such a rectangle
+    is usually a real obstacle whose far edge ran away; dropping it would lose a
+    genuine barrier. Only a footprint lying ENTIRELY beyond the wall is removed,
+    since nothing about it can be salvaged.
+
+    `margin` is the same obstacle margin already added to the boxes, so a
+    footprint that merely touches the wall keeps its margin instead of being
+    shaved back to it.
+    """
+    out = []
+    limit = x_max + margin
+    for x0, x1, y0, y1 in boxes:
+        if x0 >= limit:
+            continue
+        out.append((x0, min(x1, limit), y0, y1))
+    return out

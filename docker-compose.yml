@@ -164,6 +164,10 @@ services:
       OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
       # Periode de republication du sol praticable et des empreintes.
       ROI_PERIOD: ${ROI_PERIOD:-1.0}
+      # Mur du fond mesure a 6,2 m. La projection au sol ne sait pas ou la
+      # piece s'arrete : une colonne de masque egaree a produit une empreinte
+      # publiee jusqu'a 11,12 m. Meme garde que GF_X_MAX cote pont.
+      FOOTPRINT_X_MAX: ${FOOTPRINT_X_MAX:-6.5}
       OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
       # Straighten the floor boundary: stereo depth is noisy where the floor
       # meets a wall, so the raw edge wobbles although the real one is a line.

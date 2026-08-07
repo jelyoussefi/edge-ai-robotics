@@ -127,6 +127,39 @@ def floor_compare(poly_a, poly_b, cell: float = 0.05, pad: int = 4):
     }
 
 
+# The floor the robot actually patrols, and the only region where a footprint
+# from either side means anything. Beyond the far wall at 6.5 m and outside the
+# lateral extent of the detected floor, a rectangle is a depth artefact whatever
+# produced it.
+ARENA = (1.5, 6.5, -2.6, 1.5)
+
+
+def clip_to_arena(boxes, arena=ARENA):
+    """Truncate rectangles to the arena. Returns (clipped, n_outside).
+
+    Both pipelines emit a room-spanning blob, and IoU cannot pair one of those
+    with anything: our merged barrier sat ENTIRELY inside their 49 m2 rectangle
+    and still scored 0.21, under the 0.3 threshold, purely because the union was
+    the blob. Clipping both sides to the same region removes the part of the
+    disagreement that is about how far each one runs off into unmeasured space,
+    and leaves the part that is about where the obstacles are.
+
+    Counted, not silently dropped: a side that puts most of its rectangles
+    outside the arena is telling you something, and it must not disappear into
+    a better-looking IoU.
+    """
+    ax0, ax1, ay0, ay1 = arena
+    out, outside = [], 0
+    for x0, x1, y0, y1 in boxes:
+        cx0, cx1 = max(x0, ax0), min(x1, ax1)
+        cy0, cy1 = max(y0, ay0), min(y1, ay1)
+        if cx1 - cx0 <= 1e-6 or cy1 - cy0 <= 1e-6:
+            outside += 1
+            continue
+        out.append((cx0, cx1, cy0, cy1))
+    return out, outside
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seconds", type=float, default=30.0)
@@ -140,6 +173,7 @@ def main() -> int:
     floors, raws = [], []
     clusters = None
     clu_samples, clu_ious, clu_counts, clu_raw = [], [], [], []
+    clu_outside = []
     theirs_seen, floor_seen, clu_seen = 0, 0, 0
     deadline = time.time() + args.seconds
     print(f"  ecoute pendant {args.seconds:.0f} s ...")
@@ -175,9 +209,12 @@ def main() -> int:
         # as the groundfloor footprints, so the two sections are readable
         # against each other rather than against two different rulers.
         if ours is not None and clusters is not None:
-            cp, c_only_a, c_only_b = match(ours, clusters)
-            clu_samples.append((len(ours), len(clusters), len(cp)))
+            a_ours, out_ours = clip_to_arena(ours)
+            a_theirs, out_theirs = clip_to_arena(clusters)
+            cp, c_only_a, c_only_b = match(a_ours, a_theirs)
+            clu_samples.append((len(a_ours), len(a_theirs), len(cp)))
             clu_counts.append((len(c_only_a), len(c_only_b)))
+            clu_outside.append((out_ours, out_theirs))
             clu_ious.extend(p[2] for p in cp)
         if ours is None or theirs is None:
             continue
@@ -247,32 +284,42 @@ def main() -> int:
     # ADBSCAN. Contrairement au sol contre empreintes de l'etape B, les deux
     # cotes repondent ici a la meme question : "quelque chose est la, gros comme
     # ca". C'est la comparaison d'empreintes que l'etape B aurait du faire.
+    ax0, ax1, ay0, ay1 = ARENA
     print(f"\n  === CLUSTERS ADBSCAN CONTRE NOS EMPREINTES "
-          f"({len(clu_samples)} comparaisons, {clu_seen} messages) ===\n")
+          f"({len(clu_samples)} comparaisons, {clu_seen} messages) ===")
+    print(f"      arene x {ax0}-{ax1} m, y {ay0} a {ay1} m ; les deux jeux y "
+          f"sont rognes avant appariement\n")
     if not clu_samples:
         print("    rien recu d'adbscan. Le service tourne-t-il ?  make adbscan")
     else:
         cavg = lambda xs: sum(xs) / len(xs) if xs else 0.0
-        print(f"    empreintes, ce projet   : "
+        print("    DANS L'ARENE")
+        print(f"      empreintes, ce projet : "
               f"{cavg([s[0] for s in clu_samples]):.1f}")
-        print(f"    clusters, adbscan       : "
+        print(f"      clusters, adbscan     : "
               f"{cavg([s[1] for s in clu_samples]):.1f} "
-              f"(avant filtrage : {cavg(clu_raw):.1f})")
-        print(f"    apparies                : "
+              f"(avant filtrage du pont : {cavg(clu_raw):.1f})")
+        print(f"      apparies              : "
               f"{cavg([s[2] for s in clu_samples]):.1f}")
-        print(f"    vus par nous seulement  : "
+        print(f"      vus par nous seulement: "
               f"{cavg([c[0] for c in clu_counts]):.1f}")
-        print(f"    vus par eux seulement   : "
+        print(f"      vus par eux seulement : "
               f"{cavg([c[1] for c in clu_counts]):.1f}")
         if clu_ious:
             ci = sorted(clu_ious)
-            print(f"\n    recouvrement des paires : mediane "
+            print(f"      recouvrement des paires : mediane "
                   f"{ci[len(ci) // 2]:.2f}, min {ci[0]:.2f}, max {ci[-1]:.2f}")
-            print(f"    taux d'appariement      : "
-                  f"{cavg([s[2] for s in clu_samples]) / max(1e-9, cavg([s[0] for s in clu_samples])):.0%} "
-                  f"de nos empreintes ont une contrepartie")
+            denom = max(1e-9, cavg([s[0] for s in clu_samples]))
+            print(f"      taux d'appariement      : "
+                  f"{cavg([s[2] for s in clu_samples]) / denom:.0%} de nos "
+                  f"empreintes ont une contrepartie")
         else:
-            print("\n    aucune paire au-dessus du seuil de 0.3 d'IoU")
+            print("      aucune paire au-dessus du seuil de 0.3 d'IoU")
+        print("\n    HORS ARENE (rectangles entierement dehors, ecartes)")
+        print(f"      ce projet : {cavg([c[0] for c in clu_outside]):.1f} "
+              f"par trame")
+        print(f"      adbscan   : {cavg([c[1] for c in clu_outside]):.1f} "
+              f"par trame")
 
     if not samples:
         print("\n  (pas d'empreintes recues, comparaison d'obstacles ignoree)")
