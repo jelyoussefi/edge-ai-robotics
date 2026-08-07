@@ -47,7 +47,12 @@
 adbscan_sub_node:
   ros__parameters:
     Lidar_type: 3D
-    Lidar_topic: /segmentation/obstacle_points
+    # Not /segmentation/obstacle_points directly. bridge.py clips that cloud to
+    # the arena interior and republishes it here. groundfloor removes the floor
+    # but not the walls, and DBSCAN chains through contact: a chair against the
+    # wall comes back as one mass with the wall. The uncut cloud is still on
+    # /segmentation/obstacle_points for debugging.
+    Lidar_topic: /segmentation/arena_points
     # Their Verbose logs every cluster's centre and size on every frame, which
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.
     Verbose: False
@@ -72,17 +77,22 @@ adbscan_sub_node:
     #   match rate              27%          28%         28%
     #   ADBSCAN stage        ~27 ms        ~7 ms
     #
+    # Those three runs predate the arena clip in bridge.py, and the cost column
+    # no longer holds: with the walls cut out the ADBSCAN stage at 75 runs at
+    # ~2.9 ms, cheaper than 150 ever was uncut. The 4x penalty below was the
+    # wall sheet, not the point count. The cluster columns are the reason this
+    # stays at 75; see the clip comment on Lidar_topic for what changed after.
+    #
     # More points do NOT find more objects. The extra density MERGES clusters:
     # the count drops by a fifth, and the entire drop is in "theirs only" while
     # matched stays flat -- the signature of a spurious cluster being absorbed
     # into a neighbour that was already matched. The match rate does not move.
     #
-    # Kept at 75 for the cleaner cluster set, but be honest about the trade: it
-    # costs about 4x in the clustering stage (7 -> 27 ms, superlinear in point
-    # count as a kd-tree neighbourhood search would be), buys no recall, and
-    # 0.6 vs 1.1 "theirs only" could equally be read as losing real obstacles we
-    # never had a footprint for. It stays affordable only because their node
-    # consumes about one depth frame in three (~3 Hz, see ETAPE-B section 8).
+    # Kept at 75. The cost objection it was kept in spite of -- about 4x in the
+    # clustering stage, 7 -> 27 ms -- turned out to be the wall, not the points:
+    # once bridge.py clips the arena the same 75 costs ~2.9 ms. What remains
+    # true is that 0.6 vs 1.1 "theirs only" could be read as losing real
+    # obstacles we never had a footprint for, rather than as noise absorbed.
     subsample_ratio: 75.0
     x_filter_back: 6.5
     y_filter_left: 4.0

@@ -38,6 +38,58 @@ def read_xyz(fields, point_step: int, row_step: int, width: int, height: int,
     return out
 
 
+def _raw_rows(point_step: int, row_step: int, width: int, height: int,
+              data: bytes):
+    """The cloud as an (N, point_step) view of bytes, or None if it is empty.
+
+    Split out of _read_columns for clip_xy, which needs the rows themselves and
+    not parsed columns: it republishes points verbatim rather than rebuilding
+    them. A view, not a copy -- the caller indexes it and copies only what it
+    keeps.
+    """
+    n = width * height
+    if n == 0 or not data:
+        return None
+    # Rows can be padded, so index by row rather than assuming a flat buffer.
+    raw = np.frombuffer(data, dtype=np.uint8)
+    if row_step and height > 1 and row_step != width * point_step:
+        raw = raw.reshape(height, row_step)[:, :width * point_step].reshape(-1)
+    return raw[:n * point_step].reshape(n, point_step)
+
+
+def clip_xy(fields, point_step: int, row_step: int, width: int, height: int,
+            data: bytes, is_bigendian: bool, x_min: float, x_max: float,
+            y_min: float, y_max: float):
+    """Keep only the points whose x and y fall inside a rectangle.
+
+    Returns `(data, count)` ready to hand to a new PointCloud2, or None when the
+    cloud carries no x/y columns to test. None rather than empty bytes on
+    purpose: the caller then republishes the cloud uncut, because for a consumer
+    that clusters obstacles "I could not read this" must not look like "there is
+    nothing here".
+
+    Rows are copied **verbatim**, which is why this works on bytes rather than
+    on the (N, 3) array read_xyz returns. The consumer is Intel's node, not us:
+    it reads a 4-field point (LiDAR_data_4D_t), and a cloud rebuilt from parsed
+    xyz would quietly drop the fourth column.
+    """
+    rows = _raw_rows(point_step, row_step, width, height, data)
+    if rows is None:
+        return b"", 0
+    cols = _read_columns(fields, point_step, row_step, width, height, data,
+                         is_bigendian, ("x", "y"))
+    if cols is None:
+        return None
+    x = cols["x"].astype(np.float32)
+    y = cols["y"].astype(np.float32)
+    # isfinite as well as the bounds: a NaN compares false against both ends, so
+    # it would be dropped anyway, but saying it here means the count reported as
+    # "outside the arena" is not quietly inflated by invalid returns.
+    keep = (np.isfinite(x) & np.isfinite(y)
+            & (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max))
+    return rows[keep].tobytes(), int(keep.sum())
+
+
 def _read_columns(fields, point_step: int, row_step: int, width: int,
                   height: int, data: bytes, is_bigendian: bool, names):
     """Named columns of a PointCloud2 as a dict of 1-D arrays, or None.
@@ -60,14 +112,9 @@ def _read_columns(fields, point_step: int, row_step: int, width: int,
     if len(offsets) != len(names):
         return None
 
-    n = width * height
-    if n == 0 or not data:
+    raw = _raw_rows(point_step, row_step, width, height, data)
+    if raw is None:
         return None
-    # Rows can be padded, so index by row rather than assuming a flat buffer.
-    raw = np.frombuffer(data, dtype=np.uint8)
-    if row_step and height > 1 and row_step != width * point_step:
-        raw = raw.reshape(height, row_step)[:, :width * point_step].reshape(-1)
-    raw = raw[:n * point_step].reshape(n, point_step)
 
     order = ">" if is_bigendian else "<"
     out = {}

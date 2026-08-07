@@ -7,8 +7,15 @@
 # reads as "working" in the logs -- the failure mode that cost the most time on
 # the groundfloor service.
 #
-#   bridge.py     ROS obstacle_array -> bus footprints
+#   bridge.py     obstacle_points -> clipped arena_points, and their
+#                 obstacle_array -> bus footprints
 #   adbscan_sub   the clusterer
+#
+# The bridge is now IN the cloud path, not just downstream of it: adbscan_sub
+# reads /segmentation/arena_points, which only the bridge publishes. If the
+# bridge dies, the clusterer goes silent rather than falling back to the uncut
+# cloud -- which is the behaviour we want, and another reason the two processes
+# stop together.
 #
 # REQUIRES services/groundfloor TO BE RUNNING. ADBSCAN is fed
 # /segmentation/obstacle_points, the groundfloor node's output, rather than a

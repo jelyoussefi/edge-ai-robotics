@@ -12,9 +12,10 @@ plane fit. Composing the two bricks is the suite's own answer, and it is why
 this bridge no longer publishes depth: services/groundfloor owns that path, and
 one producer per topic is the point.
 
-What is left is small on purpose -- read their clusters, drop the impossible
-ones, put the rest on the bus in the same rectangle format everything else here
-uses.
+Two jobs, both small on purpose. Read their clusters, drop the impossible ones,
+put the rest on the bus in the same rectangle format everything else here uses.
+And, on the way in, clip the cloud to the arena interior before their node sees
+it -- see ARENA_* below for why a wall is worse than an obstacle here.
 
 Why the comparison target is right. ADBSCAN produces obstacle clusters and so do
 we; both answer "something is here, roughly this big". Etape B compared our
@@ -32,10 +33,12 @@ import rclpy
 from nav2_dynamic_msgs.msg import ObstacleArray
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import PointCloud2
 
 sys.path.insert(0, "/opt/edgebot")
 from edgebot import topics                                    # noqa: E402
 from edgebot.bus import Publisher                             # noqa: E402
+from edgebot.pointcloud import clip_xy                        # noqa: E402
 
 # Identical to the compositor's and the groundfloor bridge's, or the three
 # footprint sets are not comparable.
@@ -45,6 +48,25 @@ MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
 Z_MIN = float(os.environ.get("GF_Z_MIN", "-0.3"))
 X_MAX = float(os.environ.get("GF_X_MAX", "8.0"))
 CLUSTER_TOPIC = os.environ.get("ADBSCAN_TOPIC", "/obstacle_array")
+
+# The arena interior. groundfloor removes the floor, not the walls, so the far
+# wall and the side walls survive into obstacle_points as large connected
+# sheets -- and DBSCAN chains through whatever touches. A chair against the wall
+# is not a chair any more, it is one mass with the wall and half the room. The
+# navigator never plans outside these bounds, so nothing is lost by cutting
+# them before their node runs rather than discarding the clusters afterwards:
+# by then the damage is done, the chair is already inside the merged cluster.
+#
+# Slightly WIDER than suite_compare.py's arena (x 1.5-6.5, y -2.6 to 1.5), on
+# purpose. Clipping exactly at the comparison boundary would truncate the very
+# clusters the comparison scores, and their extent would then be an artefact of
+# this filter rather than of their detector.
+ARENA_X_MIN = float(os.environ.get("ARENA_X_MIN", "1.2"))
+ARENA_X_MAX = float(os.environ.get("ARENA_X_MAX", "6.3"))
+ARENA_Y_MIN = float(os.environ.get("ARENA_Y_MIN", "-2.8"))
+ARENA_Y_MAX = float(os.environ.get("ARENA_Y_MAX", "1.7"))
+CLOUD_IN = os.environ.get("ADBSCAN_CLOUD_IN", "/segmentation/obstacle_points")
+CLOUD_OUT = os.environ.get("ADBSCAN_CLOUD_OUT", "/segmentation/arena_points")
 
 
 class AdbscanBridge(Node):
@@ -62,15 +84,69 @@ class AdbscanBridge(Node):
             ObstacleArray, CLUSTER_TOPIC, self._on_obstacles,
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE))
 
+        # The cloud path. Both ends BEST_EFFORT: groundfloor publishes the
+        # obstacle cloud that way and adbscan_sub subscribes with
+        # rclcpp::SensorDataQoS(), which is BEST_EFFORT too, so this hop keeps
+        # the sensor semantics of the topic it sits in the middle of. A dropped
+        # cloud is better than a stalled one.
+        cloud_qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.cloud_pub = self.create_publisher(PointCloud2, CLOUD_OUT, cloud_qos)
+        self.create_subscription(PointCloud2, CLOUD_IN, self._on_cloud, cloud_qos)
+
         self.bus_pub = Publisher()
         self._got = 0
         self._clusters = 0
         self._dropped = 0
+        self._clouds = 0
+        self._pts_in = 0
+        self._pts_out = 0
+        self._unreadable = 0
         self._last_report = time.time()
         self.get_logger().info(
             f"adbscan bridge up, listening on {CLUSTER_TOPIC}. Input is "
             f"groundfloor's /segmentation/obstacle_points, so positions arrive "
             f"in base_link and need no transform.")
+        self.get_logger().info(
+            f"clipping {CLOUD_IN} -> {CLOUD_OUT} at x {ARENA_X_MIN}..."
+            f"{ARENA_X_MAX}, y {ARENA_Y_MIN}...{ARENA_Y_MAX}. The uncut cloud "
+            f"stays on {CLOUD_IN}, untouched, for debugging.")
+
+    def _on_cloud(self, msg: PointCloud2) -> None:
+        """Republish the cloud with everything outside the arena removed.
+
+        A separate topic rather than filtering in place: the input is the
+        groundfloor node's own output and stays exactly as it publishes it, so
+        the uncut cloud remains available to rviz, `ros2 topic echo` and the
+        compositor's point-cloud overlay without this node having to copy it.
+        """
+        clipped = clip_xy(msg.fields, msg.point_step, msg.row_step, msg.width,
+                          msg.height, msg.data, msg.is_bigendian,
+                          ARENA_X_MIN, ARENA_X_MAX, ARENA_Y_MIN, ARENA_Y_MAX)
+        self._clouds += 1
+        self._pts_in += msg.width * msg.height
+        if clipped is None:
+            # No x/y columns to test. Pass it through rather than publish an
+            # empty cloud: "unreadable" must not reach their node as "clear".
+            self._unreadable += 1
+            self.cloud_pub.publish(msg)
+            return
+
+        data, count = clipped
+        out = PointCloud2()
+        out.header = msg.header
+        out.fields = msg.fields
+        out.point_step = msg.point_step
+        out.is_bigendian = msg.is_bigendian
+        # Unordered: the surviving points are scattered through the original
+        # image grid, so there is no height/width left to preserve. Their node
+        # reads width * height points and does not care about the layout.
+        out.height = 1
+        out.width = count
+        out.row_step = msg.point_step * count
+        out.data = data
+        out.is_dense = True
+        self.cloud_pub.publish(out)
+        self._pts_out += count
 
     def _on_obstacles(self, msg: ObstacleArray) -> None:
         """Turn their clusters into footprints and put them on the bus.
@@ -112,6 +188,15 @@ class AdbscanBridge(Node):
                 f"this frame, {self._clusters} footprint(s) after filtering, "
                 f"{self._dropped} dropped as impossible "
                 f"(z < {Z_MIN} or x > {X_MAX})")
+            kept = (100.0 * self._pts_out / self._pts_in) if self._pts_in else 0.0
+            # The kept fraction is the one number that says whether the arena
+            # bounds are sane: near 100 % means the clip is doing nothing, and
+            # very low means it is eating the room rather than its edges.
+            self.get_logger().info(
+                f"{self._clouds} cloud(s) clipped, {kept:.0f}% of points kept "
+                f"inside the arena"
+                + (f", {self._unreadable} passed through unclipped"
+                   if self._unreadable else ""))
 
 
 def main() -> None:

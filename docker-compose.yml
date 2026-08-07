@@ -341,6 +341,16 @@ services:
       # Tolerance au-dessus du sol pour le z_filter rendu au demarrage, voir
       # services/adbscan/params.yaml.in. Meme valeur que floor_h_tol_m.
       ADBSCAN_Z_TOL: ${ADBSCAN_Z_TOL:-0.08}
+      # Interieur de l'arene. Le pont y decoupe le nuage de groundfloor avant
+      # de le republier pour ADBSCAN : groundfloor enleve le sol, pas les murs,
+      # et DBSCAN enchaine par contact -- une chaise contre le mur revient en
+      # un seul bloc avec le mur. Volontairement PLUS LARGE que l'arene de
+      # scripts/suite_compare.py (x 1.5-6.5, y -2.6 a 1.5), sans quoi la coupe
+      # tronquerait les clusters que la comparaison note.
+      ARENA_X_MIN: ${ARENA_X_MIN:-1.2}
+      ARENA_X_MAX: ${ARENA_X_MAX:-6.3}
+      ARENA_Y_MIN: ${ARENA_Y_MIN:--2.8}
+      ARENA_Y_MAX: ${ARENA_Y_MAX:-1.7}
     volumes:
       - ./config:/config:ro
 
