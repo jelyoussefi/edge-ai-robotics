@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Template. entrypoint.sh substitutes @Z_FILTER@ before handing this to the
-# node. Algorithm parameters (subsample_ratio, base, coeff_1, coeff_2,
-# scale_factor) are exactly Intel's adbscan_sub_RS.yaml values; only the input
-# and the geometry differ, and every difference is recorded below.
+# node. Algorithm parameters (base, coeff_1, coeff_2, scale_factor) are exactly
+# Intel's adbscan_sub_RS.yaml values; subsample_ratio is not, see below. Only
+# the input and the geometry differ otherwise, and every difference is recorded.
 #
 # INPUT: the groundfloor node's output, not the raw depth cloud.
 #
@@ -51,7 +51,39 @@ adbscan_sub_node:
     # Their Verbose logs every cluster's centre and size on every frame, which
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.
     Verbose: False
-    subsample_ratio: 150.0
+    # 150 -> 75, the one algorithm parameter that departs from Intel's file.
+    # subsample_LiDAR_data (doDBSCAN.cpp:58) is a stride, not a fraction: it
+    # keeps one point in `ratio`. Their 150 is sized for a raw RealSense cloud;
+    # our input is groundfloor's obstacle_points, which is what is LEFT after
+    # the floor is removed -- a small fraction of the cloud 150 was chosen for.
+    # 75 therefore doubles the points reaching the clusterer.
+    #
+    # Measured 75 / 150 / 75 in that order, three 60 s runs on one scene (the
+    # order matters, see docs/ETAPE-B-RESULTS.md section 7 -- comparing against a
+    # number from another session proves nothing). Raw floor IoU held at
+    # 0.646 / 0.658 / 0.657 across the three, which is the control: this
+    # parameter cannot reach the groundfloor node, so a stable floor says the
+    # scene did not move under the measurement.
+    #
+    #                            75          150          75
+    #   clusters in arena       1.4          1.9         1.6
+    #   matched to ours         0.8          0.8         0.9
+    #   theirs only             0.6          1.1         0.7
+    #   match rate              27%          28%         28%
+    #   ADBSCAN stage        ~27 ms        ~7 ms
+    #
+    # More points do NOT find more objects. The extra density MERGES clusters:
+    # the count drops by a fifth, and the entire drop is in "theirs only" while
+    # matched stays flat -- the signature of a spurious cluster being absorbed
+    # into a neighbour that was already matched. The match rate does not move.
+    #
+    # Kept at 75 for the cleaner cluster set, but be honest about the trade: it
+    # costs about 4x in the clustering stage (7 -> 27 ms, superlinear in point
+    # count as a kd-tree neighbourhood search would be), buys no recall, and
+    # 0.6 vs 1.1 "theirs only" could equally be read as losing real obstacles we
+    # never had a footprint for. It stays affordable only because their node
+    # consumes about one depth frame in three (~3 Hz, see ETAPE-B section 8).
+    subsample_ratio: 75.0
     x_filter_back: 6.5
     y_filter_left: 4.0
     y_filter_right: -4.0
