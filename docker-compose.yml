@@ -243,6 +243,21 @@ services:
 
   # Recorder. Persists calibration and runtime telemetry to a SQLite file on a
   # mounted volume. Passive: subscribes only to small messages, never the camera.
+  # Base commune aux briques de la suite : Ubuntu 24.04, ROS Jazzy, PCL, colcon,
+  # pyzmq/msgpack. Ce n'est pas un service, il n'est jamais demarre : il existe
+  # pour que compose sache construire l'image, et pour que les briques puissent
+  # la nommer comme contexte de build (voir additional_contexts ci-dessous).
+  # `command: ["true"]` plutot que rien, pour qu'un `up` accidentel se termine
+  # immediatement au lieu de boucler sur un conteneur sans commande.
+  # Troisieme consommateur prevu : FastMapping.
+  ros-base:
+    profiles: ["suite"]
+    image: edge-ai-robotics-ros-base:jazzy
+    build:
+      context: .
+      dockerfile: docker/ros-base/Dockerfile
+    command: ["true"]
+
   # Intel Robotics AI Suite, brique 1 : segmentation du plan de sol.
   # Profil optionnel, la demo tourne sans. `make groundfloor` la demarre.
   groundfloor:
@@ -250,6 +265,13 @@ services:
     build:
       context: .
       dockerfile: services/groundfloor/Dockerfile
+      # Le Dockerfile dit `FROM edge-ai-robotics-ros-base:jazzy`, et cette ligne
+      # detourne ce nom vers le service ros-base. Consequence : compose
+      # (re)construit la base AVANT la brique. Sans ca, un `build groundfloor`
+      # se contenterait de l'image locale du meme nom, aussi vieille soit-elle,
+      # et une base perimee passerait inapercue sous une brique fraiche.
+      additional_contexts:
+        "edge-ai-robotics-ros-base:jazzy": "service:ros-base"
     depends_on: [bus, source]
     environment:
       BUS_PUB: tcp://bus:5555
@@ -294,6 +316,10 @@ services:
     build:
       context: .
       dockerfile: services/adbscan/Dockerfile
+      # Meme detournement que pour groundfloor : la base est reconstruite avant
+      # la brique, jamais reprise telle quelle depuis le cache local.
+      additional_contexts:
+        "edge-ai-robotics-ros-base:jazzy": "service:ros-base"
     # Depend sur groundfloor, pas seulement sur le bus : ADBSCAN est branche
     # sur /segmentation/obstacle_points, la sortie du noeud groundfloor. Son
     # unique seuil de hauteur ne peut pas enlever un sol vu par une camera

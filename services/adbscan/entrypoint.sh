@@ -20,13 +20,10 @@
 # compose enforces the order with depends_on; `make adbscan` brings both up.
 set -euo pipefail
 
-# ROS setup scripts are not nounset-clean: setup.bash reads
-# AMENT_TRACE_SETUP_FILES before assigning it, which under `set -u` kills the
-# container on line one. Same trap as the groundfloor entrypoint.
-set +u
-source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
-source /ws/install/setup.bash
-set -u
+# ROS plus the colcon workspace at /ws. Shared with the other suite bricks and
+# kept in docker/ros-base rather than repeated here: the sourcing has to relax
+# `set -u` around it, and the reason why is worth writing down once.
+source /opt/ros-env.sh
 
 # The ground is at z = 0 now that the input is in base_link, so this is a plain
 # height above the floor rather than a value derived from the mounting. Kept as

@@ -2,51 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Intel's ADBSCAN clustering (adbscan_ros2), plus a bridge to this project's
-# bus. Same recipe as services/groundfloor: Ubuntu 24.04, ROS 2 Jazzy, the
-# component built from source at a pinned SUITE_COMMIT. Its own image for the
-# same reason groundfloor has one -- ROS drags in a large dependency tree and
-# its own DDS, and none of it belongs in a service that runs one model.
+# bus. Same shape as services/groundfloor: everything shared sits in
+# docker/ros-base, and only this component's own steps are below. Its own image
+# for the same reason groundfloor has one -- one container per brick.
 #
-# Two things differ from groundfloor and both cost a build step:
+# One thing genuinely differs from groundfloor and it costs a build step:
+# adbscan_ros2 depends on nav2_dynamic_msgs, which has no Jazzy binary package,
+# so it is built from source alongside. (The message packages it needs at the
+# apt level, visualization_msgs and unique_identifier_msgs, are in the base.)
 #
-#   1. ADBSCAN consumes a PointCloud2, not a depth image. Their default topic
-#      is a RealSense's /camera/depth/color/points. Our bus carries a depth
-#      IMAGE, so depth_image_proc's point_cloud_xyz_node sits between the two.
-#      That keeps the same depth path groundfloor consumes -- one bridge
-#      publishing image_rect_raw plus camera_info -- rather than inventing a
-#      second producer that could disagree about the intrinsics.
-#   2. It depends on nav2_dynamic_msgs, which has no Jazzy binary package. Built
-#      from navigation2_dynamic, also pinned.
-FROM ubuntu:24.04
+# The depth path is NOT here. ADBSCAN is chained behind the groundfloor node and
+# clusters /segmentation/obstacle_points; the depth_image_proc conversion this
+# image used to run was removed with it. See params.yaml.in for why a single
+# height threshold cannot remove a floor seen by a pitched camera.
+#
+# BUILD IT THROUGH COMPOSE, not with a bare `docker build`. docker-compose.yml
+# maps this FROM to `service:ros-base` as a named build context, so the base is
+# rebuilt first if it is stale.
+FROM edge-ai-robotics-ros-base:jazzy
 
-ARG DEBIAN_FRONTEND=noninteractive
-ARG ROS_DISTRO=jazzy
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg lsb-release software-properties-common wget \
-      python3 python3-pip \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-      -o /usr/share/keyrings/ros-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
-      > /etc/apt/sources.list.d/ros2.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-      ros-${ROS_DISTRO}-ros-base \
-      ros-${ROS_DISTRO}-tf2-ros \
-      ros-${ROS_DISTRO}-sensor-msgs \
-      ros-${ROS_DISTRO}-visualization-msgs \
-      ros-${ROS_DISTRO}-pcl-conversions \
-      ros-${ROS_DISTRO}-depth-image-proc \
-      ros-${ROS_DISTRO}-unique-identifier-msgs \
-      python3-numpy \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git build-essential cmake \
-      python3-colcon-common-extensions \
-      libpcl-dev libeigen3-dev \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# ROS_DISTRO comes from the base as an ENV, so it is not redeclared here.
 
 ARG SUITE_REPO=https://github.com/open-edge-platform/edge-ai-suites.git
 # Same commit as the groundfloor image. Both bricks are the etape B/C
@@ -83,8 +58,8 @@ RUN cd /ws && . /opt/ros/${ROS_DISTRO}/setup.sh \
     && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
     && rm -rf build log
 
-RUN pip3 install --break-system-packages --no-cache-dir pyzmq msgpack
-
+# Late, and after the colcon build, on purpose: editing a bridge or one line of
+# common/edgebot rebuilds these thin layers only, never the workspace above.
 COPY common /opt/edgebot
 COPY services/adbscan/ /app/
 WORKDIR /app

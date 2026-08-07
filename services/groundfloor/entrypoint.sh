@@ -8,15 +8,10 @@
 # logs and is the failure mode hardest to notice.
 set -euo pipefail
 
-# ROS setup scripts are not nounset-clean: setup.bash reads
-# AMENT_TRACE_SETUP_FILES before assigning it, which under `set -u` kills the
-# container on line one. Seen on the very first start. Relax -u for the two
-# sources only, the rest of the script keeps the strict mode.
-set +u
-source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
-# The brick is built from source into /ws, not installed under /opt/ros.
-source /ws/install/setup.bash
-set -u
+# ROS plus the colcon workspace at /ws. Shared with the other suite bricks and
+# kept in docker/ros-base rather than repeated here: the sourcing has to relax
+# `set -u` around it, and the reason why is worth writing down once.
+source /opt/ros-env.sh
 
 python3 /app/bridge.py &
 BRIDGE=$!

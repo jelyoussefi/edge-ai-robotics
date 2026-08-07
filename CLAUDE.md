@@ -18,7 +18,18 @@ Transport is **ZeroMQ**, not ROS 2 — msgpack payloads, topic name as the first
 
 Flow: `source → camera.rgb → perception → perception.{detections,mask} → compositor`; `source → camera.depth → compositor`; `compositor → patrol.roi → sim → robot.state → compositor`.
 
-`services/groundfloor/` is the optional ROS 2 Jazzy bridge (compose profile `suite`) to Intel's Robotics AI Suite — reached only via `make groundfloor`.
+`services/groundfloor/` is the optional ROS 2 Jazzy bridge (compose profile `suite`) to Intel's Robotics AI Suite — reached only via `make groundfloor`. `services/adbscan/` is the second brick, chained behind it.
+
+### The shared ROS base
+
+`docker/ros-base/` builds **`edge-ai-robotics-ros-base:jazzy`** — Ubuntu 24.04, ROS Jazzy `ros-base`, PCL/Eigen, the colcon toolchain, and `pyzmq`/`msgpack`. Both suite bricks are `FROM` it; **FastMapping will be the third consumer**, which is why it exists.
+
+- One container per brick is still the rule. The base is shared *layers*, not a shared service — it has no `ENTRYPOINT` and is never run.
+- Each brick's Dockerfile is only sparse checkout + `colcon build` + its own entrypoint. Anything shared belongs in the base; anything version-pinned to a component (`SUITE_COMMIT`) does not.
+- **`COPY common /opt/edgebot` stays in the bricks, never in the base.** In the base it would mean one line changed in `common/edgebot/` invalidates both multi-minute colcon builds.
+- `docker-compose.yml` maps each brick's `FROM` to `service:ros-base` via `build.additional_contexts`, so compose rebuilds a stale base *before* the brick. **Build through compose or `make`, never a bare `docker build`** — that would silently use whatever local image carries the tag.
+- Entrypoints call `source /opt/ros-env.sh` from the base. It relaxes `set -u` around ROS's not-nounset-clean setup scripts and sources `/ws/install` when present; see the file for why the guard is an `if` and not `&&`.
+- Measured gain: the two bricks went from ~4.8 GB apiece to 4.812 GB shared plus 5.8 MB / 17.9 MB unique — total image store 42.2 → 37.8 GB *while adding a third image*.
 
 ## Commands
 
@@ -32,7 +43,9 @@ make logs S=sim           # follow one service
 make shell S=perception   # exec a shell (defaults to compositor)
 make calibrate HEIGHT=1.56    # HEIGHT is REQUIRED; errors out without it
 make seg-test SEG_ARGS="--image /data/shot.png"   # exits 1 when nothing detected
+make ros-base                 # shared ROS Jazzy base image for the suite bricks
 make groundfloor              # builds/runs the ROS 2 suite profile
+make adbscan                  # ADBSCAN; brings groundfloor up with it, it is the input
 make suite-compare ARGS="--seconds 120"           # our footprints vs Intel's, IoU
 make clean / distclean
 ```

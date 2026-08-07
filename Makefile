@@ -22,12 +22,13 @@ STAMP_DIR    := .make
 IMAGES_STAMP := $(STAMP_DIR)/images
 ASSETS_STAMP := $(STAMP_DIR)/assets
 POLICY_STAMP := $(STAMP_DIR)/policy
+ROSBASE_STAMP := $(STAMP_DIR)/ros-base
 
 DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test groundfloor adbscan suite-compare logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan suite-compare logs ps shell clean distclean
 default: run
 
 help:
@@ -37,6 +38,7 @@ help:
 	@echo "  make restart    Same as run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
 	@echo "  make seg-test   What the segmentation model sees, as an image"
+	@echo "  make ros-base       Shared ROS Jazzy base image for the suite bricks"
 	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
 	@echo "  make adbscan        Intel Robotics AI Suite ADBSCAN clustering"
 	@echo "  make suite-compare  Their floor against ours, side by side"
@@ -64,6 +66,19 @@ $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
 
 .env:
 	@cp .env.example .env
+
+# Shared ROS Jazzy base for the suite bricks, tagged edge-ai-robotics-ros-base:
+# jazzy. Building it by hand is rarely necessary -- compose names it as a build
+# context for both bricks, so `make groundfloor` and `make adbscan` rebuild it
+# first when it is stale. The target exists to build or inspect it on its own,
+# and to make the dependency visible in the interface rather than only in YAML.
+$(ROSBASE_STAMP): docker/ros-base/Dockerfile docker/ros-base/ros-env.sh
+	@$(call msg, Building the shared ROS Jazzy base image ...)
+	@mkdir -p $(STAMP_DIR)
+	@$(COMPOSE) --profile suite build ros-base
+	@touch $@
+
+ros-base: $(ROSBASE_STAMP)
 
 adbscan:
 	@$(call msg, Starting the Robotics AI Suite ADBSCAN clustering ...)
