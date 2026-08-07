@@ -27,7 +27,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test groundfloor suite-compare logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test groundfloor adbscan suite-compare logs ps shell clean distclean
 default: run
 
 help:
@@ -38,6 +38,7 @@ help:
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
 	@echo "  make seg-test   What the segmentation model sees, as an image"
 	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
+	@echo "  make adbscan        Intel Robotics AI Suite ADBSCAN clustering"
 	@echo "  make suite-compare  Their floor against ours, side by side"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
@@ -63,6 +64,12 @@ $(POLICY_STAMP): scripts/fetch_policy.sh services/sim/g1_walker_scene.xml
 
 .env:
 	@cp .env.example .env
+
+adbscan:
+	@$(call msg, Starting the Robotics AI Suite ADBSCAN clustering ...)
+	@# Same profile as groundfloor, and independent of it: either brick can be
+	@# run on its own against the same depth path.
+	@$(COMPOSE) --profile suite up --build adbscan
 
 groundfloor:
 	@$(call msg, Starting the Robotics AI Suite floor segmentation ...)

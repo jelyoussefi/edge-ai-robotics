@@ -281,6 +281,34 @@ services:
       # node restarted without rebuilding the 4.8 GB ROS image.
       - ./services/groundfloor/params:/params:ro
 
+  # ADBSCAN, l'autre brique de la suite, meme profil que groundfloor. Elle
+  # groupe les points en clusters d'obstacles : cette fois la cible de
+  # comparaison est la bonne, nos empreintes et les siennes repondent a la meme
+  # question.
+  adbscan:
+    profiles: ["suite"]
+    build:
+      context: .
+      dockerfile: services/adbscan/Dockerfile
+    depends_on: [bus, source]
+    environment:
+      BUS_PUB: tcp://bus:5555
+      BUS_SUB: tcp://bus:5556
+      PYTHONUNBUFFERED: "1"
+      ROS_DISTRO: jazzy
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      # Doit valoir la meme chose que pour le compositeur et groundfloor, sans
+      # quoi les trois jeux d'empreintes ne sont pas comparables.
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
+      GF_Z_MIN: ${GF_Z_MIN:--0.3}
+      GF_X_MAX: ${GF_X_MAX:-8.0}
+      # Tolerance au-dessus du sol pour le z_filter rendu au demarrage, voir
+      # services/adbscan/params.yaml.in. Meme valeur que floor_h_tol_m.
+      ADBSCAN_Z_TOL: ${ADBSCAN_Z_TOL:-0.08}
+    volumes:
+      - ./config:/config:ro
+
   recorder:
     build:
       context: .

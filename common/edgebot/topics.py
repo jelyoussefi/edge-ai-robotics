@@ -78,6 +78,20 @@ GROUNDFLOOR_FLOOR = "groundfloor.floor"
 # the floor-plane projection.
 SUITE_CLOUD = "suite.cloud"
 
+# adbscan -> anyone. Obstacle clusters from Intel's ADBSCAN (adbscan_ros2), in
+# the SAME world rectangles as PATROL_ROI's `blocked` and with the same
+# OBSTACLE_MARGIN already applied.
+#
+# Unlike GROUNDFLOOR_OBSTACLES this is a like-for-like comparison target: both
+# sides are obstacle clusters answering "something is here, roughly this big".
+# Etape B compared our footprints against a floor segmenter's derived output,
+# which measured definitions rather than perception.
+#
+# `clusters` is the count BEFORE the impossible-return filter, so the two are
+# visible separately.
+#   {"blocked": [[x0, x1, y0, y1], ...], "clusters": int, "stamp": float}
+SUITE_CLUSTERS = "suite.clusters"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

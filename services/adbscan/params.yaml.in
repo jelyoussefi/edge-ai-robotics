@@ -1,0 +1,44 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# Template. entrypoint.sh substitutes @Z_FILTER@ from the calibration before
+# handing this to the node -- see below for why it cannot be a constant.
+#
+# Algorithm parameters (subsample_ratio, base, coeff_1, coeff_2, scale_factor)
+# are left exactly at Intel's adbscan_sub_RS.yaml values. Only the geometry is
+# changed, and only where their defaults describe a different robot:
+#
+#   x_filter_back  3.0 -> 8.0   their demo robot looks 3 m ahead; this room's
+#                               far wall is at 6.2 m and our own pipeline is
+#                               capped at 8.0 (GF_X_MAX). At 3.0 the comparison
+#                               would be truncated before it started.
+#   y_filter_*    +-2.0 -> +-4.0  our floor spans -2.6 to +1.5 m across, so the
+#                               default clips both sides of the room.
+#   z_filter      -0.1 -> computed. THIS one is not a preference. Their frame
+#                               after the RS rotation is camera-centred with z
+#                               up, so the ground sits at z = -camera_height.
+#                               On the AAEON robot the camera is ~0.2 m up and
+#                               -0.1 is just below it; on our 1.56 m tripod the
+#                               same -0.1 would classify the entire room as
+#                               ground and remove it. Rendered as
+#                               -(camera_height - ADBSCAN_Z_TOL).
+---
+adbscan_sub_node:
+  ros__parameters:
+    Lidar_type: RS
+    Lidar_topic: /camera/depth/color/points
+    # Their Verbose logs every cluster's centre and size on every frame, which
+    # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.
+    Verbose: False
+    subsample_ratio: 150.0
+    x_filter_back: 8.0
+    y_filter_left: 4.0
+    y_filter_right: -4.0
+    z_filter: @Z_FILTER@
+    Z_based_ground_removal: 1.0
+    base: 5.29545454
+    coeff_1: -0.164835164
+    coeff_2: -0.017982017
+    scale_factor: 0.9
+    oneapi_library: kdtree
+    benchmark_number_of_frames: 1
