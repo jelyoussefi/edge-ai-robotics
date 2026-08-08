@@ -287,6 +287,25 @@ class Navigator:
         """
         x, y = pose.centre
         if not self._path or time.time() - self._path_t > self.PATH_STALE:
+            # BOOTSTRAP. The robot spawns at the world origin, under the camera,
+            # and the mapped floor only begins at about 1.5 m: the planner is
+            # asked to plan from a cell it has never seen, calls it an obstacle,
+            # and returns nothing -- so the robot stands still for ever waiting
+            # for a plan that cannot exist while it stands there. Measured on
+            # the first E2 run: "plugin failed to plan from (-0.02, 0.00)",
+            # every five seconds, indefinitely.
+            #
+            # The patrol has always had this bootstrap implicitly: it walks
+            # straight out from under the camera before it knows anything. Goal
+            # mode needs it explicitly. Straight ahead, no steering, until the
+            # robot is on mapped floor and a plan arrives.
+            if x < self.RETURN_TO:
+                self._hold("walking out from under the camera onto the mapped "
+                           "floor, where a plan can start")
+                err = (0.0 - pose.yaw + np.pi) % (2 * np.pi) - np.pi
+                return self._smooth(self.CRUISE_VX, float(np.clip(
+                    err * self.HEAD_GAIN - self.YAW_DAMP * pose.yaw_rate,
+                    -self.TURN_RATE, self.TURN_RATE)), dt)
             self._hold("no current plan (waiting for the planner)")
             return self._smooth(0.0, 0.0, dt)
 
