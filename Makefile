@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check pick-goals logs ps shell clean distclean
 default: run
 
 help:
@@ -141,6 +141,13 @@ map-check:
 		-v $(PWD)/scripts:/scripts:ro \
 		-v $(PWD)/common:/opt/edgebot:ro \
 		perception /scripts/map_check.py $(ARGS)
+
+pick-goals:
+	@$(call msg, Choosing mutually reachable goals from the map ...)
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/opt/edgebot:ro \
+		perception /scripts/pick_goals.py $(ARGS)
 
 seg-test: $(IMAGES_STAMP)
 	@$(call msg, Running the segmentation model on the live camera feed ...)
