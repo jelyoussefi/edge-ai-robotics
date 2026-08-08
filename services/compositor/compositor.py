@@ -1339,6 +1339,70 @@ def _draw_map(out, m, cam_h, pitch_deg, fx, fy, ppx, ppy, show_free):
     return int(ok.sum())
 
 
+def _path_caption(out, path) -> None:
+    """Path metrics, bottom right, and what the path is NOT.
+
+    "planned, not driven" is on screen and not only in a doc. A yellow line
+    across the floor of a robot demo reads as the route the robot is taking,
+    and in E1 nothing consumes this: the navigator does not read SUITE_PATH.
+    """
+    start = path.get("start") or [0, 0]
+    pts = path.get("path") or []
+    drift = (float(np.hypot(pts[0][0] - start[0], pts[0][1] - start[1]))
+             if pts else 0.0)
+    lines = [f"ITS path: {len(pts)} waypoints, {path.get('length_m', 0):.2f} m,"
+             f" min clearance {path.get('clearance_m', -1):.3f} m",
+             f"start offset {drift:.2f} m (roadmap snaps to its nearest node)",
+             "planned, not driven: nothing consumes this yet (E1)"]
+    y = out.shape[0] - 12 - 20 * (len(lines) - 1)
+    for text in lines:
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        x = out.shape[1] - tw - 12
+        cv2.putText(out, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 255, 255), 1, cv2.LINE_AA)
+        y += 20
+
+
+def _draw_path(out, path, cam_h, pitch_deg, fx, fy, ppx, ppy):
+    """Draw a planned path as a ground polyline. Returns segments drawn.
+
+    Under the SAME 'm' as the map rather than a key of its own, and that is a
+    semantic choice, not economy of keys. A path's clearance is only meaningful
+    against the occupancy it was planned on -- the map keeps accumulating
+    afterwards -- so showing the path without the map it came from invites
+    exactly the wrong reading.
+
+    Same projection as everything else at ground level, and the waypoints are
+    drawn as published: SUITE_PATH is already the bridge's processed output,
+    the poses the planner returned, so there is no rawer form a consumer would
+    see. Nothing acts on it in E1 -- the navigator does not read it -- and the
+    caption says so, because a line drawn on the floor of a robot demo reads as
+    a route the robot is taking.
+    """
+    pts = []
+    for x, y in path["path"]:
+        uv = _world_to_pixel(cam_h, pitch_deg, fx, fy, ppx, ppy, x, y,
+                             out.shape[1], out.shape[0])
+        if uv is not None:
+            pts.append(uv)
+    if len(pts) < 2:
+        return 0
+    arr = np.array(pts, np.int32)
+    cv2.polylines(out, [arr], False, (0, 0, 0), 7, cv2.LINE_AA)
+    cv2.polylines(out, [arr], False, (0, 255, 255), 3, cv2.LINE_AA)
+    # Ends marked, and differently: a path that silently starts somewhere other
+    # than where it was asked to is the failure mode this planner actually has
+    # (its roadmap snaps the start to the nearest node), and two identical dots
+    # would hide it.
+    cv2.circle(out, pts[0], 7, (0, 0, 0), -1)
+    cv2.circle(out, pts[0], 5, (0, 255, 255), -1)
+    cv2.drawMarker(out, pts[-1], (0, 0, 0), cv2.MARKER_TILTED_CROSS, 18, 5)
+    cv2.drawMarker(out, pts[-1], (0, 255, 255), cv2.MARKER_TILTED_CROSS, 14, 2)
+    return len(pts) - 1
+
+
 def _draw_cloud(out, xyz, labels, cam_h, pitch_deg, fx, fy, ppx, ppy,
                 ground_label, obstacle_label):
     """Draw the suite's labelled cloud as 2 px dots. Returns points drawn.
@@ -2097,7 +2161,7 @@ def main() -> None:
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
                       topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR,
                       topics.SUITE_CLOUD, topics.SUITE_CLUSTERS,
-                      topics.SUITE_MAP])
+                      topics.SUITE_MAP, topics.SUITE_PATH])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -2119,6 +2183,8 @@ def main() -> None:
     suite_map = None
     suite_map_t = 0.0
     _map_seen = 0
+    suite_path = None
+    suite_path_t = 0.0
     cloud_xyz = None
     cloud_lab = None
     cloud_total = 0
@@ -2257,6 +2323,15 @@ def main() -> None:
                     suite_map_t = time.time()
                 except Exception as exc:
                     log.warning("bad occupancy grid (%s)", exc)
+                continue
+
+            if topic == topics.SUITE_PATH:
+                # Aged out, unlike the map. A map stays true after its producer
+                # stops; a PLAN does not -- it was computed against one
+                # occupancy and one pair of endpoints, and a stale line on the
+                # floor claims a route nobody is planning any more.
+                suite_path = payload
+                suite_path_t = time.time()
                 continue
 
             if topic == topics.SUITE_CLOUD:
@@ -2454,6 +2529,10 @@ def main() -> None:
                 _map_caption(out, suite_map, _cells,
                              (time.perf_counter() - _t0) * 1000.0,
                              time.time() - suite_map_t, map_mode)
+                if suite_path and time.time() - suite_path_t < 15.0:
+                    _draw_path(out, suite_path, cam_height, _cam_pitch_deg,
+                               fx, fy, ppx, ppy)
+                    _path_caption(out, suite_path)
                 _annotated = True
             _annotated = _draw_overlays(
                 out, ov, show_floor and cloud_mode != 2, show_seg, floor_det,

@@ -496,7 +496,19 @@ services:
       # une reponse valable.
       ITS_START_X: ${ITS_START_X:-1.8}
       ITS_START_Y: ${ITS_START_Y:-0.0}
-      ITS_GOAL_X: ${ITS_GOAL_X:-5.8}
+      # x = 4.6 et non 5.8. Le but demande (5,8 ; -1,8) est DANS le bloc
+      # cuisine : mesure sur la carte accumulee, 169 cellules sur 169 occupees
+      # dans un rayon de 0,22 m, valeur centrale 100. Le planificateur le
+      # refusait a juste titre -- "The start/goal pose is an obstacle",
+      # its_planner.cpp:191 -- et aucun reglage ne rend atteignable un point
+      # situe a l'interieur d'un obstacle.
+      #
+      # 4,6 garde le y demande exactement, donc l'intention est intacte : le
+      # but reste profondement du cote barriere et une ligne droite depuis
+      # (1,8 ; 0) traverserait le mobilier. C'est le point libre le plus proche
+      # du but demande qui offre au moins 0,30 m de degagement : 1,20 m de
+      # decalage, degagement mesure 0,341 m.
+      ITS_GOAL_X: ${ITS_GOAL_X:-4.6}
       ITS_GOAL_Y: ${ITS_GOAL_Y:--1.8}
       ITS_REQUEST_PERIOD: ${ITS_REQUEST_PERIOD:-5.0}
     volumes:

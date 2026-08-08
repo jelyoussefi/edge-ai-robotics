@@ -129,16 +129,59 @@ dans `perception`, latence par trame, consommation, thermique.
 
 ---
 
-## Étape E. Nav2 et ITS Path Planner, à décider plus tard
+## Étape E. ITS Path Planner, en trois phases
 
-Reporté délibérément. Ce n'est pas un ajout mais un changement d'architecture :
-un greffon Nav2 n'arrive pas seul, il demande une carte de coûts, un arbre TF
-complet, une localisation, une empreinte et une cinématique de robot. Nav2 pilote
-aussi le robot par `cmd_vel`, ce qui recouvre la mission et la patrouille
-actuelles.
+Le report était justifié et la raison tient toujours : un greffon Nav2 n'arrive
+pas seul, il demande une carte de coûts, un arbre TF complet, une localisation,
+une empreinte et une cinématique de robot, et Nav2 pilote par `cmd_vel`, ce qui
+recouvre la patrouille actuelle. La réponse n'est pas d'attendre, c'est de
+**découper par ce que chaque phase met en jeu**. E1 ne risque rien, E2 met la TF
+en jeu, E3 met le robot en jeu.
 
-À rouvrir seulement quand B et C auront montré ce que la passerelle coûte
-réellement, ou quand un robot réel entrera dans le tableau.
+Ce que le repérage a établi avant d'écrire la moindre ligne :
+`its_planner::ITSPlanner` est un **greffon pluginlib** `nav2_core::GlobalPlanner`,
+pas un nœud. Il ne tourne pas seul, il est chargé par `planner_server` (nœud
+lifecycle) et lit un `Costmap2DROS` reçu dans `configure()`, sans s'abonner à
+quoi que ce soit lui-même. La moitié planification de Nav2 est donc nécessaire
+(`nav2_planner`, `nav2_costmap_2d`, `nav2_lifecycle_manager`, `nav2_msgs`) ;
+`nav2_bringup` reste exclu.
+
+### E1. Planifier sur la carte, sans robot dans la boucle — **faite**
+
+Quatrième brique, `services/itsplanner/`, quatrième consommateur de `ros-base`.
+Le planificateur produit un chemin sur la carte FastMapping, publié sur
+`SUITE_PATH` et dessiné sous la touche `m` avec la carte contre laquelle il a
+été calculé. **Personne ne le consomme** : le navigateur ne le lit pas.
+
+Critère : chemin dans l'espace libre avec au moins 0,22 m de dégagement.
+**Atteint**, 0,267 à 0,341 m sur cinq requêtes. Détail et réserves dans le
+compte rendu de commit ; voir `docs/images/etape-e1-its-path.png`.
+
+**Décision de nommage, à défaire en E2.** `base_link` est ici le MONDE, fixe,
+au sol sous la caméra. Nav2 entend par `base_link` le CORPS DU ROBOT et attend
+`map -> odom -> base_link`. E1 réconcilie les deux en les rendant numériquement
+identiques : FastMapping publie sa grille dans `map` (`FM_MAP_FRAME`) et le pont
+publie une TF statique **identité** `map -> base_link`. Rien ne bouge
+géométriquement, seule l'étiquette change, et Nav2 voit un robot immobile à
+l'origine du monde -- ce qui est vrai, il n'y a pas de robot.
+
+### E2. Mettre le robot dans le repère, toujours sans le piloter
+
+Remplacer l'identité par `map -> odom -> base_link` alimentée par la pose du
+sim, pour que `base_link` redevienne le corps du robot au sens de Nav2 et que le
+costmap suive le robot. Publier `/odom` depuis la même source.
+
+Critère : le chemin est replanifié depuis la position réelle du robot pendant
+qu'il patrouille, et le décalage de départ mesuré en E1 (0,45 m, le roadmap
+accroche le départ à son nœud le plus proche) est mesuré à nouveau une fois que
+le départ suit le robot.
+
+### E3. Donner l'autorité au planificateur, ou ne pas la donner
+
+C'est la seule phase qui change le comportement du robot, et elle n'est pas
+acquise. La question à trancher avec des chiffres, pas d'avance : le chemin ITS
+conduit-il mieux que la patrouille actuelle, et que devient la mission
+(aller-retour sur l'axe) si Nav2 pilote par `cmd_vel` ? Décider après E2.
 
 ---
 
