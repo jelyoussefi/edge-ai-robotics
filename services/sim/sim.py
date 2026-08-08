@@ -102,12 +102,13 @@ class Sim:
         # depends on an env var read in another module, and a silent topic is
         # free -- the suite profile usually is not running at all.
         self.sub = Subscriber([topics.CMD_RESET, topics.PATROL_ROI,
-                               topics.SUITE_CLUSTERS])
+                               topics.SUITE_CLUSTERS, topics.SUITE_PATH])
         self.cmd = np.zeros(3)
         # Everything about where to go lives here, and knows nothing of MuJoCo.
         # Driving a real G1 means replacing this file, not this object.
         self.nav = Navigator()
-        log.info("obstacle source: %s", self.nav.SOURCE)
+        log.info("obstacle source: %s, navigation mode: %s",
+                 self.nav.SOURCE, self.nav.MODE)
                                          # compositor, which are the good ones
         # Every position test below uses the front of the feet on the ground, not
         # the free joint. qpos[0:2] is the pelvis, 0.79 m up and roughly 0.2 m
@@ -170,6 +171,13 @@ class Sim:
                 # same margin already applied, so they need no conversion. The
                 # navigator drops them unless OBSTACLE_SOURCE asks for them.
                 self.nav.set_suite(payload.get("blocked"))
+                continue
+
+            if topic == topics.SUITE_PATH:
+                # The planner's route. Dropped unless NAV_MODE asks for it, the
+                # same arrangement as SUITE_CLUSTERS: subscribe unconditionally,
+                # decide in one place.
+                self.nav.set_path(payload)
                 continue
 
             if topic == topics.CMD_RESET:

@@ -38,7 +38,9 @@ global_costmap:
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
-      robot_base_frame: base_link
+      # robot_base, NOT base_link: base_link is this project's world frame and
+      # stays put. See services/itsplanner/bridge.py for the three transforms.
+      robot_base_frame: robot_base
       use_sim_time: False
       robot_radius: 0.22
       # 0.05 m, half FastMapping's 0.04 m cell. Their file uses the same value.

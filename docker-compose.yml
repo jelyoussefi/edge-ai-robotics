@@ -83,6 +83,17 @@ services:
       # suite sont un profil optionnel, et le comportement du navigateur ne
       # doit pas dependre de ce qui tourne par ailleurs.
       OBSTACLE_SOURCE: ${OBSTACLE_SOURCE:-ours}
+      # "patrol" arpente l'axe optique, la demo livree. "goal" suit les points
+      # de SUITE_PATH, la sortie du planificateur, c'est l'etape E2. Defaut
+      # patrol : le planificateur est un profil optionnel.
+      NAV_MODE: ${NAV_MODE:-patrol}
+      # Tolerance d'arrivee. Ce n'est pas une marge de confort, c'est le
+      # decalage mesure du roadmap ITS : il accroche son depart au noeud le plus
+      # proche, 0,30 a 0,45 m. Resserrer mesurerait la densite du roadmap, pas
+      # le suivi du robot.
+      GOAL_TOL: ${GOAL_TOL:-0.45}
+      PATH_LOOKAHEAD: ${PATH_LOOKAHEAD:-0.8}
+      PATH_STALE: ${PATH_STALE:-20.0}
       # Leurs clusters uniquement. Rogne a l'arene, puis tout ce qui depasse
       # SUITE_MAX_SPAN dans une direction est refuse avant la fusion : ils
       # rendent encore la moitie droite de la piece en un bloc de 3,8 x 2,2 m
@@ -526,6 +537,14 @@ services:
       ITS_GOAL_X: ${ITS_GOAL_X:-2.1}
       ITS_GOAL_Y: ${ITS_GOAL_Y:--1.9}
       ITS_REQUEST_PERIOD: ${ITS_REQUEST_PERIOD:-5.0}
+      # E2. Repere du CORPS du robot, distinct de base_link qui reste le monde.
+      # Renommer base_link aurait deplace en silence toutes les empreintes,
+      # bornes d'arene et valeurs de calibration ecrites depuis l'etape B.
+      ITS_ROBOT_FRAME: ${ITS_ROBOT_FRAME:-robot_base}
+      ITS_ODOM_FRAME: ${ITS_ODOM_FRAME:-odom}
+      # Trois buts distincts, enchaines a mesure qu'ils sont atteints.
+      ITS_GOALS: ${ITS_GOALS:-2.1,-1.9;4.6,-1.8;2.6,0.9}
+      GOAL_TOL: ${GOAL_TOL:-0.45}
     volumes:
       - ./config:/config:ro
 

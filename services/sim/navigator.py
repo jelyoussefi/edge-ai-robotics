@@ -90,6 +90,29 @@ class Navigator:
     # service happened to be running would be a bad default whichever way it
     # went. Nothing changes unless asked.
     SOURCE = os.environ.get("OBSTACLE_SOURCE", "ours").strip().lower()
+    # "patrol" paces the optical axis, the shipped demo. "goal" follows the
+    # waypoints of SUITE_PATH, the planner's output, and is etape E2.
+    #
+    # A mode and not a replacement. Everything below this line -- the heading
+    # law, the yaw cap, the TURN_VX floor the policy needs to keep stepping,
+    # the smoothing, the escape from a footprint -- is shared, because those
+    # are properties of the ROBOT and not of the mission. A goal mode that
+    # re-derived them would drift from the patrol that has eight laps of
+    # validation behind it.
+    MODE = os.environ.get("NAV_MODE", "patrol").strip().lower()
+    # Reached, for the purpose of the E2 criterion. 0.45 m is not a comfort
+    # margin, it is the measured start snap of the ITS roadmap: it places its
+    # start on the nearest node, 0.30-0.45 m away, so a goal is only ever
+    # approached to within roughly that. Tightening this would measure the
+    # planner's roadmap density, not the robot's tracking.
+    GOAL_TOL = float(os.environ.get("GOAL_TOL", "0.45"))
+    # How far along the path to aim. Shorter cuts corners and wobbles, longer
+    # cuts the corner off the corner. Roughly the turn radius, 0.38 m, doubled.
+    PATH_LOOKAHEAD = float(os.environ.get("PATH_LOOKAHEAD", "0.8"))
+    # A plan is not a map: it was computed against one occupancy and one pair of
+    # endpoints. Past this it is not followed, the robot stands, and the planner
+    # is expected to publish a fresh one.
+    PATH_STALE = float(os.environ.get("PATH_STALE", "20.0"))
     # Their clusters only, and only for the union. Anything wider than this in
     # either direction is refused before the merge: with GF_Z_LOW in place they
     # still return the right half of the room as one 3.8 x 2.2 m block in 68-82 %
@@ -148,6 +171,16 @@ class Navigator:
         # failure this whole arrangement risks introducing, so its rate is the
         # number to compare between sources rather than its presence.
         self._no_way_round = 0
+        self._path: list = []          # waypoints of the current plan
+        self._path_goal = None         # what it was planned to reach
+        self._path_t = 0.0
+        self._path_i = 0               # how far along we are
+        self._arrived = None           # goal already reported reached
+        self._goals_done = 0
+        self._path_hold = ""           # why we are standing still, logged once
+        if self.MODE not in ("patrol", "goal"):
+            raise SystemExit(
+                f"NAV_MODE={self.MODE!r} is not one of patrol, goal")
         if self.SOURCE not in ("ours", "suite", "union"):
             # Loudly, not silently back to "ours". A typo in OBSTACLE_SOURCE
             # would otherwise look exactly like the union quietly doing nothing.
@@ -211,6 +244,126 @@ class Navigator:
                      len(keep), wide, self.SUITE_MAX_SPAN, outside,
                      self._suite_wide, self._suite_outside)
         self._push("suite", keep)
+
+    def set_path(self, payload) -> None:
+        """Take a plan from SUITE_PATH. Ignored unless NAV_MODE asks for it.
+
+        A NEW GOAL RESETS the progress index; a replan toward the SAME goal does
+        not. Without that distinction the chair test fails in a way that looks
+        like success: the planner republishes a detour around the chair, the
+        index survives from the old path, and the robot skips straight to a
+        waypoint past the obstacle -- arriving at the goal having walked through
+        the thing it was supposed to avoid.
+        """
+        if self.MODE != "goal" or not payload:
+            return
+        pts = [(float(a), float(b)) for a, b in (payload.get("path") or [])]
+        if len(pts) < 2:
+            return
+        goal = tuple(float(v) for v in (payload.get("goal") or ()))
+        if goal != self._path_goal:
+            self._path_i = 0
+            self._arrived = None
+            log.info("new goal (%.2f, %.2f), %d waypoint(s), %.2f m",
+                     goal[0], goal[1], len(pts),
+                     float(payload.get("length_m", 0.0)))
+        else:
+            # Same goal, fresh plan: keep going forward, but never backwards.
+            # The new path has its own indexing, so the old index is only a hint
+            # and is clamped rather than trusted.
+            self._path_i = min(self._path_i, max(0, len(pts) - 1))
+        self._path = pts
+        self._path_goal = goal
+        self._path_t = time.time()
+
+    def _follow(self, pose: Pose, dt: float) -> np.ndarray:
+        """Walk the current plan. The goal-mode counterpart of the patrol.
+
+        Pure pursuit on the waypoints, then the SAME heading law, yaw cap,
+        TURN_VX floor and smoothing the patrol uses. The RL policy's
+        constraints are properties of the robot: it stops stepping below about
+        0.26 m/s whatever yaw is asked, and it tracks 0.9 rad/s at about 75 %.
+        Neither changes because the mission changed.
+        """
+        x, y = pose.centre
+        if not self._path or time.time() - self._path_t > self.PATH_STALE:
+            self._hold("no current plan (waiting for the planner)")
+            return self._smooth(0.0, 0.0, dt)
+
+        if self._path_goal is not None:
+            d_goal = float(np.hypot(self._path_goal[0] - x,
+                                    self._path_goal[1] - y))
+            if d_goal <= self.GOAL_TOL:
+                if self._arrived != self._path_goal:
+                    self._arrived = self._path_goal
+                    self._goals_done += 1
+                    log.info("GOAL %d REACHED: (%.2f, %.2f), final distance "
+                             "%.3f m (tolerance %.2f)", self._goals_done,
+                             self._path_goal[0], self._path_goal[1], d_goal,
+                             self.GOAL_TOL)
+                return self._smooth(0.0, 0.0, dt)
+
+        # Out of a footprint first, exactly as the patrol does. This is the
+        # union acting as the reactive layer: whatever the plan says, standing
+        # inside an obstacle is resolved before anything else.
+        escape = self._escape(pose, dt)
+        if escape is not None:
+            return escape
+
+        # Advance the index to the waypoint nearest the robot, never backwards,
+        # then aim PATH_LOOKAHEAD further along.
+        best_i, best_d = self._path_i, float("inf")
+        for i in range(self._path_i, len(self._path)):
+            d = float(np.hypot(self._path[i][0] - x, self._path[i][1] - y))
+            if d < best_d:
+                best_i, best_d = i, d
+        self._path_i = best_i
+        target, ahead = self._path[-1], 0.0
+        for i in range(best_i, len(self._path) - 1):
+            ahead += float(np.hypot(self._path[i + 1][0] - self._path[i][0],
+                                    self._path[i + 1][1] - self._path[i][1]))
+            if ahead >= self.PATH_LOOKAHEAD:
+                target = self._path[i + 1]
+                break
+
+        # The reactive layer, second half. The patrol answers an obstacle by
+        # shifting its lane sideways, which only means something on an axis; off
+        # it, the honest answer is to stop and let the planner produce another
+        # route. Standing still in front of an obstacle reads as deliberate.
+        if self._obstacle_on(target):
+            self._hold("an obstacle sits on the next waypoint, holding for a "
+                       "replan")
+            return self._smooth(0.0, 0.0, dt)
+        self._hold("")
+
+        want = float(np.arctan2(target[1] - y, target[0] - x))
+        err = (want - pose.yaw + np.pi) % (2 * np.pi) - np.pi
+        damp = self.YAW_DAMP * pose.yaw_rate
+        wz = float(np.clip(err * self.HEAD_GAIN - damp,
+                           -self.TURN_RATE, self.TURN_RATE))
+        # Slow down when the heading is badly wrong, but never below TURN_VX:
+        # the policy plants both feet under that and stops turning at all, so a
+        # speed floor is what lets it rotate out of a bad heading rather than
+        # freezing in it. The same figure and the same reason as the patrol.
+        vx = self.CRUISE_VX
+        if abs(err) > self.CROSS_MAX:
+            vx = max(self.TURN_VX,
+                     self.CRUISE_VX * (1.0 - min(1.0, abs(err) / np.pi)))
+        return self._smooth(vx, wz, dt)
+
+    def _obstacle_on(self, pt) -> bool:
+        """Whether a confirmed obstacle covers a point, with the robot's width."""
+        if not self._obstacles or time.time() - self._obstacles_t > self.STALE:
+            return False
+        r = self.ROBOT_HALF_WIDTH
+        return any(x0 - r <= pt[0] <= x1 + r and y0 - r <= pt[1] <= y1 + r
+                   for x0, x1, y0, y1 in self._obstacles)
+
+    def _hold(self, reason: str) -> None:
+        if reason != self._path_hold:
+            self._path_hold = reason
+            if reason:
+                log.info("%s", reason)
 
     def _push(self, source: str, boxes: list) -> None:
         """Record one update from one source and rebuild the obstacle set."""
@@ -591,6 +744,11 @@ class Navigator:
         return capped
 
     def step(self, pose: Pose, dt: float) -> np.ndarray:
+        # Goal mode short-circuits the patrol entirely: there is no axis, no
+        # lane and no about-face, only the plan. Everything it uses below --
+        # _escape, _smooth, the yaw cap, the TURN_VX floor -- is shared.
+        if self.MODE == "goal":
+            return self._follow(pose, dt)
         # The polygon is only followed in perimeter mode. In axis mode it is
         # still received and used to keep the run inside the real floor.
         """Pace the optical axis: out to STOP_AT, about-face, back to RETURN_TO.

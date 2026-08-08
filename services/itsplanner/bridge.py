@@ -25,12 +25,25 @@ changes -- the map origin was already the world origin -- only the label. Nav2
 then sees a perfectly stationary robot sitting at the world origin, which is
 exactly true: there is no robot in the loop yet.
 
-WHAT E2 MUST DO. This identity is a placeholder and must not survive contact
-with a moving robot. In E2 `base_link` has to become the robot body, which means
-this static transform is REPLACED by map -> odom -> base_link driven from the
-sim pose, and the world frame keeps its meaning under the name `map`. Everything
-downstream of that rename is already written in terms of `map`, so the change is
-confined to who publishes base_link.
+WHAT E2 DID, and it is not what E1 predicted. E1 assumed base_link would have to
+BECOME the robot body. It does not, and renaming it would have been the wrong
+call: every footprint, arena bound and calibration figure written since etape B
+reads world coordinates out of base_link, and silently moving that frame would
+have moved all of them at once, with nothing failing loudly.
+
+So E2 gives Nav2 what it actually needs under names of its own -- a moving
+`robot_base` for the body and an `odom` between it and the map -- and leaves
+base_link alone as the world. Three transforms now:
+
+    map -> base_link    static identity, the world, unchanged since E1
+    map -> odom         static identity, because the sim pose is ground truth;
+                        odom exists to hold accumulated drift and a simulator
+                        has none. On a real G1 this becomes the localisation
+                        correction and nothing else here changes.
+    odom -> robot_base  dynamic, from the sim pose at 20 Hz
+
+The costmap's robot_base_frame is robot_base, so Nav2 tracks the robot while the
+world keeps its name.
 """
 from __future__ import annotations
 
@@ -47,12 +60,12 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
-from nav_msgs.msg import OccupancyGrid
-from tf2_ros import StaticTransformBroadcaster
+from nav_msgs.msg import OccupancyGrid, Odometry
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 sys.path.insert(0, "/opt/edgebot")
 from edgebot import topics                                    # noqa: E402
-from edgebot.bus import Publisher                             # noqa: E402
+from edgebot.bus import Publisher, Subscriber                  # noqa: E402
 
 MAP_FRAME = os.environ.get("ITS_MAP_FRAME", "map")
 BASE_FRAME = os.environ.get("ITS_BASE_FRAME", "base_link")
@@ -64,6 +77,24 @@ START = (float(os.environ.get("ITS_START_X", "1.8")),
 GOAL = (float(os.environ.get("ITS_GOAL_X", "5.8")),
         float(os.environ.get("ITS_GOAL_Y", "-1.8")))
 PERIOD = float(os.environ.get("ITS_REQUEST_PERIOD", "5.0"))
+# E2. The robot's own frame, and NOT base_link: base_link keeps its meaning as
+# this project's world, static, floor under the camera. Everything written since
+# etape B reads world coordinates out of it and renaming it would silently move
+# every footprint, every arena bound and every calibration figure.
+#
+# So Nav2 gets what it actually needs -- a moving frame for the robot body and
+# an odom frame between it and the map -- under names of its own, and the world
+# keeps its name. map -> odom is a static identity because the sim pose is
+# ground truth: odom exists to hold accumulated drift, and a simulator has none.
+# On a real G1 that identity becomes the localisation correction and nothing
+# else about this file changes.
+ROBOT_FRAME = os.environ.get("ITS_ROBOT_FRAME", "robot_base")
+ODOM_FRAME = os.environ.get("ITS_ODOM_FRAME", "odom")
+# Three distinct goals, cycled as each is reached. Semicolon-separated pairs.
+GOALS = [tuple(float(v) for v in g.split(","))
+         for g in os.environ.get(
+             "ITS_GOALS", "2.1,-1.9;4.6,-1.8;2.6,0.9").split(";") if g.strip()]
+GOAL_TOL = float(os.environ.get("GOAL_TOL", "0.45"))
 
 
 class ItsPlannerBridge(Node):
@@ -82,12 +113,16 @@ class ItsPlannerBridge(Node):
         t.header.frame_id = MAP_FRAME
         t.child_frame_id = BASE_FRAME
         t.transform.rotation.w = 1.0          # identity, see the module docstring
-        self._static.sendTransform(t)
+        t2 = TransformStamped()
+        t2.header.stamp = t.header.stamp
+        t2.header.frame_id = MAP_FRAME
+        t2.child_frame_id = ODOM_FRAME
+        t2.transform.rotation.w = 1.0
+        self._static.sendTransform([t, t2])
         self.get_logger().info(
-            f"static TF {MAP_FRAME} -> {BASE_FRAME} = identity. E1 only: "
-            f"base_link is this project's world frame and there is no robot in "
-            f"the loop. E2 replaces this with map -> odom -> base_link from the "
-            f"sim pose.")
+            f"static TF {MAP_FRAME} -> {BASE_FRAME} (the world, unchanged) and "
+            f"{MAP_FRAME} -> {ODOM_FRAME}, both identity; "
+            f"{ODOM_FRAME} -> {ROBOT_FRAME} follows the sim pose")
 
         # The map is kept here too, to measure clearance against the same
         # occupancy the planner used rather than against a later one.
@@ -101,12 +136,61 @@ class ItsPlannerBridge(Node):
         self._client = ActionClient(self, ComputePathToPose,
                                     "compute_path_to_pose")
         self.bus_pub = Publisher()
+        self.bus_sub = Subscriber([topics.ROBOT_STATE])
+        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
+        self._tf = TransformBroadcaster(self)
+        self._robot = None          # (x, y, yaw) from the sim, world frame
+        self._goal_i = 0
+        self._reached = [False] * len(GOALS)
+        self._t_goal = time.time()
         self._asked = 0
         self._got = 0
         self._pending = False
+        # Pose forwarding runs far faster than planning: the costmap and any
+        # future controller want a live transform, the planner does not need a
+        # fresh route every frame.
+        self.create_timer(0.05, self._pump_pose)
         self.create_timer(PERIOD, self._request)
         self.get_logger().info(
-            f"will ask for a path from {START} to {GOAL} every {PERIOD:.0f} s")
+            f"E2: following the sim pose, goals {GOALS}, tolerance "
+            f"{GOAL_TOL} m, replanning every {PERIOD:.0f} s")
+
+    def _pump_pose(self) -> None:
+        """Drain the bus for the sim pose, then publish TF and /odom."""
+        while (msg := self.bus_sub.recv(0)) is not None:
+            topic, payload = msg
+            if topic != topics.ROBOT_STATE:
+                continue
+            q = payload.get("qpos") or []
+            if len(q) < 7:
+                continue
+            # qpos is [x, y, z, qw, qx, qy, qz, ...]; only the yaw matters here.
+            yaw = 2.0 * math.atan2(float(q[6]), float(q[3]))
+            self._robot = (float(q[0]), float(q[1]), yaw)
+        if self._robot is None:
+            return
+        x, y, yaw = self._robot
+        now = self.get_clock().now().to_msg()
+
+        t = TransformStamped()
+        t.header.stamp = now
+        t.header.frame_id = ODOM_FRAME
+        t.child_frame_id = ROBOT_FRAME
+        t.transform.translation.x = x
+        t.transform.translation.y = y
+        t.transform.rotation.z = math.sin(yaw / 2.0)
+        t.transform.rotation.w = math.cos(yaw / 2.0)
+        self._tf.sendTransform(t)
+
+        od = Odometry()
+        od.header.stamp = now
+        od.header.frame_id = ODOM_FRAME
+        od.child_frame_id = ROBOT_FRAME
+        od.pose.pose.position.x = x
+        od.pose.pose.position.y = y
+        od.pose.pose.orientation.z = t.transform.rotation.z
+        od.pose.pose.orientation.w = t.transform.rotation.w
+        self.odom_pub.publish(od)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         w, h = int(msg.info.width), int(msg.info.height)
@@ -128,8 +212,25 @@ class ItsPlannerBridge(Node):
         return p
 
     def _request(self) -> None:
-        if self._pending:
+        if self._pending or self._robot is None:
             return
+        # Advance the goal when the robot has arrived, so the acceptance run is
+        # three goals and not one repeated. Reported here as well as in the
+        # navigator: this side knows the planning time, that side knows the
+        # tracking error, and neither is the whole story.
+        gx, gy = GOALS[self._goal_i]
+        d = math.dist(self._robot[:2], (gx, gy))
+        if d <= GOAL_TOL:
+            if not self._reached[self._goal_i]:
+                self._reached[self._goal_i] = True
+                self.get_logger().info(
+                    f"goal {self._goal_i + 1}/{len(GOALS)} ({gx}, {gy}) "
+                    f"reached: {d:.3f} m, {time.time() - self._t_goal:.1f} s")
+            if self._goal_i + 1 < len(GOALS):
+                self._goal_i += 1
+                self._t_goal = time.time()
+            else:
+                return
         if not self._client.server_is_ready():
             self._client.wait_for_server(timeout_sec=0.0)
             if not self._client.server_is_ready():
@@ -138,8 +239,10 @@ class ItsPlannerBridge(Node):
                     "activating?)", throttle_duration_sec=10.0)
                 return
         goal = ComputePathToPose.Goal()
-        goal.start = self._pose(START)
-        goal.goal = self._pose(GOAL)
+        # Start from WHERE THE ROBOT IS, which is the whole difference between
+        # E1 and E2: in E1 the start was a constant and the robot did not exist.
+        goal.start = self._pose(self._robot[:2])
+        goal.goal = self._pose(GOALS[self._goal_i])
         # use_start true: plan from the requested start, NOT from where TF says
         # the robot is. In E1 the robot is at the origin by construction, so
         # without this every path would begin at (0, 0) -- outside the mapped
@@ -177,7 +280,8 @@ class ItsPlannerBridge(Node):
             "path": [[round(x, 3), round(y, 3)] for x, y in pts],
             "length_m": round(length, 3),
             "clearance_m": round(clearance, 3) if clearance is not None else -1.0,
-            "start": list(START), "goal": list(GOAL),
+            "start": list(self._robot[:2]) if self._robot else list(START),
+            "goal": list(GOALS[self._goal_i]),
             "planner": "its_planner::ITSPlanner",
             "stamp": time.time(),
         })
@@ -186,7 +290,8 @@ class ItsPlannerBridge(Node):
             f"{length:.2f} m, min clearance "
             + (f"{clearance:.3f} m" if clearance is not None
                else "unknown (no map)")
-            + f", straight line would be {math.dist(START, GOAL):.2f} m")
+            + f", to goal {self._goal_i + 1}/{len(GOALS)} "
+            + f"{GOALS[self._goal_i]}")
 
     def _clearance(self, pts):
         """Smallest distance from any waypoint to an occupied cell.
