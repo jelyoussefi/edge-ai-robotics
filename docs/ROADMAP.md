@@ -108,6 +108,20 @@ non monté, format de profondeur MuJoCo, convention de profondeur inversée.
 C'est exactement ce qu'un guide développeur doit contenir, et c'est ce qui a été
 demandé. L'écrire au fil de l'eau évite de le reconstituer de mémoire.
 
+**Première version écrite : [`DEVELOPER-GUIDE.md`](DEVELOPER-GUIDE.md)**, en
+anglais, compilée depuis les deux comptes rendus de mesure, les pièges de
+`CLAUDE.md` et l'historique des commits. Elle couvre la compilation des briques
+depuis les sources (le .deb AMR ininstallable, le checkout épars épinglé, l'image
+de base partagée), les pièges d'intégration (QoS, `set -u`, invalidation par
+`common/`, session X), le réglage au capteur (`max_surface_height` contre le
+bruit du D455, la bande de résidu de plan, le rognage d'arène), la méthodologie
+de comparaison (politique contre perception, validité par session, dérive
+temporelle) et le résultat de composition (chaînage, union, confirmation par
+source).
+
+Reste à y verser : les pièges NPU et MuJoCo listés ci-dessus, qui appartiennent
+à la partie « dispositifs » et n'ont pas encore de section.
+
 ---
 
 ## Étape E. Nav2 et ITS Path Planner, à décider plus tard
