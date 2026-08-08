@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan suite-compare logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping suite-compare logs ps shell clean distclean
 default: run
 
 help:
@@ -41,6 +41,7 @@ help:
 	@echo "  make ros-base       Shared ROS Jazzy base image for the suite bricks"
 	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
 	@echo "  make adbscan        Intel Robotics AI Suite ADBSCAN clustering"
+	@echo "  make fastmapping    Intel Robotics AI Suite persistent occupancy map"
 	@echo "  make suite-compare  Their floor against ours, side by side"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
@@ -87,6 +88,18 @@ adbscan:
 	@# Its own ground removal is a single height threshold and cannot handle a
 	@# pitched camera. compose's depends_on enforces the order.
 	@$(COMPOSE) --profile suite up --build adbscan groundfloor
+
+fastmapping:
+	@$(call msg, Starting the Robotics AI Suite FastMapping ...)
+	@# Same prerequisite as adbscan, and a stronger one: since the etape C
+	@# rewire the groundfloor container OWNS the camera path -- it publishes
+	@# the depth image, the camera_info and the base_link TF -- and this brick
+	@# consumes all three while publishing none of them.
+	@# GF_DEPTH_RELIABLE=1 is not optional here. FastMapping subscribes with a
+	@# bare rclcpp::QoS(10), i.e. RELIABLE, and exposes no parameter to change
+	@# it; against our best-effort depth publisher DDS simply never matches and
+	@# it receives nothing, silently. A reliable publisher feeds both bricks.
+	@GF_DEPTH_RELIABLE=1 $(COMPOSE) --profile suite up --build fastmapping groundfloor
 
 groundfloor:
 	@$(call msg, Starting the Robotics AI Suite floor segmentation ...)

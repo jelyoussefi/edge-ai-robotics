@@ -316,6 +316,16 @@ services:
       # empreintes des deux cotes ne seraient pas comparables.
       OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
+      # Publie la profondeur en RELIABLE. FastMapping s'abonne avec un
+      # rclcpp::QoS(10) nu, donc RELIABLE, et n'expose AUCUN parametre pour en
+      # changer : abonne fiable contre publieur best-effort, DDS n'apparie pas
+      # et il ne recoit rien, en silence. La compatibilite est a sens unique, un
+      # publieur fiable sert tres bien un abonne best-effort, donc c'est ici que
+      # ca se corrige. Desactive par defaut : la fiabilite sur un flux capteur a
+      # 30 Hz avec une file de 2 laisse un abonne lent freiner le publieur, et
+      # ce risque appartient au profil qui en a besoin. `make fastmapping` le
+      # met a 1.
+      GF_DEPTH_RELIABLE: ${GF_DEPTH_RELIABLE:-0}
       # Classe du sol dans leur nuage etiquete. Mesuree, pas lue dans une
       # config : sur 1,5 M de points la classe 3 est a z median 0,060 m avec
       # 0,094 m d'ecart type, toutes les autres sont a 0,77 m ou plus.
@@ -393,6 +403,55 @@ services:
       # expres, ils font tomber un cluster dans le filtre "impossible" du pont
       # et c'est le signal que l'ajustement de plan derape. 0 pour desactiver.
       GF_Z_LOW: ${GF_Z_LOW:-0.12}
+    volumes:
+      - ./config:/config:ro
+
+  # FastMapping, la troisieme brique et la premiere PERSISTANTE : groundfloor et
+  # adbscan repondent a "qu'y a-t-il devant la camera maintenant" et recalculent
+  # tout a chaque trame, celle-ci accumule. Troisieme consommateur de ros-base,
+  # ce qui est la raison d'etre de cette image.
+  fastmapping:
+    profiles: ["suite"]
+    build:
+      context: .
+      dockerfile: services/fastmapping/Dockerfile
+      additional_contexts:
+        "edge-ai-robotics-ros-base:jazzy": "service:ros-base"
+    # Comme adbscan : depend de groundfloor, qui POSSEDE le chemin camera depuis
+    # la refonte de l'etape C -- profondeur, camera_info et la TF. Cette brique
+    # n'en publie aucun et les consomme tous les trois.
+    depends_on: [bus, source, groundfloor]
+    environment:
+      BUS_PUB: tcp://bus:5555
+      BUS_SUB: tcp://bus:5556
+      PYTHONUNBUFFERED: "1"
+      ROS_DISTRO: jazzy
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
+      # Leur defaut est "map", la convention SLAM : FastMapping est livre a cote
+      # de RTAB-Map, qui publie map -> odom -> base_link. Ici il n'y a ni SLAM ni
+      # odometrie, la camera est sur un trepied. base_link EST deja le repere
+      # monde du projet, donc pour une camera fixe le repere carte et le repere
+      # monde sont la meme chose. Voir entrypoint.sh.
+      FM_MAP_FRAME: ${FM_MAP_FRAME:-base_link}
+      # Leur defaut est 3,0 m, dimensionne pour un AMR qui cartographie le
+      # couloir qu'il descend. Le mur du fond de cette piece est a 6,2 m et le
+      # critere d'acceptation est justement de savoir si les murs apparaissent :
+      # 3,0 trancherait la question avant la mesure.
+      FM_MAX_DEPTH_RANGE: ${FM_MAX_DEPTH_RANGE:-7.0}
+      # Bande de hauteur aplatie dans la grille 2D, en base_link donc en hauteur
+      # au-dessus du sol. Leur fichier de lancement utilise 0,2 a 0,5, la hauteur
+      # de pare-chocs d'un AMR. Ici elle doit contenir ce que le navigateur
+      # appelle un obstacle : au-dessus du residu de plan (GF_Z_LOW = 0,12) et
+      # jusqu'au-dessus d'un plateau de table.
+      FM_PROJECTION_MIN_Z: ${FM_PROJECTION_MIN_Z:-0.15}
+      FM_PROJECTION_MAX_Z: ${FM_PROJECTION_MAX_Z:-1.20}
+      FM_VOXEL_SIZE: ${FM_VOXEL_SIZE:-0.04}
+      FM_NOISE_FACTOR: ${FM_NOISE_FACTOR:-0.02}
+      # Le noeud republie la grille ENTIERE a chaque mise a jour ; a 0,04 m un
+      # carre de 20 m fait 250 k cellules. Le consommateur est une superposition
+      # rafraichie a la main, 1 Hz suffit largement.
+      FM_PUBLISH_PERIOD: ${FM_PUBLISH_PERIOD:-1.0}
     volumes:
       - ./config:/config:ro
 

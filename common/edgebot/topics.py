@@ -92,6 +92,28 @@ SUITE_CLOUD = "suite.cloud"
 #   {"blocked": [[x0, x1, y0, y1], ...], "clusters": int, "stamp": float}
 SUITE_CLUSTERS = "suite.clusters"
 
+# fastmapping -> compositor. Intel's FastMapping planar occupancy grid, the
+# `world/map` nav_msgs/OccupancyGrid flattened onto the bus.
+#
+# The third suite brick and the first PERSISTENT one: groundfloor and adbscan
+# both answer "what is in front of the camera right now", and their output is
+# recomputed from scratch every frame. This accumulates, so a cell the camera
+# saw once stays known after the robot has looked away -- which is the whole
+# reason to carry it.
+#
+# `grid` is row-major, one signed byte per cell, in the ROS convention this
+# passes through unchanged: -1 unknown, 0 free, 100 occupied. `x0`/`y0` are the
+# world coordinates of the CENTRE of cell (0, 0) and `res` its side in metres,
+# so a cell index maps to the world as x = x0 + col * res. Frame is base_link,
+# the project's world frame, because the node is given map_frame=base_link --
+# see services/fastmapping/entrypoint.sh for why that is the right lie.
+#
+# `stamp` is when the bridge read it, not when the map was built: the node
+# republishes the whole grid on every update and carries no build time.
+#   {"grid": bytes, "w": int, "h": int, "res": float,
+#    "x0": float, "y0": float, "known": int, "occupied": int, "stamp": float}
+SUITE_MAP = "suite.map"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

@@ -99,10 +99,35 @@ class GroundfloorBridge(Node):
         # takes `use_best_effort_qos` for the same reason: a dropped depth frame
         # is better than a stalled pipeline.
         qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
+        # ... except that FastMapping cannot accept that. It subscribes with a
+        # plain `rclcpp::QoS(10)` (Subscribers.cpp:19), which is RELIABLE, and
+        # unlike the groundfloor node it exposes NO parameter to change it. A
+        # RELIABLE subscriber and a BEST_EFFORT publisher are an incompatible
+        # pair in DDS, so it would receive nothing, silently -- the etape B trap
+        # with no escape hatch on their side.
+        #
+        # The fix goes here rather than on their side because the compatibility
+        # is one-directional: a RELIABLE publisher serves a BEST_EFFORT
+        # subscriber perfectly well, so one reliable depth publisher feeds both
+        # bricks, while a best-effort one can only feed groundfloor.
+        #
+        # Off by default all the same. Reliability on a 30 Hz sensor stream with
+        # a two-deep queue means a slow subscriber can push back on the
+        # publisher, and that risk belongs to the profile that needs it rather
+        # than to the default demo. `make fastmapping` turns it on.
+        if os.environ.get("GF_DEPTH_RELIABLE", "0") not in ("", "0"):
+            depth_qos = QoSProfile(depth=2,
+                                   reliability=ReliabilityPolicy.RELIABLE)
+            self.get_logger().info(
+                "depth published RELIABLE (GF_DEPTH_RELIABLE): FastMapping "
+                "subscribes reliable and cannot be told otherwise; the "
+                "groundfloor node stays best-effort and accepts this")
+        else:
+            depth_qos = qos
         self.depth_pub = self.create_publisher(
-            Image, f"/{SENSOR}/depth/image_rect_raw", qos)
+            Image, f"/{SENSOR}/depth/image_rect_raw", depth_qos)
         self.info_pub = self.create_publisher(
-            CameraInfo, f"/{SENSOR}/depth/camera_info", qos)
+            CameraInfo, f"/{SENSOR}/depth/camera_info", depth_qos)
         self.create_subscription(
             PointCloud2, "/segmentation/obstacle_points", self._on_obstacles, qos)
         # Their primary product. obstacle_points is a filtered view of this, so
