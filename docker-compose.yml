@@ -439,7 +439,14 @@ services:
       # odometrie, la camera est sur un trepied. base_link EST deja le repere
       # monde du projet, donc pour une camera fixe le repere carte et le repere
       # monde sont la meme chose. Voir entrypoint.sh.
-      FM_MAP_FRAME: ${FM_MAP_FRAME:-base_link}
+      # "map" depuis l'etape E1, et non plus "base_link". Nav2 construit son
+      # costmap dans "map" et demande a TF ou se trouve "base_link", qu'il
+      # entend comme le CORPS DU ROBOT. Ici base_link est le monde, fixe. Les
+      # deux sens sont reconcilies en les rendant numeriquement identiques :
+      # la carte passe en "map" et itsplanner publie une TF statique identite
+      # map -> base_link. Rien ne bouge geometriquement, seule l'etiquette
+      # change. Voir services/itsplanner/bridge.py, et ce que E2 doit defaire.
+      FM_MAP_FRAME: ${FM_MAP_FRAME:-map}
       # Leur defaut est 3,0 m, dimensionne pour un AMR qui cartographie le
       # couloir qu'il descend. Le mur du fond de cette piece est a 6,2 m et le
       # critere d'acceptation est justement de savoir si les murs apparaissent :
@@ -458,6 +465,40 @@ services:
       # carre de 20 m fait 250 k cellules. Le consommateur est une superposition
       # rafraichie a la main, 1 Hz suffit largement.
       FM_PUBLISH_PERIOD: ${FM_PUBLISH_PERIOD:-1.0}
+    volumes:
+      - ./config:/config:ro
+
+  # ITS Path Planner, quatrieme brique. Pas un noeud : un GREFFON pluginlib
+  # nav2_core::GlobalPlanner, donc c'est planner_server qui l'heberge et un
+  # lifecycle_manager qui l'active. Etape E1 : planification sur la carte
+  # FastMapping, sans robot dans la boucle.
+  itsplanner:
+    profiles: ["suite"]
+    build:
+      context: .
+      dockerfile: services/itsplanner/Dockerfile
+      additional_contexts:
+        "edge-ai-robotics-ros-base:jazzy": "service:ros-base"
+    # Depend de fastmapping : la couche statique du costmap est abonnee a
+    # /world/map, que seule cette brique publie. Sans elle le costmap reste
+    # entierement inconnu et le planificateur refuse toute requete.
+    depends_on: [bus, source, groundfloor, fastmapping]
+    environment:
+      BUS_PUB: tcp://bus:5555
+      BUS_SUB: tcp://bus:5556
+      PYTHONUNBUFFERED: "1"
+      ROS_DISTRO: jazzy
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      ITS_MAP_FRAME: ${ITS_MAP_FRAME:-map}
+      ITS_BASE_FRAME: ${ITS_BASE_FRAME:-base_link}
+      # La requete d'acceptation de E1 : d'un bord a l'autre de l'arene en
+      # passant du cote de la barriere, pour qu'une ligne droite ne soit pas
+      # une reponse valable.
+      ITS_START_X: ${ITS_START_X:-1.8}
+      ITS_START_Y: ${ITS_START_Y:-0.0}
+      ITS_GOAL_X: ${ITS_GOAL_X:-5.8}
+      ITS_GOAL_Y: ${ITS_GOAL_Y:--1.8}
+      ITS_REQUEST_PERIOD: ${ITS_REQUEST_PERIOD:-5.0}
     volumes:
       - ./config:/config:ro
 

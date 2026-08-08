@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping suite-compare map-check logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check logs ps shell clean distclean
 default: run
 
 help:
@@ -42,6 +42,7 @@ help:
 	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
 	@echo "  make adbscan        Intel Robotics AI Suite ADBSCAN clustering"
 	@echo "  make fastmapping    Intel Robotics AI Suite persistent occupancy map"
+	@echo "  make itsplanner     Intel Robotics AI Suite ITS global path planner"
 	@echo "  make suite-compare  Their floor against ours, side by side"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
@@ -101,6 +102,14 @@ fastmapping:
 	@# it; against our best-effort depth publisher DDS simply never matches and
 	@# it receives nothing, silently. A reliable publisher feeds both bricks.
 	@GF_DEPTH_RELIABLE=1 $(COMPOSE) --profile suite up --build fastmapping groundfloor
+
+itsplanner:
+	@$(call msg, Starting the Robotics AI Suite ITS path planner ...)
+	@# Needs fastmapping, which needs groundfloor. ITS is a pluginlib plugin,
+	@# not a node: planner_server hosts it and its global costmap's static
+	@# layer is subscribed to /world/map, so with no map there is no costmap
+	@# and every request is refused.
+	@GF_DEPTH_RELIABLE=1 $(COMPOSE) --profile suite up --build itsplanner fastmapping groundfloor
 
 groundfloor:
 	@$(call msg, Starting the Robotics AI Suite floor segmentation ...)

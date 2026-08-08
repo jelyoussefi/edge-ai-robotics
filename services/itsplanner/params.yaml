@@ -1,0 +1,78 @@
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+#
+# planner_server plus its global costmap, for E1: planning on FastMapping's map
+# with no robot in the loop. Derived from their nav2_params_jazzy.yaml, with
+# every departure recorded.
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    # Their file says True, for a stack driven by a Gazebo clock. There is no
+    # /clock here and nothing publishes one; leaving it True makes every node
+    # wait forever for time to start, which looks exactly like a hung planner.
+    use_sim_time: False
+    planner_plugins: ["GridBased"]
+    costmap_update_timeout: 1.0
+    GridBased:
+      plugin: "its_planner::ITSPlanner"
+      interpolation_resolution: 0.05
+      catmull_spline: False
+      smoothing_window: 15
+      buffer_size: 10
+      build_road_map_once: True
+      enable_k: False
+      min_samples: 250
+      roadmap: "PROBABILISTIC"
+      w: 32
+      h: 32
+      n: 2
+      # NOT in their nav2_params, so it would take the code default of 1.0 m
+      # (its_planner.cpp). A 1 m robot radius in a 7 m room leaves no free space
+      # at all and the planner returns nothing, with no error that says why.
+      # 0.22 is ROBOT_HALF_WIDTH, the same figure the navigator uses.
+      robot_radius: 0.22
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      use_sim_time: False
+      robot_radius: 0.22
+      # 0.05 m, half FastMapping's 0.04 m cell. Their file uses the same value.
+      resolution: 0.05
+      # Rolling window off: the map is a fixed room, not a corridor a robot
+      # drives down, and a rolling costmap centred on a stationary base_link
+      # would cover only the near field.
+      rolling_window: False
+      width: 16
+      height: 16
+      origin_x: -8.0
+      origin_y: -8.0
+      track_unknown_space: true
+      # static + inflation ONLY. Their file adds an obstacle_layer fed by a
+      # /scan LaserScan; there is no lidar here and no /scan, and an obstacle
+      # layer with no source silently marks nothing while still costing a
+      # subscription. The static layer IS the FastMapping map.
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /world/map
+        # FastMapping publishes transient_local (MapManager.cpp:142). A volatile
+        # subscriber against a transient_local publisher never matches, which is
+        # the same silent failure the other three bricks each produced in their
+        # own way. Their file already sets this; it is load-bearing, not
+        # decoration.
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        # Their 0.7 m is sized for a warehouse aisle. Here the arena is 5 m by
+        # 4 m and the gap between the barrier and the wall is under a metre, so
+        # 0.7 m of inflation from both sides closes every route and the planner
+        # correctly reports that no path exists. 0.35 m keeps a real margin --
+        # well over the 0.22 m the acceptance criterion asks for -- while
+        # leaving the arena connected.
+        inflation_radius: 0.35

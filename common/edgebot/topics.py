@@ -114,6 +114,24 @@ SUITE_CLUSTERS = "suite.clusters"
 #    "x0": float, "y0": float, "known": int, "occupied": int, "stamp": float}
 SUITE_MAP = "suite.map"
 
+# itsplanner -> compositor. A global path from Intel's ITS Path Planner, as
+# world-frame waypoints in the same (forward, lateral) metres as everything
+# else here.
+#
+# Nothing consumes this to DRIVE in E1 -- the robot is not in the loop, the
+# navigator does not read it, and the compositor only draws it. That is the
+# point of the phase: prove the planner plans on the accumulated map before
+# giving it authority over the robot.
+#
+# `clearance_m` is the minimum distance from any waypoint to an occupied cell
+# of the map the path was planned on, computed by the bridge at request time.
+# It travels WITH the path because it is only meaningful against that map: a
+# path is not safe or unsafe in the abstract, it is safe against the occupancy
+# it was planned on, and the map keeps accumulating afterwards.
+#   {"path": [[x, y], ...], "length_m": float, "clearance_m": float,
+#    "start": [x, y], "goal": [x, y], "planner": str, "stamp": float}
+SUITE_PATH = "suite.path"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"
