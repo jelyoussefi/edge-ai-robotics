@@ -351,6 +351,15 @@ services:
       ARENA_X_MAX: ${ARENA_X_MAX:-6.3}
       ARENA_Y_MIN: ${ARENA_Y_MIN:--2.8}
       ARENA_Y_MAX: ${ARENA_Y_MAX:-1.7}
+      # Haut de la bande de residu du sol, retiree par le pont. Le plan estime
+      # de groundfloor laisse une dispersion posee SUR le sol : 45 points par
+      # nuage entre 0,08 et 0,12 m, dans 38 cellules de 10 cm, dont 71 % sans
+      # rien au-dessus de 0,30 m -- donc du sol, pas des pieds de meubles. Leur
+      # noeud coupe deja sous 0,08 m (z_filter), ce filtre enleve la tranche qui
+      # reste. Le bas de la bande est 0 : les points SOUS le sol sont gardes
+      # expres, ils font tomber un cluster dans le filtre "impossible" du pont
+      # et c'est le signal que l'ajustement de plan derape. 0 pour desactiver.
+      GF_Z_LOW: ${GF_Z_LOW:-0.12}
     volumes:
       - ./config:/config:ro
 

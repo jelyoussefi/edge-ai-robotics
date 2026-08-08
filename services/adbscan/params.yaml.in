@@ -43,6 +43,19 @@
 #                               with the floor already gone and the ground at
 #                               z = 0, a small positive value only catches
 #                               whatever the plane fit left behind.
+#
+# BUT x_filter_back AND y_filter_* ARE INERT ON THIS PATH. In doDBSCAN.cpp the
+# dimension == 3 branch applies the z filter and nothing else -- the x and y
+# calls are commented out in their source, and only the dimension == 4 (RS)
+# branch runs them. The values above are therefore documentation of intent, not
+# a filter that executes; the arena bounds are enforced by bridge.py instead,
+# which is where to change them. z_filter is real: doDBSCAN.cpp:304, guarded by
+# Z_based_ground_removal, which is 1.0 below.
+#
+# That is also why bridge.py's residue band starts where it does. Their filter
+# already removes everything under 0.08 m, so a band of 0 to 0.12 only takes the
+# 0.08-0.12 slice -- 45 of the 1011 points per cloud that reach the clusterer,
+# and worth 20 points of match rate.
 ---
 adbscan_sub_node:
   ros__parameters:
@@ -52,6 +65,10 @@ adbscan_sub_node:
     # but not the walls, and DBSCAN chains through contact: a chair against the
     # wall comes back as one mass with the wall. The uncut cloud is still on
     # /segmentation/obstacle_points for debugging.
+    #
+    # The same bridge also drops the 0 to GF_Z_LOW height band, the plane fit's
+    # residue lying on the floor. That mattered more than the walls did: it took
+    # the match rate from 16-24 % to 39-42 %. See bridge.py for the measurement.
     Lidar_topic: /segmentation/arena_points
     # Their Verbose logs every cluster's centre and size on every frame, which
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.

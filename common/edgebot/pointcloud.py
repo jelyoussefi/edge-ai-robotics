@@ -59,7 +59,8 @@ def _raw_rows(point_step: int, row_step: int, width: int, height: int,
 
 def clip_xy(fields, point_step: int, row_step: int, width: int, height: int,
             data: bytes, is_bigendian: bool, x_min: float, x_max: float,
-            y_min: float, y_max: float):
+            y_min: float, y_max: float, z_drop_lo: float = 0.0,
+            z_drop_hi: float = 0.0):
     """Keep only the points whose x and y fall inside a rectangle.
 
     Returns `(data, count)` ready to hand to a new PointCloud2, or None when the
@@ -72,12 +73,31 @@ def clip_xy(fields, point_step: int, row_step: int, width: int, height: int,
     on the (N, 3) array read_xyz returns. The consumer is Intel's node, not us:
     it reads a 4-field point (LiDAR_data_4D_t), and a cloud rebuilt from parsed
     xyz would quietly drop the fourth column.
+
+    `z_drop_lo`/`z_drop_hi` additionally remove a HEIGHT BAND, points with
+    z_drop_lo < z < z_drop_hi, and are disabled when the two are equal. It is a
+    band and not a floor because the points below it are wanted: a cluster whose
+    centre lands under the floor is a depth artefact the caller already drops,
+    and seeing it drop is the signal that the plane fit has gone wrong. Cutting
+    them here would hide that. Done in the same pass as the rectangle so a cloud
+    is walked once; z is read only when the band is enabled, because a cloud
+    without a z column still has a perfectly good x and y.
     """
     rows = _raw_rows(point_step, row_step, width, height, data)
     if rows is None:
         return b"", 0
-    cols = _read_columns(fields, point_step, row_step, width, height, data,
-                         is_bigendian, ("x", "y"))
+    band = z_drop_hi > z_drop_lo
+    cols = None
+    if band:
+        cols = _read_columns(fields, point_step, row_step, width, height, data,
+                             is_bigendian, ("x", "y", "z"))
+        # No z column is not a reason to stop clipping x and y. _read_columns
+        # is all-or-nothing on the names it is given, so ask again for the two
+        # that matter and drop the band rather than the whole filter.
+        band = cols is not None
+    if cols is None:
+        cols = _read_columns(fields, point_step, row_step, width, height, data,
+                             is_bigendian, ("x", "y"))
     if cols is None:
         return None
     x = cols["x"].astype(np.float32)
@@ -87,6 +107,9 @@ def clip_xy(fields, point_step: int, row_step: int, width: int, height: int,
     # "outside the arena" is not quietly inflated by invalid returns.
     keep = (np.isfinite(x) & np.isfinite(y)
             & (x >= x_min) & (x <= x_max) & (y >= y_min) & (y <= y_max))
+    if band:
+        z = cols["z"].astype(np.float32)
+        keep &= ~((z > z_drop_lo) & (z < z_drop_hi))
     return rows[keep].tobytes(), int(keep.sum())
 
 

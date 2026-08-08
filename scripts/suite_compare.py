@@ -552,7 +552,8 @@ def main() -> int:
         # Nommer le desaccord. Les compteurs disent combien de rectangles
         # personne n'apparie ; ils ne disent pas si c'est toujours le meme.
         #
-        # MESURE, 60 s, 509 trames, arene rognee (taux par cluster 16%) :
+        # MESURE, 60 s, 509 trames, arene rognee, AVANT le filtre de residu de
+        # sol de bridge.py (taux par cluster 16%) :
         #
         #   nous seulement    98%  (5.80, -1.99)  1.40 x 1.21  cuisine du fond
         #                     41%  (3.48,  1.03)  2.64 x 0.96  table a manger
@@ -573,6 +574,26 @@ def main() -> int:
         # vu des deux cotes avec des tailles differentes est le pilier proche a
         # droite : 0.40 x 0.44 chez nous, 1.19 x 1.09 chez eux, centres a 0.53 m
         # l'un de l'autre -- juste au-dela du rayon de regroupement.
+        #
+        # APRES le filtre (GF_Z_LOW = 0.12), deux passes de 60 s :
+        #
+        #   taux par cluster        16%  ->  39% / 42%
+        #   recouvrement des paires 0.46 ->  0.50
+        #   clusters par trame       1.8 ->  2.8
+        #   amas large de l'arene    60% ->  11% / 14% de persistance
+        #   table, nous seulement 41+29% ->  10-12%
+        #
+        # IoU du sol brut 0.555 / 0.552 / 0.547 / 0.530 sur les quatre passes :
+        # le sol est le temoin, ce filtre ne peut pas l'atteindre, donc la scene
+        # a tenu et l'ecart est bien le filtre.
+        #
+        # Ce qui RESTE apres, et qui n'est pas de la granularite :
+        #   - eux 68-82% (4.57, -1.48) 3.8 x 2.2, la moitie droite en un bloc.
+        #     Notre bloc cuisine a 95-100% est dedans, mais 1.7 m2 dans 8.6 m2
+        #     ne fait pas 0.3 d'IoU.
+        #   - eux 70-75% (2.00, -1.12) 1.0 x 1.0, compact et stable : le pilier
+        #     et le comptoir proches a droite. Ils le voient, nous non. C'est le
+        #     seul endroit ou leur detection bat la notre.
         if args.unmatched:
             def _spots(records, label):
                 spots = spot_map(records, len(clu_samples))

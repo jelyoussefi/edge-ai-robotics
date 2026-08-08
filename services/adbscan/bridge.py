@@ -68,6 +68,31 @@ ARENA_Y_MAX = float(os.environ.get("ARENA_Y_MAX", "1.7"))
 CLOUD_IN = os.environ.get("ADBSCAN_CLOUD_IN", "/segmentation/obstacle_points")
 CLOUD_OUT = os.environ.get("ADBSCAN_CLOUD_OUT", "/segmentation/arena_points")
 
+# The residue of the true floor. groundfloor classifies point by point against
+# an estimated plane, and what it leaves behind is a thin scatter lying ON the
+# floor rather than a clean cut. Measured on 40 clouds of this room, after the
+# arena clip and the same 1-in-75 subsample their node applies:
+#
+#   z band        pts/cloud   cells of 0.1 m   on open floor
+#   0.08-0.12          45           38             71 %
+#   0.08-0.20         111           68             61 %
+#   > 0.30            845          309              -
+#
+# "on open floor" is the load-bearing column: cells the low band occupies with
+# nothing above 0.30 m over them. Furniture keeps its mass high, so a low return
+# with no body above it is not the base of an object -- it is floor the plane fit
+# failed to claim. DBSCAN chains through contact, and a scatter across open
+# floor is exactly the medium a chain needs, which is the hypothesis this filter
+# tests.
+#
+# GF_Z_LOW is the top of the band; 0 is the bottom, and points BELOW the floor
+# are deliberately kept (see clip_xy). Note their node already drops z < 0.08
+# itself, through z_filter with Z_based_ground_removal -- verified in
+# doDBSCAN.cpp:304, the 3D branch -- so the slice this actually removes is
+# 0.08 to GF_Z_LOW, 45 of the 1011 points per cloud that reach the clusterer.
+# Set GF_Z_LOW to 0 to disable.
+Z_LOW = float(os.environ.get("GF_Z_LOW", "0.12"))
+
 
 class AdbscanBridge(Node):
     """ROS in, bus out."""
@@ -108,8 +133,10 @@ class AdbscanBridge(Node):
             f"in base_link and need no transform.")
         self.get_logger().info(
             f"clipping {CLOUD_IN} -> {CLOUD_OUT} at x {ARENA_X_MIN}..."
-            f"{ARENA_X_MAX}, y {ARENA_Y_MIN}...{ARENA_Y_MAX}. The uncut cloud "
-            f"stays on {CLOUD_IN}, untouched, for debugging.")
+            f"{ARENA_X_MAX}, y {ARENA_Y_MIN}...{ARENA_Y_MAX}"
+            + (f", and dropping the 0 to {Z_LOW} m floor residue"
+               if Z_LOW > 0 else ", no height band dropped")
+            + f". The uncut cloud stays on {CLOUD_IN}, untouched.")
 
     def _on_cloud(self, msg: PointCloud2) -> None:
         """Republish the cloud with everything outside the arena removed.
@@ -121,7 +148,8 @@ class AdbscanBridge(Node):
         """
         clipped = clip_xy(msg.fields, msg.point_step, msg.row_step, msg.width,
                           msg.height, msg.data, msg.is_bigendian,
-                          ARENA_X_MIN, ARENA_X_MAX, ARENA_Y_MIN, ARENA_Y_MAX)
+                          ARENA_X_MIN, ARENA_X_MAX, ARENA_Y_MIN, ARENA_Y_MAX,
+                          0.0, Z_LOW)
         self._clouds += 1
         self._pts_in += msg.width * msg.height
         if clipped is None:
