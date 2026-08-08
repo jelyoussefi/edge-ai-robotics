@@ -171,10 +171,38 @@ Remplacer l'identité par `map -> odom -> base_link` alimentée par la pose du
 sim, pour que `base_link` redevienne le corps du robot au sens de Nav2 et que le
 costmap suive le robot. Publier `/odom` depuis la même source.
 
-Critère : le chemin est replanifié depuis la position réelle du robot pendant
-qu'il patrouille, et le décalage de départ mesuré en E1 (0,45 m, le roadmap
-accroche le départ à son nœud le plus proche) est mesuré à nouveau une fois que
-le départ suit le robot.
+**Fait, sauf le test de la chaise et le troisième but.** `map -> base_link` reste
+le monde ; Nav2 reçoit `robot_base` et `odom` sous des noms à lui. La pose vient
+du bus, pas d'un ROS embarqué dans le sim. `NAV_MODE=goal` suit `SUITE_PATH`
+avec la même loi de cap, le même plafond de lacet et le même plancher `TURN_VX`
+que la patrouille.
+
+Buts choisis par `make pick-goals`, qui les sélectionne comme un ENSEMBLE
+connexe : c'est ce que la première tentative avait raté, chaque but étant
+atteignable depuis le départ mais pas depuis le précédent.
+
+| but | longueur planifiée | temps | distance finale | |
+|---|---|---|---|---|
+| 1 (6,10 ; 0,42) | 3,69 m | 20,0 s | 0,448 m | atteint |
+| 2 (4,14 ; −1,34) | 2,07 m | 15,0 s | 0,449 m | atteint |
+| 3 (3,62 ; 0,34) | 1,33 m | — | — | non atteint |
+
+Zéro « no way round » sur toute la course. La couche réactive s'est déclenchée
+trois fois et a relâché à chaque fois.
+
+**Le but 3 échoue autrement, et la nuance compte** : le planificateur ne rend ni
+« obstacle » ni chemin vide, mais un chemin d'UN SEUL point, en boucle. C'est le
+planificateur qui dit que départ et but tombent sur le même nœud du roadmap : le
+robot est près du but mais hors des 0,45 m, et il n'y a aucun nœud entre les deux
+pour faire un chemin. C'est le décalage de départ de E1 vu par l'autre bout — le
+même espacement de nœuds qui pose le départ à 0,30-0,45 m fixe aussi la finesse
+avec laquelle le planificateur peut approcher quoi que ce soit. La tolérance et
+le décalage ne sont donc pas indépendants. `min_samples` n'y change rien, c'est
+mesuré (voir `params.yaml.in`) : il faut une approche finale, pas plus
+d'échantillons.
+
+**Le test de la chaise n'a pas été fait.** Il demande quelqu'un devant la
+machine pour poser une chaise sur le chemin.
 
 ### E3. Donner l'autorité au planificateur, ou ne pas la donner
 
