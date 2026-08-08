@@ -1,5 +1,9 @@
 # Étape C — résultats de la mesure (ADBSCAN)
 
+> **Étape gelée ici.** L'architecture est décidée et mesurée, le test
+> d'acceptation passe, et le coût résiduel est nommé au §8 avec ses pistes.
+> Ce qui suit est un compte rendu, pas un chantier en cours.
+
 Comparaison entre les empreintes d'obstacles de ce projet et les clusters du
 nœud `adbscan_ros2` de l'Intel Robotics AI Suite, sur le même flux de
 profondeur, en direct.
@@ -409,13 +413,40 @@ un obstacle compact d'environ 1,0 × 1,0 m à **(2,0 ; −1,2)** étiqueté `[su
 dans le journal — l'emplacement exact que notre perception seule n'a jamais vu.
 Les tours se bouclent au rythme de la référence et « no way round » reste à 0.
 
+![Le robot en patrouille en mode union, contours affichés](images/etape-c-union-pillar.png)
+
+Capture `DIAG_FRAMES=3 SHOW_FLOOR=1` avec `OBSTACLE_SOURCE=union`, robot sortant
+à 2,77 m, dans la bande où le détour du pilier se déclenche. En cyan le contour
+de sol de la suite, en rouge notre sol libre ; le pilier sombre est la colonne à
+droite. **Ce que l'image ne montre pas :** le compositeur dessine ses propres
+empreintes et ignore `SUITE_CLUSTERS`, donc l'empreinte du pilier issue
+d'ADBSCAN n'y figure pas, et une image fixe ne montre pas une trajectoire. La
+preuve du détour est le journal, pas la photo — c'est la ligne
+`obstacle 1.0 x 1.0 m at (2.0, -1.2) [suite] ... shifting the line`.
+
+### Reste à faire
+
 **Le coût est réel et non résolu :** 12–13 échappées par passe contre 1–3 pour
 la référence. Elles sont peu profondes (0,05 à 0,56 m de pénétration) et le
-robot en sort, mais c'est une dégradation. La cause probable est que leur
-cluster pilier respire en x — de 0,7 × 0,9 m à 2,6 × 1,0 m au fil de la passe —
-et que la voie, à y ≈ −0,37, longe son bord. Deux pistes non essayées : exiger
-plus de trames de confirmation pour la source `suite` seule, ou grossir
-`GAP_CLEAR` en `union`.
+robot en sort, mais c'est une dégradation, et l'étape C est gelée avec elle.
+La cause probable est que leur cluster pilier respire en x — de 0,7 × 0,9 m à
+2,6 × 1,0 m au fil d'une même passe — et que la voie, à y ≈ −0,37, longe son
+bord. Deux pistes, aucune essayée :
+
+1. **Confirmation plus stricte pour la source `suite` seule.** `CONFIRM_OF` et
+   `CONFIRM_MIN` sont communs aux deux sources ; leurs clusters arrivent à ~9 Hz
+   contre ~1 Hz pour nos empreintes, donc 3 trames de confirmation couvrent
+   0,3 s de leur côté contre 3 s du nôtre. Un seuil propre à `suite` coûterait
+   peu de réactivité et lisserait la respiration du rectangle.
+2. **`GAP_CLEAR` plus grand en `union`.** Le robot rase le bord d'un obstacle
+   dont la taille varie ; élargir la marge de passage l'en éloignerait. À
+   mesurer contre le risque inverse, un couloir déclaré trop étroit et un
+   « no way round » qui revient.
+
+Une troisième, plus en amont : les deux premières traitent le symptôme, alors
+que le rectangle qui respire est un défaut de leur détection. Resserrer
+l'epsilon adaptatif (ci-dessous) pourrait le stabiliser en même temps qu'il
+casserait le bloc de droite.
 
 **Ce qui n'a pas été tenté, délibérément.** Resserrer l'epsilon adaptatif
 (`base`, `coeff_1`, `coeff_2`, `scale_factor`) casserait probablement le bloc de
