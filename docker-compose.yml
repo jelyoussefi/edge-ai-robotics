@@ -219,6 +219,10 @@ services:
       # dit "maintenant" et la carte "tout ce qui a ete vu", et les deux servent
       # en meme temps.
       SHOW_MAP: ${SHOW_MAP:-0}
+      # Fait attendre DIAG_FRAMES qu'un chemin soit arrive. Le chemin arrive
+      # apres la carte, qui arrive apres les premieres trames annotees, donc
+      # une capture scriptee ecrivait la carte sans le chemin.
+      DIAG_WAIT_PATH: ${DIAG_WAIT_PATH:-0}
       GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
       GF_OBSTACLE_LABEL: ${GF_OBSTACLE_LABEL:-5}
       # Meme valeur que pour le sim, sinon la superposition affirmerait une
@@ -508,8 +512,19 @@ services:
       # (1,8 ; 0) traverserait le mobilier. C'est le point libre le plus proche
       # du but demande qui offre au moins 0,30 m de degagement : 1,20 m de
       # decalage, degagement mesure 0,341 m.
-      ITS_GOAL_X: ${ITS_GOAL_X:-4.6}
-      ITS_GOAL_Y: ${ITS_GOAL_Y:--1.8}
+      # But choisi DANS LA CARTE, pas dans la piece. Recherche sur la grille
+      # accumulee : parmi les cellules libres offrant au moins 0,30 m de
+      # degagement, celles dont la ligne droite depuis le depart traverse de
+      # l'occupation, classees par la plus longue portion pleine traversee.
+      # Gagnant (2,1 ; -1,9), derriere le pilier proche droit -- l'obstacle que
+      # seul ADBSCAN voit. La ligne droite y traverse 0,12 m plein ; le chemin
+      # planifie ne traverse RIEN et fait 31 % de plus que la ligne droite.
+      #
+      # Le but precedent (4,6 ; -1,8) reste valable et atteignable, mais avec
+      # lui la route n'a plus a contourner quoi que ce soit : il demontrait le
+      # degagement, pas le contournement.
+      ITS_GOAL_X: ${ITS_GOAL_X:-2.1}
+      ITS_GOAL_Y: ${ITS_GOAL_Y:--1.9}
       ITS_REQUEST_PERIOD: ${ITS_REQUEST_PERIOD:-5.0}
     volumes:
       - ./config:/config:ro

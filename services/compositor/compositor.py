@@ -1059,6 +1059,13 @@ SHOW_CLOUD_AT_START = int(os.environ.get("SHOW_CLOUD", "0") or 0)
 # onto the horizon, so an unbounded draw was a solid magenta band across the
 # frame -- 14 000 cells, most of them never measured by any depth camera. Same
 # bounds as GF_X_MAX and the bridges' impossible-return filter.
+# A scripted capture of a PATH has to wait for one. The map gate below already
+# waits for the map; a path arrives later still (the planner republishes every
+# few seconds), so DIAG_FRAMES fired into the gap and wrote frames with the map
+# and no path on them. Opt-in rather than automatic: the compositor cannot know
+# whether a path is expected, and waiting forever for a planner that is not
+# running would be worse than capturing without it.
+DIAG_WAIT_PATH = os.environ.get("DIAG_WAIT_PATH", "0") not in ("", "0")
 MAP_DRAW_X_MAX = float(os.environ.get("MAP_DRAW_X_MAX", "8.0"))
 MAP_DRAW_Y_ABS = float(os.environ.get("MAP_DRAW_Y_ABS", "4.0"))
 # ADBSCAN's clusters are drawn only when the navigator is actually acting on
@@ -2549,7 +2556,8 @@ def main() -> None:
         # every diagnostic frame is a full-size PNG, and the old list fired on
         # any run that happened to reach frame 30.
         if _diag_written < DIAG_FRAMES and _annotated and (
-                not map_mode or suite_map is not None):
+                not map_mode or suite_map is not None) and (
+                not DIAG_WAIT_PATH or suite_path is not None):
             # Only annotated frames are worth keeping -- an unannotated one is
             # the composite the window already shows. Waiting for _annotated
             # also means the overlays have had a chance to appear.
