@@ -38,6 +38,123 @@ def overlap(a, b) -> float:
     return inter / union if union > 1e-9 else 0.0
 
 
+def union_iou(a, boxes) -> float:
+    """IoU between one rectangle and the UNION of several others.
+
+    Exact, by coordinate compression rather than rasterisation: the union of
+    overlapping rectangles is not a rectangle, and summing their areas would
+    double-count the overlaps and depress the score exactly where a detector
+    fragments an object into pieces that touch. Counts are single digits per
+    frame, so the (2n)^2 cells cost nothing.
+    """
+    if not boxes:
+        return 0.0
+    xs = sorted({a[0], a[1], *(v for b in boxes for v in (b[0], b[1]))})
+    ys = sorted({a[2], a[3], *(v for b in boxes for v in (b[2], b[3]))})
+    inter = union = 0.0
+    for i in range(len(xs) - 1):
+        x0, x1 = xs[i], xs[i + 1]
+        w = x1 - x0
+        if w <= 1e-12:
+            continue
+        cx = 0.5 * (x0 + x1)
+        in_a_x = a[0] <= cx <= a[1]
+        for j in range(len(ys) - 1):
+            y0, y1 = ys[j], ys[j + 1]
+            h = y1 - y0
+            if h <= 1e-12:
+                continue
+            cy = 0.5 * (y0 + y1)
+            in_a = in_a_x and a[2] <= cy <= a[3]
+            in_b = any(b[0] <= cx <= b[1] and b[2] <= cy <= b[3] for b in boxes)
+            if in_a and in_b:
+                inter += w * h
+            if in_a or in_b:
+                union += w * h
+    return inter / union if union > 1e-9 else 0.0
+
+
+def group_match(ours, theirs, cover: float = 0.5, threshold: float = 0.3):
+    """Many-to-one matching: every box of `theirs` inside one of `ours` joins it.
+
+    Answers a different question from match(). match() asks "did they draw the
+    same rectangle we did", which a detector that splits one object into three
+    fails by construction even when it is looking at exactly the same thing.
+    This asks "did they cover the same ground", which is what the navigator
+    would actually consume, since it merges footprints itself.
+
+    Assignment is by coverage of THEIR box rather than by IoU: a fragment one
+    tenth the size of our footprint sits entirely inside it and should join it,
+    yet scores 0.1 IoU against it and would never pair. `cover` is the fraction
+    of their box that has to fall inside ours; each box joins at most one group,
+    the one covering it most.
+
+    **This has to be a relaxation of match(), never a different rule**, or the
+    comparison between the two blocks says nothing. Two things enforce that, and
+    both were found by measurement rather than by reasoning:
+
+    1. The groups are SEEDED with match()'s own pairs, then grown. Assigning
+       purely by coverage let a box join the footprint that covered it most
+       while match() had paired it with a different one, and the second
+       footprint lost its pair -- one trial in 3000 random layouts.
+    2. A group whose union scores worse than its best single member falls back
+       to that member. A fragment can extend well past our footprint and drag
+       the union down.
+
+    A coverage rule on its own also rejects wide overlapping boxes that IoU
+    accepts, which put the grouped rate at 6% against a per-cluster 19% on the
+    first run. Grouped is now an upper bound on per-cluster by construction, and
+    the gap between the two is the part of the disagreement that is granularity.
+
+    Returns (pairs, ours_only, theirs_ungrouped) where a pair is
+    (our index, tuple of their indices, IoU against their union).
+    """
+    groups = [[] for _ in ours]
+    ungrouped = []
+    seeded = {}
+    for i, j, _ in match(ours, theirs, threshold)[0]:
+        groups[i].append(j)
+        seeded[j] = i
+    for j, b in enumerate(theirs):
+        if j in seeded:
+            continue
+        area_b = (b[1] - b[0]) * (b[3] - b[2])
+        best, best_cov = None, cover
+        for i, a in enumerate(ours):
+            ix = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[2], b[2]))
+            c = (ix * iy) / area_b if area_b > 1e-9 else 0.0
+            if c >= best_cov:
+                best, best_cov = i, c
+        if best is None:
+            ungrouped.append(j)
+        else:
+            groups[best].append(j)
+
+    pairs = []
+    for i, js in enumerate(groups):
+        if not js:
+            continue
+        boxes = [theirs[j] for j in js]
+        score = union_iou(ours[i], boxes)
+        keep = tuple(js)
+        if len(js) > 1:
+            singles = [(overlap(ours[i], b), j) for b, j in zip(boxes, js)]
+            best_single, best_j = max(singles)
+            if best_single > score:
+                score, keep = best_single, (best_j,)
+        if score > threshold:
+            pairs.append((i, keep, score))
+            ungrouped.extend(j for j in js if j not in keep)
+        else:
+            # Grouped and still not agreeing. Their pieces go back to unmatched
+            # rather than counting as a hit: the whole point is to find out
+            # whether grouping alone closes the gap.
+            ungrouped.extend(js)
+    ours_only = [i for i in range(len(ours)) if i not in {p[0] for p in pairs}]
+    return pairs, ours_only, ungrouped
+
+
 def match(ours, theirs, threshold: float = 0.3):
     """Pair footprints by overlap. Returns (pairs, ours_only, theirs_only)."""
     pairs, used = [], set()
@@ -174,6 +291,9 @@ def main() -> int:
     clusters = None
     clu_samples, clu_ious, clu_counts, clu_raw = [], [], [], []
     clu_outside = []
+    # Groupe : plusieurs-vers-un, dans les deux sens. `t_in_o` groupe leurs
+    # clusters dans nos empreintes, `o_in_t` fait l'inverse.
+    grp_t_in_o, grp_o_in_t = [], []
     theirs_seen, floor_seen, clu_seen = 0, 0, 0
     deadline = time.time() + args.seconds
     print(f"  ecoute pendant {args.seconds:.0f} s ...")
@@ -216,6 +336,15 @@ def main() -> int:
             clu_counts.append((len(c_only_a), len(c_only_b)))
             clu_outside.append((out_ours, out_theirs))
             clu_ious.extend(p[2] for p in cp)
+            # Meme trame, meme rognage, meme seuil de 0.3 : la seule difference
+            # est le groupage, donc l'ecart entre les deux blocs est exactement
+            # la part du desaccord qui est de la granularite.
+            gp, g_only, g_loose = group_match(a_ours, a_theirs)
+            grp_t_in_o.append((len(a_ours), len(gp), len(g_only), len(g_loose),
+                               [p[2] for p in gp], [len(p[1]) for p in gp]))
+            rp, r_only, r_loose = group_match(a_theirs, a_ours)
+            grp_o_in_t.append((len(a_theirs), len(rp), len(r_only), len(r_loose),
+                               [p[2] for p in rp], [len(p[1]) for p in rp]))
         if ours is None or theirs is None:
             continue
         pairs, only_a, only_b = match(ours, theirs)
@@ -315,6 +444,39 @@ def main() -> int:
                   f"empreintes ont une contrepartie")
         else:
             print("      aucune paire au-dessus du seuil de 0.3 d'IoU")
+        # Plusieurs-vers-un. La question : le desaccord qui reste est-il un
+        # desaccord sur OU sont les obstacles, ou seulement sur leur decoupage ?
+        # Si le recouvrement groupe monte nettement au-dessus du recouvrement
+        # par cluster, c'est de la granularite, et le navigateur -- qui fusionne
+        # deja les empreintes -- ne la verrait pas.
+        def _grp(rows, label, unit_a, unit_b):
+            n_a = cavg([r[0] for r in rows])
+            n_pair = cavg([r[1] for r in rows])
+            scores = sorted(s for r in rows for s in r[4])
+            sizes = [s for r in rows for s in r[5]]
+            print(f"\n      {label}")
+            print(f"        {unit_a} apparies    : {n_pair:.1f} sur "
+                  f"{n_a:.1f}  ({n_pair / max(1e-9, n_a):.0%})")
+            if scores:
+                print(f"        recouvrement groupe : mediane "
+                      f"{scores[len(scores) // 2]:.2f}, min {scores[0]:.2f}, "
+                      f"max {scores[-1]:.2f}")
+                print(f"        {unit_b} par groupe : "
+                      f"{sum(sizes) / len(sizes):.2f} "
+                      f"(max {max(sizes)})")
+            else:
+                print("        aucun groupe au-dessus du seuil de 0.3")
+            print(f"        sans groupe         : {cavg([r[2] for r in rows]):.1f} "
+                  f"/ {cavg([r[3] for r in rows]):.1f} de l'autre cote")
+
+        if grp_t_in_o:
+            print("\n    APPARIEMENT GROUPE (plusieurs-vers-un, seuil 0.3, "
+                  "rattachement a 50% de couverture)")
+            _grp(grp_t_in_o, "leurs clusters groupes dans nos empreintes",
+                 "nos empreintes", "clusters")
+            _grp(grp_o_in_t, "nos empreintes groupees dans leurs clusters",
+                 "leurs clusters", "empreintes")
+
         print("\n    HORS ARENE (rectangles entierement dehors, ecartes)")
         print(f"      ce projet : {cavg([c[0] for c in clu_outside]):.1f} "
               f"par trame")
