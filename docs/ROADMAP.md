@@ -73,12 +73,28 @@ diagramme cible devient une intention plutôt qu'un plan.
 ## Étape C. Deux briques de plus, presque gratuites
 
 Une fois la passerelle en place, `ADBSCAN` et `FastMapping` consomment le même
-nuage de points et ne demandent que leur câblage. ADBSCAN remplace la fusion
-d'empreintes, FastMapping donne une carte d'occupation persistante au lieu d'un
-polygone recalculé à chaque changement de scène.
+nuage de points et ne demandent que leur câblage. FastMapping donne une carte
+d'occupation persistante au lieu d'un polygone recalculé à chaque changement de
+scène.
 
-**Critère d'arrêt.** Le robot évite les mêmes obstacles qu'aujourd'hui, avec les
-obstacles venant de chez eux.
+**ADBSCAN : mesuré, voir `docs/ETAPE-C-RESULTS.md`.** L'hypothèse « ADBSCAN
+remplace la fusion d'empreintes » est **rejetée par la mesure**. Branché tel
+quel il rend un amas de la taille de l'arène dans 60 % des trames ; chaîné
+derrière `groundfloor`, rogné à l'arène et débarrassé du résidu de plan
+(`GF_Z_LOW`), il atteint 39–42 % d'appariement à 0,50 de recouvrement, et ce qui
+reste n'est pas rattrapable par du réglage — les deux détecteurs voient des
+choses différentes. Nous tenons les objets sémantiques (table, bloc cuisine)
+qu'ils fondent dans une masse ; ils tiennent le pilier et le comptoir proches à
+70–75 %, dont nous n'avons aucune empreinte parce qu'aucune classe COCO ne les
+couvre.
+
+**Critère d'arrêt, révisé.** ~~Le robot évite les mêmes obstacles
+qu'aujourd'hui, avec les obstacles venant de chez eux.~~ C'était un critère de
+**substitution**, et la substitution échoue. À la place : le navigateur consomme
+l'**union** de nos empreintes et de leurs clusters, et le robot évite au moins
+les obstacles qu'il évite aujourd'hui, **plus** le pilier proche droit qu'il ne
+voit pas. Un obstacle vu par l'un des deux est un obstacle : un faux positif
+coûte un détour, un faux négatif une collision.
 
 ---
 

@@ -68,7 +68,8 @@ adbscan_sub_node:
     #
     # The same bridge also drops the 0 to GF_Z_LOW height band, the plane fit's
     # residue lying on the floor. That mattered more than the walls did: it took
-    # the match rate from 16-24 % to 39-42 %. See bridge.py for the measurement.
+    # the match rate from 16-24 % to 39-42 %. See bridge.py for the measurement,
+    # and docs/ETAPE-C-RESULTS.md for what it settles and what it does not.
     Lidar_topic: /segmentation/arena_points
     # Their Verbose logs every cluster's centre and size on every frame, which
     # at 9 Hz buries the bridge's own reporting. The bridge summarises instead.

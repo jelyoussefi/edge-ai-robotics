@@ -106,21 +106,12 @@ def group_match(ours, theirs, cover: float = 0.5, threshold: float = 0.3):
     first run. Grouped is now an upper bound on per-cluster by construction, and
     the gap between the two is the part of the disagreement that is granularity.
 
-    MEASURED, and the answer is negative. Two 60 s runs on the clipped arena:
-
-                              run 1        run 2
-      per-cluster rate         24%          19%
-      per-cluster overlap     0.44         0.45
-      grouped rate             24%          19%
-      grouped overlap         0.44         0.45
-      their clusters/group    1.03         1.02
-      our footprints/group    1.25         1.52
-
-    Grouping essentially never fires in their direction: the gap is not that
-    ADBSCAN cuts one object into pieces we drew whole. It is that the two sides
-    disagree on WHERE the obstacles are, which no merge rule can close. Both
-    blocks come out of the same run, so this comparison is internal and immune
-    to the cross-session floor drift of docs/ETAPE-B-RESULTS.md section 7.
+    MEASURED, and the answer is negative: grouping essentially never fires,
+    because their rectangles are larger than ours rather than fragments of
+    them. The gap is not how the objects are cut up, it is where they are, and
+    no merge rule closes that. Both blocks come out of the same run, so the
+    comparison is internal and immune to the cross-session floor drift of
+    docs/ETAPE-B-RESULTS.md section 7. Numbers in ETAPE-C-RESULTS.md section 7.
 
     Returns (pairs, ours_only, theirs_ungrouped) where a pair is
     (our index, tuple of their indices, IoU against their union).
@@ -550,50 +541,14 @@ def main() -> int:
                  "leurs clusters", "empreintes")
 
         # Nommer le desaccord. Les compteurs disent combien de rectangles
-        # personne n'apparie ; ils ne disent pas si c'est toujours le meme.
+        # personne n'apparie ; ils ne disent pas si c'est toujours le meme
+        # objet ou un bruit different a chaque trame, et les deux appellent des
+        # reponses opposees.
         #
-        # MESURE, 60 s, 509 trames, arene rognee, AVANT le filtre de residu de
-        # sol de bridge.py (taux par cluster 16%) :
-        #
-        #   nous seulement    98%  (5.80, -1.99)  1.40 x 1.21  cuisine du fond
-        #                     41%  (3.48,  1.03)  2.64 x 0.96  table a manger
-        #                     29%  (4.44,  1.04)  4.19 x 0.71  la meme, etendue
-        #   eux seulement     60%  (3.99, -0.52)  5.00 x 4.10  TOUTE L'ARENE
-        #                     19%  (4.58, -1.40)  3.81 x 2.43  moitie droite
-        #                     15%  (4.00, -1.37)  4.99 x 2.52  moitie droite
-        #                     14%  (2.10, -1.11)  1.19 x 1.09  pilier + comptoir
-        #
-        # Leur cote n'est pas un jeu d'objets. Cinq de leurs six emplacements
-        # font plus de 2.4 m dans une dimension et couvrent la moitie de
-        # l'arene : c'est UN amas, redecoupe autrement d'une trame a l'autre.
-        # Le rognage de bridge.py a retire les murs, pas le chainage.
-        #
-        # C'est aussi pourquoi le groupage plus haut ne rattrape rien. Il
-        # suppose que leurs rectangles sont plus PETITS que les notres, des
-        # morceaux a recoller ; ils sont plus GRANDS. Le seul cas d'objet reel
-        # vu des deux cotes avec des tailles differentes est le pilier proche a
-        # droite : 0.40 x 0.44 chez nous, 1.19 x 1.09 chez eux, centres a 0.53 m
-        # l'un de l'autre -- juste au-dela du rayon de regroupement.
-        #
-        # APRES le filtre (GF_Z_LOW = 0.12), deux passes de 60 s :
-        #
-        #   taux par cluster        16%  ->  39% / 42%
-        #   recouvrement des paires 0.46 ->  0.50
-        #   clusters par trame       1.8 ->  2.8
-        #   amas large de l'arene    60% ->  11% / 14% de persistance
-        #   table, nous seulement 41+29% ->  10-12%
-        #
-        # IoU du sol brut 0.555 / 0.552 / 0.547 / 0.530 sur les quatre passes :
-        # le sol est le temoin, ce filtre ne peut pas l'atteindre, donc la scene
-        # a tenu et l'ecart est bien le filtre.
-        #
-        # Ce qui RESTE apres, et qui n'est pas de la granularite :
-        #   - eux 68-82% (4.57, -1.48) 3.8 x 2.2, la moitie droite en un bloc.
-        #     Notre bloc cuisine a 95-100% est dedans, mais 1.7 m2 dans 8.6 m2
-        #     ne fait pas 0.3 d'IoU.
-        #   - eux 70-75% (2.00, -1.12) 1.0 x 1.0, compact et stable : le pilier
-        #     et le comptoir proches a droite. Ils le voient, nous non. C'est le
-        #     seul endroit ou leur detection bat la notre.
+        # Ce que cette carte a donne sur cette piece, avant et apres le filtre
+        # de residu de sol, avec la lecture physique de chaque emplacement :
+        # docs/ETAPE-C-RESULTS.md section 7. Les chiffres vivent la-bas et pas
+        # ici, parce qu'ils decrivent une piece et une session, pas ce code.
         if args.unmatched:
             def _spots(records, label):
                 spots = spot_map(records, len(clu_samples))

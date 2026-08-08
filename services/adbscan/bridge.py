@@ -91,6 +91,9 @@ CLOUD_OUT = os.environ.get("ADBSCAN_CLOUD_OUT", "/segmentation/arena_points")
 # doDBSCAN.cpp:304, the 3D branch -- so the slice this actually removes is
 # 0.08 to GF_Z_LOW, 45 of the 1011 points per cloud that reach the clusterer.
 # Set GF_Z_LOW to 0 to disable.
+#
+# 4.5 % of the points are worth 23 points of match rate; the before and after,
+# and what it does not fix, are in docs/ETAPE-C-RESULTS.md section 4c.
 Z_LOW = float(os.environ.get("GF_Z_LOW", "0.12"))
 
 
