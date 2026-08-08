@@ -1054,6 +1054,38 @@ SHOW_FLOOR_AT_START = os.environ.get("SHOW_FLOOR", "0") not in ("", "0")
 # Initial state of the 'p' cloud display: 0 off, 1 over the video, 2 cloud
 # alone. Same purpose as SHOW_FLOOR -- a capture with no keyboard.
 SHOW_CLOUD_AT_START = int(os.environ.get("SHOW_CLOUD", "0") or 0)
+# ADBSCAN's clusters are drawn only when the navigator is actually acting on
+# them. Read from the same OBSTACLE_SOURCE the sim reads, so the picture cannot
+# claim an input the robot is ignoring -- the whole point of the overlay is to
+# show what drove a detour.
+SHOW_SUITE_CLUSTERS = (os.environ.get("OBSTACLE_SOURCE", "ours").strip().lower()
+                       == "union")
+# The navigator does not consume the raw topic: it clips to the arena and drops
+# anything wider than SUITE_MAX_SPAN, because their right-half block would
+# otherwise wall off the patrol (docs/ETAPE-C-RESULTS.md section 8). The same
+# filter is applied before drawing, or the overlay would show a rectangle over
+# half the room that the robot never reacts to. Same defaults as navigator.py;
+# compose feeds both, so they cannot drift.
+SUITE_MAX_SPAN = float(os.environ.get("SUITE_MAX_SPAN", "3.0"))
+SUITE_ARENA = (float(os.environ.get("SUITE_X_MIN", "1.5")),
+               float(os.environ.get("SUITE_X_MAX", "6.5")),
+               float(os.environ.get("SUITE_Y_MIN", "-2.6")),
+               float(os.environ.get("SUITE_Y_MAX", "1.5")))
+
+
+def _navigator_clusters(boxes):
+    """Their clusters as the navigator sees them: arena-clipped, de-blobbed."""
+    ax0, ax1, ay0, ay1 = SUITE_ARENA
+    out = []
+    for b in boxes or ():
+        x0, x1 = max(float(b[0]), ax0), min(float(b[1]), ax1)
+        y0, y1 = max(float(b[2]), ay0), min(float(b[3]), ay1)
+        if x1 - x0 <= 1e-6 or y1 - y0 <= 1e-6:
+            continue
+        if x1 - x0 > SUITE_MAX_SPAN or y1 - y0 > SUITE_MAX_SPAN:
+            continue
+        out.append((x0, x1, y0, y1))
+    return out
 # Which classes get a colour of their own. Same defaults as the bridge, and
 # compose feeds both from the same ${GF_GROUND_LABEL} so they cannot drift.
 CLOUD_GROUND_LABEL = int(os.environ.get("GF_GROUND_LABEL", "3"))
@@ -1360,7 +1392,8 @@ def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
                    floor_paint_cpu, obstacle_boxes, roi_cached, detections,
                    seg_mask, seg_mask_t, cam_height, cam_pitch_deg,
                    fx, fy, ppx, ppy, suite_floor=None,
-                   suite_floor_t=0.0) -> bool:
+                   suite_floor_t=0.0, suite_clusters=None,
+                   suite_clusters_t=0.0) -> bool:
     """Draw whatever the operator has switched on. Returns True if it drew.
 
     Kept out of the main loop because it is diagnostic, not part of producing a
@@ -1473,14 +1506,43 @@ def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
             cv2.polylines(out, [arr], True, (255, 255, 0), 2, cv2.LINE_AA)
             annotated = True
 
-    if show_floor and (roi_cached or _suite_fresh):
-        # Legend. Without it the two outlines are just two coloured rings and
-        # the screenshot is unreadable a week later.
+    # ADBSCAN's clusters, only in union mode. Off by default for the same reason
+    # the navigator ignores them by default: the suite bricks are an optional
+    # profile, and an overlay that appeared depending on what else was running
+    # would be a surprise. Drawn as ground rectangles through the SAME
+    # projection again, so a cluster sitting on an object is visibly on it.
+    #
+    # These are what the NAVIGATOR consumes, not the raw topic: already clipped
+    # to the arena and already stripped of anything wider than SUITE_MAX_SPAN.
+    # Drawing the raw topic would show a rectangle over half the room that the
+    # robot never reacts to, which is worse than drawing nothing.
+    _clusters_fresh = (SHOW_SUITE_CLUSTERS and suite_clusters
+                       and (time.time() - suite_clusters_t) < 3.0)
+    if show_floor and _clusters_fresh:
+        for x0, x1, y0, y1 in suite_clusters:
+            corners = []
+            for fwd, lat in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+                uv = _world_to_pixel(cam_height, cam_pitch_deg, fx, fy,
+                                     ppx, ppy, fwd, lat,
+                                     out.shape[1], out.shape[0])
+                if uv is not None:
+                    corners.append(uv)
+            if len(corners) == 4:
+                arr = np.array(corners, np.int32)
+                cv2.polylines(out, [arr], True, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.polylines(out, [arr], True, (0, 150, 255), 2, cv2.LINE_AA)
+                annotated = True
+
+    if show_floor and (roi_cached or _suite_fresh or _clusters_fresh):
+        # Legend. Without it the outlines are just coloured rings and the
+        # screenshot is unreadable a week later.
         y = 24
         for label, colour, on in (("ours (walkable floor)", (60, 220, 60),
                                    bool(roi_cached)),
                                   ("Intel suite (ground)", (255, 255, 0),
-                                   bool(_suite_fresh))):
+                                   bool(_suite_fresh)),
+                                  ("ADBSCAN clusters (union)", (0, 150, 255),
+                                   bool(_clusters_fresh))):
             if not on:
                 continue
             cv2.line(out, (12, y - 5), (40, y - 5), (0, 0, 0), 5, cv2.LINE_AA)
@@ -1925,9 +1987,13 @@ def main() -> None:
 
     pub = Publisher()
     cam_sub = Subscriber([topics.CAMERA_RGB, topics.CAMERA_DEPTH], rcvhwm=2)
+    # SUITE_CLUSTERS is subscribed unconditionally, like the sim does, and
+    # SHOW_SUITE_CLUSTERS decides whether anything is drawn. A silent topic
+    # costs nothing and the alternative is a subscription list that changes
+    # shape with an env var.
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
                       topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR,
-                      topics.SUITE_CLOUD])
+                      topics.SUITE_CLOUD, topics.SUITE_CLUSTERS])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -1938,6 +2004,8 @@ def main() -> None:
     show_floor = SHOW_FLOOR_AT_START   # 'f' toggles it at any time
     suite_floor: list = []      # the suite's floor outline, drawn under 'f'
     suite_floor_t = 0.0
+    suite_clusters: list = []   # ADBSCAN's rectangles, drawn under 'f' in union
+    suite_clusters_t = 0.0
     _diag_written = 0           # diagnostic PNGs written so far, capped above
     # 'p' cycles: 0 off, 1 cloud over the video, 2 cloud alone on black.
     cloud_mode = SHOW_CLOUD_AT_START
@@ -2043,6 +2111,14 @@ def main() -> None:
                 suite_floor = [(float(a), float(b))
                                for a, b in (payload.get("poly") or [])]
                 suite_floor_t = time.time()
+                continue
+
+            if topic == topics.SUITE_CLUSTERS:
+                # Filtered here rather than at draw time: this arrives at ~9 Hz
+                # and the display runs faster, so doing it once per message is
+                # cheaper than once per frame.
+                suite_clusters = _navigator_clusters(payload.get("blocked"))
+                suite_clusters_t = time.time()
                 continue
 
             if topic == topics.SUITE_CLOUD:
@@ -2233,7 +2309,8 @@ def main() -> None:
                 out, ov, show_floor and cloud_mode != 2, show_seg, floor_det,
                 depth_metres, floor_paint_cpu, obstacle_boxes, roi_cached,
                 detections, seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
-                fx, fy, ppx, ppy, suite_floor, suite_floor_t) or _annotated
+                fx, fy, ppx, ppy, suite_floor, suite_floor_t,
+                suite_clusters, suite_clusters_t) or _annotated
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
             raise

@@ -590,10 +590,20 @@ therefore the right operator, not the diplomatic one.**
 
 ![The robot patrolling in union mode, overlays on](images/etape-c-union-pillar.png)
 
-`DIAG_FRAMES=3 SHOW_FLOOR=1` under `OBSTACLE_SOURCE=union`. Cyan is the suite's
-floor contour, red our free floor; the dark column on the right is the pillar.
-The overlay draws our footprints only, so ADBSCAN's rectangle is not in the
-picture — the detour is evidenced by the log line, not the image.
+`DIAG_FRAMES=3 SHOW_FLOOR=1` under `OBSTACLE_SOURCE=union`. Red is our free
+floor, cyan the suite's floor contour, **orange an ADBSCAN cluster** — the one on
+the right sits on the pillar and counter, the obstacle we have no footprint for.
+The robot has just cleared the near about-face at 2.01 m and is 0.70 m off the
+axis with a suite-sourced detour active.
+
+Two things worth copying if you build a comparable overlay. Draw the rectangles
+the **consumer** sees, not the raw topic: these are already arena-clipped and
+already stripped of anything wider than the span guard, and drawing the raw
+topic would show a rectangle over half the room that the robot never reacts to.
+And **test that the overlay's filter equals the consumer's** — otherwise the
+picture asserts an input the robot ignored, which is a worse failure than having
+no picture. A still frame still cannot show a trajectory; the detour is in the
+log.
 
 See also the two floor overlays from the earlier campaign, which make the near-
 and far-field disagreements of section 4 legible:

@@ -215,6 +215,18 @@ services:
       SHOW_CLOUD: ${SHOW_CLOUD:-0}
       GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
       GF_OBSTACLE_LABEL: ${GF_OBSTACLE_LABEL:-5}
+      # Meme valeur que pour le sim, sinon la superposition affirmerait une
+      # entree que le robot ignore. En "union" le compositeur dessine en orange
+      # les clusters d'ADBSCAN, apres le MEME rognage d'arene et le MEME rejet
+      # au-dela de SUITE_MAX_SPAN que le navigateur applique -- dessiner le
+      # topic brut montrerait un rectangle sur la moitie de la piece auquel le
+      # robot ne reagit jamais.
+      OBSTACLE_SOURCE: ${OBSTACLE_SOURCE:-ours}
+      SUITE_MAX_SPAN: ${SUITE_MAX_SPAN:-3.0}
+      SUITE_X_MIN: ${SUITE_X_MIN:-1.5}
+      SUITE_X_MAX: ${SUITE_X_MAX:-6.5}
+      SUITE_Y_MIN: ${SUITE_Y_MIN:--2.6}
+      SUITE_Y_MAX: ${SUITE_Y_MAX:-1.5}
       <<: *bus-env
       ROBOT: g1_walker
       DISPLAY: ${DISPLAY:-:0}

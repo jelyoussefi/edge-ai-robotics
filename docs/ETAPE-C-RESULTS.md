@@ -415,14 +415,21 @@ Les tours se bouclent au rythme de la référence et « no way round » reste à
 
 ![Le robot en patrouille en mode union, contours affichés](images/etape-c-union-pillar.png)
 
-Capture `DIAG_FRAMES=3 SHOW_FLOOR=1` avec `OBSTACLE_SOURCE=union`, robot sortant
-à 2,77 m, dans la bande où le détour du pilier se déclenche. En cyan le contour
-de sol de la suite, en rouge notre sol libre ; le pilier sombre est la colonne à
-droite. **Ce que l'image ne montre pas :** le compositeur dessine ses propres
-empreintes et ignore `SUITE_CLUSTERS`, donc l'empreinte du pilier issue
-d'ADBSCAN n'y figure pas, et une image fixe ne montre pas une trajectoire. La
-preuve du détour est le journal, pas la photo — c'est la ligne
-`obstacle 1.0 x 1.0 m at (2.0, -1.2) [suite] ... shifting the line`.
+Capture `DIAG_FRAMES=3 SHOW_FLOOR=1` avec `OBSTACLE_SOURCE=union`. En rouge notre
+sol libre, en cyan le contour de sol de la suite, **en orange les clusters
+d'ADBSCAN** — celui de droite est posé sur le pilier et le comptoir, l'obstacle
+dont nous n'avons aucune empreinte. Le robot vient de terminer le demi-tour près
+à 2,01 m et sort à **0,70 m hors de l'axe**, détour actif sur un cluster `suite`
+de 1,8 × 0,7 m : `obstacle 1.8 x 0.7 m at (3.9, -0.8) [suite], shifting the line
++0.28 m`.
+
+Les rectangles orange sont ceux que le **navigateur** consomme, pas le topic
+brut : déjà rognés à l'arène et déjà débarrassés de tout ce qui dépasse
+`SUITE_MAX_SPAN`. Dessiner le topic brut montrerait un rectangle sur la moitié
+de la pièce auquel le robot ne réagit jamais. Le filtre du compositeur est
+vérifié identique à celui du navigateur par un test, sans quoi l'image
+affirmerait une entrée que le robot ignore. Reste vrai : une image fixe ne montre
+pas une trajectoire, le détour se lit dans le journal.
 
 ### Reste à faire
 
