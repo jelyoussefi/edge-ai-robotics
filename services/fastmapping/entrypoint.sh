@@ -65,7 +65,11 @@ BRIDGE=$!
 # them with message_filters ApproximateTime; with one camera the sync is between
 # the depth image and its camera_info, which our bridge publishes with the same
 # header, so it matches on every frame.
-ros2 run fast_mapping fast_mapping --ros-args \
+# fast_mapping_node, not fast_mapping: the package is fast_mapping
+# (package.xml) but CMakeLists.txt:74 names the target fast_mapping_node, and
+# `ros2 run` wants the executable. Getting it wrong exits with the unhelpful
+# "No executable found" and no hint that the package itself was located.
+ros2 run fast_mapping fast_mapping_node --ros-args \
     -p map_frame:="${MAP_FRAME}" \
     -p depth_cameras:=1 \
     -p depth_topic_1:="/${GF_SENSOR_NAME:-camera}/depth/image_rect_raw" \
