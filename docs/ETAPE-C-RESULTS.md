@@ -374,6 +374,49 @@ moins les obstacles qu'il évite aujourd'hui, plus le pilier proche droit qu'il
 ne voit pas.* C'est vérifiable, ça exploite ce que leur brique apporte
 réellement, et ça n'exige pas d'elle une granularité qu'elle n'a pas.
 
+### L'union, implémentée et mesurée
+
+`OBSTACLE_SOURCE=ours|suite|union` dans le navigateur, défaut `ours` : la démo
+livrée ne change pas. En `union`, `sim.py` passe aussi `SUITE_CLUSTERS` au
+navigateur, qui rogne leurs clusters à l'arène, refuse ceux qui dépassent
+`SUITE_MAX_SPAN` (3 m), confirme **chaque source séparément** puis fusionne. La
+confirmation par source est nécessaire : un objet qu'un seul détecteur voit —
+le pilier est exactement ça — doit pouvoir se confirmer contre son propre
+historique, alors que mettre les deux en commun le ferait concourir contre les
+mises à jour de l'autre source et il n'atteindrait jamais `CONFIRM_MIN`.
+
+**Le garde-fou de largeur doit survivre à la fusion, sinon il n'existe pas.**
+Refuser leur bloc de 3,8 × 2,2 m cluster par cluster ne sert à rien si trois de
+leurs clusters de moins de 3 m s'enchaînent ensuite avec un des nôtres et le
+reconstruisent. Mesuré : une barrière de 5,3 × 3,8 m étiquetée `ours+suite`,
+**43 échappées et 5 « no way round »** sur trois minutes. Le garde-fou est donc
+aussi appliqué **pendant** la fusion, et seulement quand une boîte `suite` est
+en jeu — nos propres empreintes fusionnent en une barrière de 5,3 × 3,6 m sur
+cette scène aussi, et celle-là ne coûte rien parce qu'elle longe le bord au lieu
+de traverser la voie.
+
+Quatre passes de ~215 s, même scène (une personne y marche, d'où la variance des
+tours) :
+
+| | tours | tours complets | « no way round » | échappées | détours `[suite]` |
+|---|---|---|---|---|---|
+| `ours` | 13 / 5 | 7 / 2 | **0 / 0** | **1 / 3** | 0 |
+| `union`, sans garde-fou de fusion | 20 / 8 | 10 / 4 | **5 / 0** | **43 / 24** | 62 / 18 |
+| `union`, avec | 12 / 10 | 6 / 5 | **0 / 0** | **13 / 12** | 13 / 10 |
+
+**Le test d'acceptation passe.** Le pilier est détourné de façon répétée, comme
+un obstacle compact d'environ 1,0 × 1,0 m à **(2,0 ; −1,2)** étiqueté `[suite]`
+dans le journal — l'emplacement exact que notre perception seule n'a jamais vu.
+Les tours se bouclent au rythme de la référence et « no way round » reste à 0.
+
+**Le coût est réel et non résolu :** 12–13 échappées par passe contre 1–3 pour
+la référence. Elles sont peu profondes (0,05 à 0,56 m de pénétration) et le
+robot en sort, mais c'est une dégradation. La cause probable est que leur
+cluster pilier respire en x — de 0,7 × 0,9 m à 2,6 × 1,0 m au fil de la passe —
+et que la voie, à y ≈ −0,37, longe son bord. Deux pistes non essayées : exiger
+plus de trames de confirmation pour la source `suite` seule, ou grossir
+`GAP_CLEAR` en `union`.
+
 **Ce qui n'a pas été tenté, délibérément.** Resserrer l'epsilon adaptatif
 (`base`, `coeff_1`, `coeff_2`, `scale_factor`) casserait probablement le bloc de
 droite : leurs valeurs sont réglées pour un LiDAR épars, pas pour un nuage RGBD
@@ -387,7 +430,13 @@ make                                      # la démo
 make groundfloor                          # le pont ROS 2, profil suite
 make adbscan                              # ADBSCAN, monte groundfloor avec
 make suite-compare ARGS="--seconds 60 --unmatched"
+
+OBSTACLE_SOURCE=union docker compose up -d --build sim   # l'union du §8
 ```
+
+`--build` n'est pas optionnel après une modification de `navigator.py` : un
+`up -d sim` seul redémarre le conteneur avec l'ancienne image, et la mesure
+porte alors sur du code qui n'existe plus dans l'arbre.
 
 `--unmatched` ajoute la carte du §7. Sans lui, le rapport garde la forme de
 l'étape B.
@@ -396,6 +445,10 @@ Réglages, tous dans `docker-compose.yml` qui fait foi :
 
 | variable | défaut | effet |
 |---|---|---|
+| `OBSTACLE_SOURCE` | `ours` | `ours` / `suite` / `union` (sim) |
+| `SUITE_MAX_SPAN` | 3.0 | largeur max d'un cluster `suite`, avant ET pendant la fusion |
+| `SUITE_X_MIN/MAX` | 1.5 / 6.5 | arène où leurs clusters sont rognés (sim) |
+| `SUITE_Y_MIN/MAX` | −2.6 / 1.5 | idem |
 | `GF_Z_LOW` | 0.12 | haut de la bande de résidu ; 0 désactive |
 | `ARENA_X_MIN/MAX` | 1.2 / 6.3 | rognage du nuage, avant leur nœud |
 | `ARENA_Y_MIN/MAX` | −2.8 / 1.7 | idem |

@@ -73,6 +73,27 @@ services:
       OBSTACLE_STALE: ${OBSTACLE_STALE:-3.0}
       CONFIRM_OF: ${CONFIRM_OF:-3}
       CONFIRM_MIN: ${CONFIRM_MIN:-3}
+      # D'ou viennent les obstacles : "ours" (nos empreintes, le defaut et la
+      # demo livree), "suite" (les clusters d'ADBSCAN seuls) ou "union".
+      # L'union parce que les deux detecteurs sont complementaires, mesure et
+      # non suppose : nous tenons la table et le bloc cuisine qu'ils fondent en
+      # une masse, ils tiennent le pilier et le comptoir proches droite dont
+      # aucune classe COCO ne nous donne d'empreinte. Voir
+      # docs/ETAPE-C-RESULTS.md section 8. Defaut "ours" : les briques de la
+      # suite sont un profil optionnel, et le comportement du navigateur ne
+      # doit pas dependre de ce qui tourne par ailleurs.
+      OBSTACLE_SOURCE: ${OBSTACLE_SOURCE:-ours}
+      # Leurs clusters uniquement. Rogne a l'arene, puis tout ce qui depasse
+      # SUITE_MAX_SPAN dans une direction est refuse avant la fusion : ils
+      # rendent encore la moitie droite de la piece en un bloc de 3,8 x 2,2 m
+      # dans 68-82 % des trames, et le donner au detour murerait la moitie de
+      # la patrouille. 3 m est au-dessus du plus grand meuble d'ici (la table
+      # de 2,64 m) et en dessous de ce bloc.
+      SUITE_MAX_SPAN: ${SUITE_MAX_SPAN:-3.0}
+      SUITE_X_MIN: ${SUITE_X_MIN:-1.5}
+      SUITE_X_MAX: ${SUITE_X_MAX:-6.5}
+      SUITE_Y_MIN: ${SUITE_Y_MIN:--2.6}
+      SUITE_Y_MAX: ${SUITE_Y_MAX:-1.5}
       # Step 5: go around what YOLO sees. The lane is shifted sideways rather
       # than the robot stopping, so avoiding is the same motion as lane keeping.
       # "axis" paces the optical axis; "perimeter" follows the floor's boundary.

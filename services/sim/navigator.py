@@ -74,6 +74,37 @@ class Navigator:
     STALE = float(os.environ.get("OBSTACLE_STALE", "3.0"))
     CONFIRM_OF = int(os.environ.get("CONFIRM_OF", "3"))
     CONFIRM_MIN = int(os.environ.get("CONFIRM_MIN", "3"))
+    # Where obstacles come from: "ours" (perception's footprints, the default
+    # and the shipped demo), "suite" (ADBSCAN's clusters only) or "union".
+    #
+    # The union exists because the two detectors are complementary, measured
+    # rather than assumed -- docs/ETAPE-C-RESULTS.md section 8. We start from
+    # semantic segmentation and hold the dining table and the kitchen block that
+    # their density test melts into one mass; they hold the near right pillar and
+    # counter 70-75 % of the time, which no COCO class covers and we therefore
+    # never see at all. A false positive costs a detour, a false negative costs
+    # a collision, so an obstacle seen by either side is an obstacle.
+    #
+    # Default "ours" on purpose: the suite bricks are an optional compose
+    # profile, and a navigator whose behaviour depended on whether an optional
+    # service happened to be running would be a bad default whichever way it
+    # went. Nothing changes unless asked.
+    SOURCE = os.environ.get("OBSTACLE_SOURCE", "ours").strip().lower()
+    # Their clusters only, and only for the union. Anything wider than this in
+    # either direction is refused before the merge: with GF_Z_LOW in place they
+    # still return the right half of the room as one 3.8 x 2.2 m block in 68-82 %
+    # of frames, and handing that to the detour walls off half the patrol -- it
+    # is not an obstacle, it is a failure to separate several. 3 m is above the
+    # largest single piece of furniture here (the 2.64 m dining table) and below
+    # that block.
+    SUITE_MAX_SPAN = float(os.environ.get("SUITE_MAX_SPAN", "3.0"))
+    # And clipped to the arena first, for the same reason suite_compare.py does
+    # it: outside these bounds a rectangle from either side is a depth artefact,
+    # and theirs in particular runs to the walls.
+    SUITE_X_MIN = float(os.environ.get("SUITE_X_MIN", "1.5"))
+    SUITE_X_MAX = float(os.environ.get("SUITE_X_MAX", "6.5"))
+    SUITE_Y_MIN = float(os.environ.get("SUITE_Y_MIN", "-2.6"))
+    SUITE_Y_MAX = float(os.environ.get("SUITE_Y_MAX", "1.5"))
     DETOUR_MAX = float(os.environ.get("DETOUR_MAX", "1.8"))  # m of lane shift
     # How much run-up to take beyond the geometric minimum. 1.0 is the pure
     # geometry and is always slightly short, the cross-track law reaching its
@@ -99,7 +130,30 @@ class Navigator:
         self._y_f = 0.0
         self._obstacles: list = []
         self._obstacles_t = 0.0
-        self._history: list = []   # recent footprint sets, for confirmation
+        # Per source, because the two arrive at different rates -- our ROI once
+        # a second, their clusters at about 9 Hz -- so one shared confirmation
+        # window would let the fast source fill it and confirm the slow one's
+        # footprints by itself. Keyed the same way in all three: history for the
+        # confirmation vote, and the time of the last update for staleness.
+        self._history: dict = {"ours": [], "suite": []}
+        self._src_t: dict = {"ours": 0.0, "suite": 0.0}
+        # Which sources fed each rectangle of self._obstacles, same order. Only
+        # ever read for logging and telemetry: the geometry is source-blind on
+        # purpose, an obstacle being an obstacle whoever saw it.
+        self._obstacle_src: list = []
+        self._suite_wide = 0    # clusters refused for spanning more than
+        self._suite_outside = 0  # SUITE_MAX_SPAN, or falling outside the arena
+        self._last_suite_log = 0.0
+        # Counted, not just logged once per episode: "no way round" is the
+        # failure this whole arrangement risks introducing, so its rate is the
+        # number to compare between sources rather than its presence.
+        self._no_way_round = 0
+        if self.SOURCE not in ("ours", "suite", "union"):
+            # Loudly, not silently back to "ours". A typo in OBSTACLE_SOURCE
+            # would otherwise look exactly like the union quietly doing nothing.
+            raise SystemExit(
+                f"OBSTACLE_SOURCE={self.SOURCE!r} is not one of "
+                f"ours, suite, union")
         self._roi: list = []
         self._detour_reason = ""
         self._inside_reason = ""
@@ -118,13 +172,100 @@ class Navigator:
         if roi:
             self._roi = roi
         if blocked is not None:
-            self._history.append([(float(b[0]), float(b[1]), float(b[2]),
-                                   float(b[3])) for b in blocked])
-            del self._history[:-self.CONFIRM_OF]
-            self._obstacles = self._merge(self._confirmed())
-            self._obstacles_t = time.time()
+            self._push("ours", [(float(b[0]), float(b[1]), float(b[2]),
+                                 float(b[3])) for b in blocked])
 
-    def _confirmed(self) -> list:
+    def set_suite(self, clusters: list) -> None:
+        """Take ADBSCAN's clusters, clipped to the arena and de-blobbed.
+
+        Ignored entirely unless OBSTACLE_SOURCE asks for them, so the topic can
+        be subscribed unconditionally and the decision stays in one place.
+
+        Clipping before the span test, not after: a cluster that runs from the
+        middle of the room into the far wall is 5 m wide uncut and a perfectly
+        reasonable 1.5 m once the part outside the patrol is removed. Refusing
+        it on its uncut width would throw away the half that matters.
+        """
+        if self.SOURCE == "ours" or clusters is None:
+            return
+        keep, wide, outside = [], 0, 0
+        for b in clusters:
+            x0 = max(float(b[0]), self.SUITE_X_MIN)
+            x1 = min(float(b[1]), self.SUITE_X_MAX)
+            y0 = max(float(b[2]), self.SUITE_Y_MIN)
+            y1 = min(float(b[3]), self.SUITE_Y_MAX)
+            if x1 - x0 <= 1e-6 or y1 - y0 <= 1e-6:
+                outside += 1
+                continue
+            if x1 - x0 > self.SUITE_MAX_SPAN or y1 - y0 > self.SUITE_MAX_SPAN:
+                wide += 1
+                continue
+            keep.append((x0, x1, y0, y1))
+        self._suite_wide += wide
+        self._suite_outside += outside
+        now = time.time()
+        if (wide or outside) and now - self._last_suite_log > 10.0:
+            self._last_suite_log = now
+            log.info("suite clusters: %d kept, %d refused as wider than "
+                     "%.1f m, %d outside the arena (cumulative %d / %d)",
+                     len(keep), wide, self.SUITE_MAX_SPAN, outside,
+                     self._suite_wide, self._suite_outside)
+        self._push("suite", keep)
+
+    def _push(self, source: str, boxes: list) -> None:
+        """Record one update from one source and rebuild the obstacle set."""
+        hist = self._history[source]
+        hist.append(boxes)
+        del hist[:-self.CONFIRM_OF]
+        self._src_t[source] = time.time()
+        self._recompute()
+
+    def _recompute(self) -> None:
+        """Confirm each source separately, then merge the union of them.
+
+        Confirmation per source and merging after, not the other way round. A
+        rectangle only one detector ever sees -- the near right pillar is
+        exactly that -- must be allowed to confirm against its own history;
+        pooling first would make it compete with the other source's updates and
+        it would never reach CONFIRM_MIN.
+
+        A source past STALE contributes nothing, so an optional service that
+        stops publishing fades out instead of freezing its last obstacles into
+        the patrol. Because of that the union can legitimately shrink to one
+        source's view while the other is down, which is the behaviour wanted.
+        """
+        now = time.time()
+        boxes, tags = [], []
+        for source in self._wanted():
+            if not self._history[source]:
+                continue
+            if now - self._src_t[source] > self.STALE:
+                continue
+            for box in self._confirmed(source):
+                boxes.append(box)
+                tags.append({source})
+        self._obstacles, self._obstacle_src = self._merge(boxes, tags)
+        # The freshest contributing source. Taking the oldest would expire the
+        # union as soon as the slower of the two lagged, and taking a fixed
+        # source would ignore whichever one is actually still talking.
+        live = [self._src_t[s] for s in self._wanted()
+                if self._history[s] and now - self._src_t[s] <= self.STALE]
+        self._obstacles_t = max(live) if live else 0.0
+
+    def _src_of(self, idx: int) -> str:
+        """The sources behind one merged rectangle, for the log line."""
+        if idx >= len(self._obstacle_src):
+            return "?"
+        return "+".join(sorted(self._obstacle_src[idx]))
+
+    def _wanted(self) -> tuple:
+        if self.SOURCE == "suite":
+            return ("suite",)
+        if self.SOURCE == "union":
+            return ("ours", "suite")
+        return ("ours",)
+
+    def _confirmed(self, source: str = "ours") -> list:
         """Only the footprints seen in several consecutive updates.
 
         Detections flicker: measured at 55 % of consecutive updates changing the
@@ -138,20 +279,21 @@ class Navigator:
         counts, which costs a fraction of a second of reaction time and removes
         the flicker entirely.
         """
-        if len(self._history) < self.CONFIRM_OF:
-            return list(self._history[-1]) if self._history else []
-        latest = self._history[-1]
+        hist = self._history[source]
+        if len(hist) < self.CONFIRM_OF:
+            return list(hist[-1]) if hist else []
+        latest = hist[-1]
         out = []
         for box in latest:
-            seen = sum(1 for past in self._history
+            seen = sum(1 for past in hist
                        if any(self._overlaps(box, q) for q in past))
             if seen >= self.CONFIRM_MIN:
                 out.append(box)
         if len(out) < len(latest):
-            log.info("ignoring %d unconfirmed footprint(s) of %d: seen in "
+            log.info("ignoring %d unconfirmed %s footprint(s) of %d: seen in "
                      "fewer than %d of the last %d updates",
-                     len(latest) - len(out), len(latest), self.CONFIRM_MIN,
-                     self.CONFIRM_OF)
+                     len(latest) - len(out), source, len(latest),
+                     self.CONFIRM_MIN, self.CONFIRM_OF)
         return out
 
     @staticmethod
@@ -174,8 +316,14 @@ class Navigator:
         self._escape_yaw = None
         self._blocked = False
 
-    def _merge(self, obs: list) -> list:
+    def _merge(self, obs: list, tags: list | None = None):
         """Fuse rectangles the robot cannot fit between.
+
+        Returns (rectangles, sources), the second being the set of sources that
+        contributed to each rectangle, in the same order. Merging across sources
+        is the point rather than a side effect: when both detectors see the same
+        table, one barrier comes out carrying both tags, and the robot goes
+        round it once.
 
         Two objects standing close together, a side table and a stool say, are
         two boxes to a detector but one barrier to a robot. Treated separately
@@ -189,6 +337,8 @@ class Navigator:
         """
         need = 2.0 * (self.ROBOT_HALF_WIDTH + self.GAP_CLEAR)
         items = [list(o) for o in obs]
+        marks = ([set(t) for t in tags] if tags is not None
+                 else [{"ours"} for _ in obs])
         changed = True
         while changed and len(items) > 1:
             changed = False
@@ -201,9 +351,31 @@ class Navigator:
                     # otherwise the robot cannot slip between them.
                     if max(gx, gy) >= need:
                         continue
-                    items[i] = [min(a_[0], b_[0]), max(a_[1], b_[1]),
-                                min(a_[2], b_[2]), max(a_[3], b_[3])]
+                    fused = [min(a_[0], b_[0]), max(a_[1], b_[1]),
+                             min(a_[2], b_[2]), max(a_[3], b_[3])]
+                    # The span guard has to survive the merge, or it does not
+                    # exist. Refusing their 3.8 x 2.2 m block one cluster at a
+                    # time is pointless if three of their sub-3 m clusters then
+                    # chain with one of ours and rebuild it: measured as a
+                    # 5.3 x 3.8 m barrier tagged ours+suite, 43 escapes and 5
+                    # "no way round" over three minutes, against 1 and 0 for
+                    # our footprints alone on the same scene.
+                    #
+                    # Only when a suite box is involved, so "ours" stays
+                    # bit-identical to the shipped demo -- our own footprints
+                    # merge into a 5.3 x 3.6 m barrier on this scene too, and
+                    # that one costs nothing because it lies along the far edge
+                    # rather than across the lane. This is not a claim that big
+                    # merges are wrong in general; it is that a source which
+                    # cannot separate objects must not be allowed to grow one.
+                    if ("suite" in marks[i] or "suite" in marks[j]) and (
+                            fused[1] - fused[0] > self.SUITE_MAX_SPAN
+                            or fused[3] - fused[2] > self.SUITE_MAX_SPAN):
+                        continue
+                    items[i] = fused
+                    marks[i] |= marks[j]
                     items.pop(j)
+                    marks.pop(j)
                     changed = True
                     break
                 if changed:
@@ -211,7 +383,7 @@ class Navigator:
         if len(items) < len(obs):
             log.info("merged %d footprints into %d: gaps narrower than %.2f m "
                      "are not gaps", len(obs), len(items), need)
-        return [tuple(o) for o in items]
+        return [tuple(o) for o in items], marks
 
     def _escape(self, pose: Pose, dt: float):
         """Command that gets the robot out of a footprint it is already inside.
@@ -324,7 +496,7 @@ class Navigator:
         # added to stayed in world y, so the shift pushed the robot INTO
         # obstacles on one leg out of two.
         push, blocking = 0.0, None
-        for x0, x1, y0, y1 in self._obstacles:
+        for idx, (x0, x1, y0, y1) in enumerate(self._obstacles):
             ox, oy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
             ahead = (ox - x) * dx
             # From the LANE, not from the robot. Measured from the robot, the
@@ -375,17 +547,20 @@ class Navigator:
             contribution = direction * want * float(np.clip(ramp, 0.0, 1.0))
             if abs(contribution) > abs(push):
                 push, blocking = contribution, (ox, oy, x1 - x0, ahead, side,
-                                                y1 - y0)
+                                                y1 - y0, self._src_of(idx))
         if blocking is None:
             self._detour_reason = ""
             return 0.0
         reason = f"{blocking[0]:.1f},{blocking[1]:.1f}"
         if reason != self._detour_reason:
             self._detour_reason = reason
-            log.info("obstacle %.1f x %.1f m at (%.1f, %.1f), %.1f m ahead, "
-                     "%+.2f m to the side: shifting the line %+.2f m",
+            # The source is named because it is the whole question the union is
+            # there to answer: a detour tagged "suite" is one our own perception
+            # would never have taken.
+            log.info("obstacle %.1f x %.1f m at (%.1f, %.1f) [%s], %.1f m "
+                     "ahead, %+.2f m to the side: shifting the line %+.2f m",
                      blocking[2], blocking[5], blocking[0], blocking[1],
-                     blocking[3], blocking[4], push)
+                     blocking[6], blocking[3], blocking[4], push)
         # Back into world coordinates before returning. The shift above is
         # measured along the travel normal, which points +y outbound and -y on
         # the way back; the caller adds it to a lane expressed as a plain y.
@@ -400,10 +575,13 @@ class Navigator:
             # problem to be solved.
             if self._blocked_reason != "no way round":
                 self._blocked_reason = "no way round"
-                log.warning("no way round: that obstacle needs a %.2f m detour "
-                            "and only %.2f m is available. Stopping. Move the "
-                            "furniture, raise DETOUR_MAX, or shorten the run "
-                            "with STOP_AT.", abs(push), self.DETOUR_MAX)
+                self._no_way_round += 1
+                log.warning("no way round (#%d): that obstacle [%s] needs a "
+                            "%.2f m detour and only %.2f m is available. "
+                            "Stopping. Move the furniture, raise DETOUR_MAX, "
+                            "or shorten the run with STOP_AT.",
+                            self._no_way_round, blocking[6], abs(push),
+                            self.DETOUR_MAX)
             self._blocked = True
             return capped
         self._blocked = False
