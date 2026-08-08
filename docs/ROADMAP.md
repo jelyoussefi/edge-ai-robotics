@@ -204,6 +204,14 @@ d'échantillons.
 **Le test de la chaise n'a pas été fait.** Il demande quelqu'un devant la
 machine pour poser une chaise sur le chemin.
 
+**Compte rendu complet : [`ETAPE-E2-NOTE.md`](ETAPE-E2-NOTE.md)** — le sélecteur
+par connexité, le balayage `min_samples` (leur 250 suffit, 10/10 en 4 ms), le
+couplage tolérance / accrochage et le tronçon d'approche, et le point de blocage
+réel : **la carte n'oublie rien**. L'occupation passe de 8 788 à 15 767 cellules
+en une session, et un tronçon planifié 5 fois sur 5 ne se planifie plus quarante
+minutes plus tard. Ce n'est pas un défaut du planificateur et c'est le premier
+travail de E3.
+
 ### E3. Donner l'autorité au planificateur, ou ne pas la donner
 
 C'est la seule phase qui change le comportement du robot, et elle n'est pas

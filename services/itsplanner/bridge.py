@@ -95,6 +95,9 @@ GOALS = [tuple(float(v) for v in g.split(","))
          for g in os.environ.get(
              "ITS_GOALS", "2.1,-1.9;4.6,-1.8;2.6,0.9").split(";") if g.strip()]
 GOAL_TOL = float(os.environ.get("GOAL_TOL", "0.45"))
+# Clearance the final approach segment must keep from occupied cells. The same
+# 0.22 m the costmap and the navigator use for the robot's half width.
+APPROACH_CLEAR = float(os.environ.get("ITS_APPROACH_CLEAR", "0.22"))
 
 
 class ItsPlannerBridge(Node):
@@ -269,10 +272,20 @@ class ItsPlannerBridge(Node):
             return
         pts = [(float(p.pose.position.x), float(p.pose.position.y))
                for p in path.poses]
+        goal = GOALS[self._goal_i]
+        # A one-pose path is the planner saying start and goal are the same
+        # node. Seed the approach from the ROBOT instead, so the last leg is
+        # still built and checked rather than the request being dropped.
+        if len(pts) < 2 and self._robot is not None:
+            pts = [self._robot[:2]]
+        pts, note = self._approach(pts, goal)
         if len(pts) < 2:
             self.get_logger().warning(
-                f"path has {len(pts)} pose(s), nothing to publish")
+                f"path has {len(pts)} pose(s) after approach ({note}), "
+                f"nothing to publish")
             return
+        if note:
+            self.get_logger().info("%s", note)
         self._got += 1
         length = sum(math.dist(a, b) for a, b in zip(pts, pts[1:]))
         clearance = self._clearance(pts)
@@ -292,6 +305,61 @@ class ItsPlannerBridge(Node):
                else "unknown (no map)")
             + f", to goal {self._goal_i + 1}/{len(GOALS)} "
             + f"{GOALS[self._goal_i]}")
+
+    def _segment_clear(self, a, b, need):
+        """Whether a straight segment keeps `need` metres from occupancy.
+
+        Sampled every half cell. Coarser would step over a single occupied cell,
+        which at 0.04 m is a table leg -- the exact thing this must not miss.
+        """
+        m = self._map
+        if m is None:
+            return False
+        occ = m["grid"] >= 50
+        if not occ.any():
+            return True
+        rows, cols = np.nonzero(occ)
+        ox = m["x0"] + cols * m["res"]
+        oy = m["y0"] + rows * m["res"]
+        n = max(2, int(math.dist(a, b) / (0.5 * m["res"])))
+        for t in np.linspace(0.0, 1.0, n):
+            x = a[0] + (b[0] - a[0]) * t
+            y = a[1] + (b[1] - a[1]) * t
+            if float(np.min(np.hypot(ox - x, oy - y))) < need:
+                return False
+        return True
+
+    def _approach(self, pts, goal):
+        """Extend a plan to the EXACT goal with a checked straight segment.
+
+        Why this exists. The roadmap places its nodes where it samples, so a
+        path ends at the node nearest the goal and starts at the node nearest
+        the robot -- 0.30 to 0.45 m off at each end, measured. That is tolerable
+        at the start and fatal at the end: goal 3 of the E2 acceptance failed
+        with the planner returning a path of ONE pose, its way of saying start
+        and goal fall on the same node and there is nothing to route between.
+        The tolerance and the node spacing are therefore not independent, and no
+        amount of sampling fixes it -- 2000 samples changed nothing.
+
+        So the last leg is ours, not theirs: a straight line from where their
+        plan ends to where the goal actually is, and it is CHECKED. If the map
+        says that line is not clear the plan is left alone and the robot stops
+        short, which is the honest outcome -- a planner that cannot reach a goal
+        should say so rather than have us draw the last metre for it.
+        """
+        if not pts:
+            return pts, "no plan"
+        gap = math.dist(pts[-1], goal)
+        if gap < 0.05:
+            return pts, ""
+        if not self._segment_clear(pts[-1], goal, APPROACH_CLEAR):
+            return pts, f"final {gap:.2f} m to the goal is not clear, stopping short"
+        n = max(2, int(gap / 0.05))
+        tail = [(pts[-1][0] + (goal[0] - pts[-1][0]) * t,
+                 pts[-1][1] + (goal[1] - pts[-1][1]) * t)
+                for t in np.linspace(0.0, 1.0, n)[1:]]
+        return pts + [(float(a), float(b)) for a, b in tail], \
+            f"final approach {gap:.2f} m appended"
 
     def _clearance(self, pts):
         """Smallest distance from any waypoint to an occupied cell.
