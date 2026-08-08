@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping suite-compare logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping suite-compare map-check logs ps shell clean distclean
 default: run
 
 help:
@@ -115,6 +115,22 @@ suite-compare:
 	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
 		-v $(PWD)/scripts:/scripts:ro \
 		perception /scripts/suite_compare.py $(ARGS)
+
+map-check:
+	@# No apostrophe in this message: `msg` expands into a shell single-quoted
+	@# string, so one turns the whole recipe line into an unterminated quote.
+	@$(call msg, Reading the accumulated FastMapping grid ...)
+	@# Same arrangement as suite-compare: inside a container to reach the bus
+	@# by name, script mounted rather than baked, because it is a measurement.
+	@# common/ is mounted too, not just the script. Adding a bus topic edits
+	@# common/edgebot/topics.py, which every service image has BAKED IN, and
+	@# this target rebuilds nothing -- so a fresh topic fails here with
+	@# AttributeError until an unrelated image is rebuilt. Mounting it makes the
+	@# measurement read the tree, which is what a measurement should do.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/opt/edgebot:ro \
+		perception /scripts/map_check.py $(ARGS)
 
 seg-test: $(IMAGES_STAMP)
 	@$(call msg, Running the segmentation model on the live camera feed ...)
