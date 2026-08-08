@@ -119,8 +119,13 @@ de comparaison (politique contre perception, validité par session, dérive
 temporelle) et le résultat de composition (chaînage, union, confirmation par
 source).
 
-Reste à y verser : les pièges NPU et MuJoCo listés ci-dessus, qui appartiennent
-à la partie « dispositifs » et n'ont pas encore de section.
+La section « dispositifs » (§6) est écrite et **mesurée**, pas reconstituée de
+mémoire : latence de la politique et du détecteur sur NPU / iGPU / CPU (la
+politique est 4× plus rapide sur CPU que sur NPU, le détecteur 22× plus rapide
+sur NPU que sur CPU), coût CPU par conteneur, épinglage pilote NPU 1.35.0 /
+`libze1` 1.28.2 avec son mode de panne, et les pièges MuJoCo / GLFW. Ce qui n'a
+pas pu être mesuré y est marqué comme tel : coût GPU par trame, attribution CPU
+dans `perception`, latence par trame, consommation, thermique.
 
 ---
 

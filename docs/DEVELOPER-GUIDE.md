@@ -657,7 +657,186 @@ like the new path quietly doing nothing.
 
 ---
 
-## 6. Checklist
+## 6. Devices: what each one is actually worth
+
+Everything below was measured on this board — Intel Core Ultra X7 358H, Arc B390
+iGPU, AI Boost NPU, OpenVINO 2026.2.0 — during the session that produced this
+guide. Where a figure is not instrumented it is marked **unmeasured** rather
+than estimated.
+
+### Model placement is a measurement, not a policy
+
+The project splits work CPU / iGPU / NPU by design. Two of the three placements
+were checked by timing the same model on all three devices, 500 iterations for
+the policy and 40 for the detector, after warm-up, inference only:
+
+**RL locomotion policy** (`walker.onnx`, input `[1, 99]`):
+
+| device | compile | median | p95 | min / max |
+|---|---|---|---|---|
+| NPU | 134 ms | 0.135 ms | 0.272 ms | 0.112 / 19.855 ms |
+| GPU | 1389 ms | 0.135 ms | 0.185 ms | 0.122 / 5.611 ms |
+| **CPU** | 86 ms | **0.034 ms** | **0.041 ms** | 0.032 / 0.587 ms |
+
+**The CPU is 4× faster than the NPU here, and the NPU's worst case is 34× its
+median.** For a 99-input MLP the dispatch overhead dominates: there is no
+arithmetic to amortise it against. At a 200 Hz control loop the budget is 5 ms
+and all three devices fit, so this is not a defect — but "the policy runs on the
+NPU" is a placement decision that buys nothing measurable, and the tail on a
+control path is a reason to look at it.
+
+**Detector** (`yolo11m-seg` FP16, input `[1, 3, 640, 640]`):
+
+| device | compile | median | p95 | min / max |
+|---|---|---|---|---|
+| NPU | 4.6 s | 13.6 ms | 25.5 ms | 11.6 / 28.2 ms |
+| **GPU** | 2.4 s | **9.7 ms** | 18.2 ms | 7.3 / 20.3 ms |
+| CPU | 0.5 s | 306.2 ms | 358.1 ms | 281.3 / 367.6 ms |
+
+Here the NPU earns its place — **22× faster than the CPU** — though the iGPU is
+faster still at 9.7 ms. The NPU is the right home anyway in this system, because
+the iGPU is simultaneously doing the compositing; the point is that the ranking
+was measured rather than assumed.
+
+**Inference is not the frame cost.** The running service reports **29–48 ms per
+frame, typically 31–33 ms**, against 13.6 ms of NPU inference. More than half
+the frame goes to pre- and post-processing — letterboxing, NMS, and assembling
+32 mask prototypes at 640×640.
+
+That shows up as CPU load. Three samples, 8 s apart, steady state:
+
+| container | CPU |
+|---|---|
+| perception | **1356 – 1401 %** (≈ 13.5–14 cores) |
+| compositor | 54 – 62 % |
+| source | 20 – 22 % |
+| sim | 8 – 9 % |
+
+**Offloading a model to the NPU does not make the service cheap.** The split
+between numpy post-processing and OpenVINO's own threads is **unmeasured** here;
+the total is not.
+
+### NPU driver and Level Zero pinning
+
+Installed and verified in the running containers:
+
+| package | version |
+|---|---|
+| `intel-driver-compiler-npu` | 1.35.0.20260722-29947505341~ubuntu24.04 |
+| `intel-fw-npu` | same |
+| `intel-level-zero-npu` | same |
+| **`libze1`** | **1.28.2-1~24.04~ppa1** |
+
+The loader is pinned by URL to a PPA snapshot, deliberately **not** taken from
+the graphics PPA that supplies the rest:
+
+```dockerfile
+# Level Zero loader v1.28.2, the version validated with NPU driver 1.35.0.
+RUN wget -q -O /tmp/libze1.deb \
+      https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/\
+20260606T100000Z/pool/main/l/level-zero-loader/libze1_1.28.2-1~24.04~ppa1_amd64.deb
+```
+
+**The failure mode is what makes this worth pinning.** A mismatched `libze1`
+**breaks the NPU while leaving the GPU working**. Nothing crashes and no error
+names the loader. What you see instead is OpenVINO reporting the device as
+unavailable and falling back — and if the fallback is silent, a model that
+appears to be running on the NPU has quietly been running on the CPU all along.
+That is not hypothetical: it is exactly what happened in the `sim` container
+before the driver was installed there, and the policy had been on the CPU
+throughout.
+
+Two defences, both cheap:
+
+1. **Log the device you actually got, not the one you asked for**, and log *why*
+   the fallback happened. The useful part of an OpenVINO error is at the end of
+   the chain — the first line is only `Exception from core.cpp:117` — so print
+   the last few lines plus `core.available_devices`.
+2. **Assert the runtimes at build time**, so a broken image fails in CI rather
+   than at 3 a.m.:
+
+   ```dockerfile
+   RUN ldconfig -p | grep -q libze_loader || { echo "ERROR: libze_loader missing"; exit 1; } \
+       && ldconfig -p | grep -q libOpenCL  || { echo "ERROR: libOpenCL missing";  exit 1; }
+   ```
+
+**Mount `/dev/accel`, not `/dev/dri`.** The NPU appears as `/dev/accel/accel0`
+(char device 261,0, group 992 here). Without it mounted, `OV_DEVICE=NPU`
+silently falls back to CPU — the same invisible failure as above. `/dev/dri`
+plus `group_add` for the render and video GIDs is what the *GPU* needs, and
+mounting only that is an easy way to think the NPU is configured when it is not.
+
+Do not bump these versions casually. The pin encodes a validated pair, and the
+symptom of breaking it is a performance regression with no error message.
+
+### GPU compositing cost
+
+The compositor sustains **30.0 fps**, flat, with `depth paired=True`. That is
+the camera's rate, not a limit it is fighting: raising the frame cap `MAX_FPS`
+from 60 to **240 left the rate at exactly 30.0 fps**, so the GL stage is
+comfortably inside the frame budget and the loop is paced by the camera stream.
+
+**The per-frame GPU cost itself is unmeasured.** There is no per-stage
+instrumentation in the render path, and `intel_gpu_top` is not installed on this
+host, so no busy-fraction is available either. What can be stated is the bound:
+under 33 ms per frame including the MuJoCo offscreen render, the composite
+shader and the readback, while sharing the iGPU with nothing else — the detector
+is on the NPU. Getting a real number means timing the GL stages with query
+objects, or installing `intel-gpu-tools`; neither was done.
+
+The CPU side of the same container is measured: **54–62 %** of one core, which
+includes the annotation work that has to happen CPU-side.
+
+### MuJoCo and GLFW gotchas
+
+**The depth buffer convention is not fixed — probe it.** On this driver
+MuJoCo's offscreen depth comes back **reversed**, background at 0.0 instead of
+1.0. Logged at startup:
+
+```
+MuJoCo offscreen depth format is 0x8cad, packed with stencil
+robot depth background reads 0.0000 -> REVERSED (far = 0) convention
+```
+
+Every depth comparison downstream depends on which one you have, so read a
+corner pixel — background by construction, so its value *is* the far value — and
+branch on it rather than hard-coding either convention.
+
+**Ask the driver what MuJoCo allocated, do not assume.** Blitting depth between
+framebuffers is only legal when the formats are **identical**; a mismatch fails
+with `GL_INVALID_OPERATION` while copying nothing, which looks like a black
+texture and not like an error. Assuming `DEPTH_COMPONENT24` left the depth
+texture at zero for the entire life of this project. Assuming
+`DEPTH24_STENCIL8` merely moved the error. The format here turns out to be
+`0x8cad` (`GL_DEPTH32F_STENCIL8`), packed with stencil — probe it.
+
+**GLX, not EGL.** `MUJOCO_GL=glx` is pinned because EGL fails here with a
+`gladLoadGL` error. That makes the compositor X11-only, which is what section 2
+is about.
+
+**With GLFW, CPU-side annotation must go through `gpu.present_image()`.** The
+overlay and patrol ring are drawn on the CPU copy, so that copy has to be what
+reaches the window; `present()` re-runs the shader from the GPU textures instead
+and would show an unannotated frame.
+
+**Cap the frame rate explicitly.** vsync may not throttle at all in a container
+GL context, and the loop will spin the GPU and CPU at hundreds of fps and slow
+the whole machine. `MAX_FPS` here is an explicit sleep, independent of vsync.
+
+### What is still unmeasured
+
+Stated plainly so nobody quotes a number that does not exist:
+
+- **Per-frame GPU cost** of the composite stage. Bounded under 33 ms, not
+  instrumented.
+- **CPU attribution inside `perception`**: post-processing versus OpenVINO
+  threads.
+- **Per-frame end-to-end latency** through the ROS bridges. The 28 / 41 / 49 /
+  52 ms figures in section 4 are aggregated, not per-frame round trips.
+- **Power draw**, per device or total. Never measured on this board.
+- **Thermal behaviour** over long runs. The longest measured pass here is 215 s.
+
+## 7. Checklist
 
 Adopting a suite brick, in the order that worked:
 
@@ -680,3 +859,6 @@ Adopting a suite brick, in the order that worked:
 11. Expect complementarity, not replacement. Guard the new path behind a
     default-off switch and measure the failure mode it introduces, not only the
     capability it adds.
+12. Time your models on every device before believing a placement. Pin the
+    accelerator runtimes, log the device you actually got, and mount the right
+    character device — the NPU's failure mode is silence, not an error.
