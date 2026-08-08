@@ -106,6 +106,22 @@ def group_match(ours, theirs, cover: float = 0.5, threshold: float = 0.3):
     first run. Grouped is now an upper bound on per-cluster by construction, and
     the gap between the two is the part of the disagreement that is granularity.
 
+    MEASURED, and the answer is negative. Two 60 s runs on the clipped arena:
+
+                              run 1        run 2
+      per-cluster rate         24%          19%
+      per-cluster overlap     0.44         0.45
+      grouped rate             24%          19%
+      grouped overlap         0.44         0.45
+      their clusters/group    1.03         1.02
+      our footprints/group    1.25         1.52
+
+    Grouping essentially never fires in their direction: the gap is not that
+    ADBSCAN cuts one object into pieces we drew whole. It is that the two sides
+    disagree on WHERE the obstacles are, which no merge rule can close. Both
+    blocks come out of the same run, so this comparison is internal and immune
+    to the cross-session floor drift of docs/ETAPE-B-RESULTS.md section 7.
+
     Returns (pairs, ours_only, theirs_ungrouped) where a pair is
     (our index, tuple of their indices, IoU against their union).
     """
