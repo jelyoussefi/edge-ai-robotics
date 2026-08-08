@@ -1054,6 +1054,13 @@ SHOW_FLOOR_AT_START = os.environ.get("SHOW_FLOOR", "0") not in ("", "0")
 # Initial state of the 'p' cloud display: 0 off, 1 over the video, 2 cloud
 # alone. Same purpose as SHOW_FLOOR -- a capture with no keyboard.
 SHOW_CLOUD_AT_START = int(os.environ.get("SHOW_CLOUD", "0") or 0)
+# How much of the occupancy grid is worth drawing. The grid is 20 m square and
+# the room is 7; a floor-plane projection piles everything beyond the far wall
+# onto the horizon, so an unbounded draw was a solid magenta band across the
+# frame -- 14 000 cells, most of them never measured by any depth camera. Same
+# bounds as GF_X_MAX and the bridges' impossible-return filter.
+MAP_DRAW_X_MAX = float(os.environ.get("MAP_DRAW_X_MAX", "8.0"))
+MAP_DRAW_Y_ABS = float(os.environ.get("MAP_DRAW_Y_ABS", "4.0"))
 # ADBSCAN's clusters are drawn only when the navigator is actually acting on
 # them. Read from the same OBSTACLE_SOURCE the sim reads, so the picture cannot
 # claim an input the robot is ignoring -- the whole point of the overlay is to
@@ -1271,6 +1278,67 @@ def _cloud_to_pixels(cam_h, pitch_deg, fx, fy, ppx, ppy, xyz, w, h):
     return u.astype(np.int32), v.astype(np.int32), ok
 
 
+def _draw_map(out, m, cam_h, pitch_deg, fx, fy, ppx, ppy, show_free):
+    """Draw FastMapping's occupancy grid on the floor plane. Returns cells drawn.
+
+    Its own key rather than a fourth `p` state. `p` cycles a point cloud that is
+    recomputed every frame and means "right now"; this is an accumulated map and
+    means "everything seen so far", and the two are useful AT THE SAME TIME --
+    the interesting question is what the map holds that the current frame does
+    not. Folding it into the same cycle would make them mutually exclusive.
+
+    Cells are ground squares, so they go through _cloud_to_pixels with z = 0,
+    which is the same projection as the floor outlines reduced to the floor
+    plane -- not a second path that could drift from it.
+
+    Drawn as dots at the cell centre rather than as filled quads. A 0.04 m cell
+    is under two pixels at the far wall and about six near the camera, so a quad
+    per cell would be 4000 cv2 calls a frame for something a dot expresses; the
+    grid reads as a surface anyway because the cells are contiguous.
+    """
+    grid = m["grid"]
+    res = m["res"]
+    sel = grid >= 50
+    if show_free:
+        sel = sel | (grid == 0)
+    if not sel.any():
+        return 0
+    rows, cols = np.nonzero(sel)
+    xs = m["x0"] + cols * res
+    ys = m["y0"] + rows * res
+    # Bounded to the room before projecting. The grid is 20 m square and a
+    # floor-plane projection compresses everything far away onto the horizon:
+    # unbounded, 14 000 cells drew a solid magenta band across the middle of
+    # the frame, most of it cells at 10-20 m that no depth camera measured.
+    # Same bounds as the impossible-return filter the bridges already use.
+    near = (xs > 0.0) & (xs < MAP_DRAW_X_MAX) & (np.abs(ys) < MAP_DRAW_Y_ABS)
+    if not near.any():
+        return 0
+    rows, cols, xs, ys = rows[near], cols[near], xs[near], ys[near]
+    xyz = np.empty((len(rows), 3), np.float32)
+    xyz[:, 0] = xs
+    xyz[:, 1] = ys
+    xyz[:, 2] = 0.0
+    u, v, ok = _cloud_to_pixels(cam_h, pitch_deg, fx, fy, ppx, ppy, xyz,
+                                out.shape[1], out.shape[0])
+    if not ok.any():
+        return 0
+    occupied = (grid[rows, cols] >= 50)[ok]
+    u, v = u[ok], v[ok]
+    # Free first, occupied on top: where the map holds both at one pixel -- the
+    # near field, where several cells fall inside one pixel -- the obstacle is
+    # the one worth seeing.
+    for is_occ, colour in ((False, (90, 90, 90)), (True, (255, 0, 200))):
+        pick = occupied if is_occ else ~occupied
+        if not pick.any():
+            continue
+        uu, vv = u[pick], v[pick]
+        for dv in (0, 1):
+            for du in (0, 1):
+                out[vv + dv, uu + du] = colour
+    return int(ok.sum())
+
+
 def _draw_cloud(out, xyz, labels, cam_h, pitch_deg, fx, fy, ppx, ppy,
                 ground_label, obstacle_label):
     """Draw the suite's labelled cloud as 2 px dots. Returns points drawn.
@@ -1301,6 +1369,41 @@ def _draw_cloud(out, xyz, labels, cam_h, pitch_deg, fx, fy, ppx, ppy,
             for du in (0, 1):
                 out[vv + dv, uu + du] = colour
     return int(ok.sum())
+
+
+def _map_caption(out, m, cells, ms, age, mode) -> None:
+    """Coverage, draw cost and AGE of the map, top right.
+
+    Age is on screen and the other overlays do not have it, because this is the
+    one that survives its producer: with the map latched and never expired, a
+    frozen map and a live one look identical. The number says which it is.
+    """
+    total = m["grid"].size
+    known = m["known"]
+    lines = [f"suite map: {known} of {total} cells known "
+             f"({100.0 * known / max(1, total):.1f}%), {m['occupied']} occupied",
+             f"{cells} drawn, {m['res']:.2f} m cells, draw {ms:.1f} ms/frame",
+             f"last update {age:.0f} s ago   mode {mode}/2 ('m')"]
+    y = 24
+    for text in lines:
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        x = out.shape[1] - tw - 12
+        cv2.putText(out, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+        y += 20
+    x = out.shape[1] - 150
+    for label, colour in ((" occupied", (255, 0, 200)),
+                          (" free", (90, 90, 90))):
+        if colour == (90, 90, 90) and mode != 2:
+            continue
+        cv2.rectangle(out, (x, y - 9), (x + 10, y - 1), colour, -1)
+        cv2.putText(out, label, (x + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, label, (x + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    colour, 1, cv2.LINE_AA)
+        x += 90
 
 
 def _cloud_caption(out, drawn, total, ms, mode) -> None:
@@ -1993,7 +2096,8 @@ def main() -> None:
     # shape with an env var.
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
                       topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR,
-                      topics.SUITE_CLOUD, topics.SUITE_CLUSTERS])
+                      topics.SUITE_CLOUD, topics.SUITE_CLUSTERS,
+                      topics.SUITE_MAP])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -2009,6 +2113,12 @@ def main() -> None:
     _diag_written = 0           # diagnostic PNGs written so far, capped above
     # 'p' cycles: 0 off, 1 cloud over the video, 2 cloud alone on black.
     cloud_mode = SHOW_CLOUD_AT_START
+    # 'm' cycles: 0 off, 1 occupied cells only, 2 occupied plus free. Kept
+    # separate from cloud_mode on purpose -- see _draw_map.
+    map_mode = int(os.environ.get("SHOW_MAP", "0") or 0)
+    suite_map = None
+    suite_map_t = 0.0
+    _map_seen = 0
     cloud_xyz = None
     cloud_lab = None
     cloud_total = 0
@@ -2045,7 +2155,8 @@ def main() -> None:
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
              2.0 * np.degrees(np.arctan(240.0 / fy)))
-    prev_keys = {"r": False, "f": False, "h": False, "s": False, "p": False}
+    prev_keys = {"r": False, "f": False, "h": False, "s": False,
+                 "p": False, "m": False}
     show_scale = False   # 'h' draws the horizon and the expected robot height
     # The walkable region is republished periodically: the floor the camera sees
     # is what bounds the robot, and it is cheap to keep in step with the scene.
@@ -2119,6 +2230,33 @@ def main() -> None:
                 # cheaper than once per frame.
                 suite_clusters = _navigator_clusters(payload.get("blocked"))
                 suite_clusters_t = time.time()
+                continue
+
+            if topic == topics.SUITE_MAP:
+                # Reshaped once here rather than per frame: the grid is 250 k
+                # cells and arrives at 1 Hz against a 30 Hz display. NOT aged
+                # out like the others -- an accumulated map stays true after the
+                # producer stops, which is the entire reason it exists, so a
+                # stale map is still the best answer available.
+                try:
+                    _w, _h = int(payload["w"]), int(payload["h"])
+                    suite_map = {
+                        "grid": np.frombuffer(payload["grid"],
+                                              np.int8).reshape(_h, _w),
+                        "res": float(payload["res"]),
+                        "x0": float(payload["x0"]),
+                        "y0": float(payload["y0"]),
+                        "known": int(payload.get("known", 0)),
+                        "occupied": int(payload.get("occupied", 0)),
+                    }
+                    if _map_seen == 0:
+                        log.info("first occupancy grid: %dx%d at %.3f m, "
+                                 "%d cell(s) known", _w, _h,
+                                 suite_map["res"], suite_map["known"])
+                    _map_seen += 1
+                    suite_map_t = time.time()
+                except Exception as exc:
+                    log.warning("bad occupancy grid (%s)", exc)
                 continue
 
             if topic == topics.SUITE_CLOUD:
@@ -2304,6 +2442,18 @@ def main() -> None:
                 cloud_ms = (time.perf_counter() - _t0) * 1000.0
                 _cloud_caption(out, _cloud_drawn, cloud_total, cloud_ms,
                                cloud_mode)
+
+            # The accumulated map, after the cloud and before the outlines, so
+            # a floor contour stays readable over it. Composable with the cloud
+            # rather than exclusive of it: seeing where the map holds cells the
+            # current frame does not is the point of having both.
+            if map_mode and suite_map is not None:
+                _t0 = time.perf_counter()
+                _cells = _draw_map(out, suite_map, cam_height, _cam_pitch_deg,
+                                   fx, fy, ppx, ppy, map_mode == 2)
+                _map_caption(out, suite_map, _cells,
+                             (time.perf_counter() - _t0) * 1000.0,
+                             time.time() - suite_map_t, map_mode)
                 _annotated = True
             _annotated = _draw_overlays(
                 out, ov, show_floor and cloud_mode != 2, show_seg, floor_det,
@@ -2319,10 +2469,18 @@ def main() -> None:
         # raise and could never run. Gated on a count rather than a frame list:
         # every diagnostic frame is a full-size PNG, and the old list fired on
         # any run that happened to reach frame 30.
-        if _diag_written < DIAG_FRAMES and _annotated:
+        if _diag_written < DIAG_FRAMES and _annotated and (
+                not map_mode or suite_map is not None):
             # Only annotated frames are worth keeping -- an unannotated one is
             # the composite the window already shows. Waiting for _annotated
             # also means the overlays have had a chance to appear.
+            #
+            # And when the map overlay is on, wait for the map too. The floor
+            # overlay annotates from about 13 s after startup and the first
+            # occupancy grid arrives at about 15 s, so a scripted capture
+            # reliably wrote three frames with everything EXCEPT the map on
+            # them -- and nothing in the image says a frame is missing a layer
+            # that was asked for.
             _write_diagnostics(_diag_written + 1, gpu, out, data, model, scn,
                                cam, mjr, cam_height, _cam_pitch_deg,
                                fy, ppy, depth_metres, bg)
@@ -2368,6 +2526,13 @@ def main() -> None:
             _h = glfw.get_key(window, glfw.KEY_H) == glfw.PRESS
             _s = glfw.get_key(window, glfw.KEY_S) == glfw.PRESS
             _p = glfw.get_key(window, glfw.KEY_P) == glfw.PRESS
+            _m = glfw.get_key(window, glfw.KEY_M) == glfw.PRESS
+            if _m and not prev_keys.get("m"):
+                map_mode = (map_mode + 1) % 3
+                log.info("suite map display: %s%s",
+                         ("off", "occupied cells", "occupied and free")[map_mode],
+                         "" if suite_map is not None else
+                         " (nothing received: is fastmapping running?)")
             if _p and not prev_keys["p"]:
                 cloud_mode = (cloud_mode + 1) % 3
                 log.info("suite cloud display: %s%s",
@@ -2389,7 +2554,7 @@ def main() -> None:
                          "" if seg_mask is not None else
                          " (no mask received: is the model a -seg one?)")
             (prev_keys["r"], prev_keys["f"], prev_keys["h"], prev_keys["s"],
-             prev_keys["p"]) = _r, _f, _h, _s, _p
+             prev_keys["p"], prev_keys["m"]) = _r, _f, _h, _s, _p, _m
         elif DISPLAY_MODE == "cv2":
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):

@@ -213,6 +213,12 @@ services:
       # video, 2 nuage seul. Les deux etiquettes viennent des memes variables
       # que le pont, pour qu'elles ne puissent pas diverger.
       SHOW_CLOUD: ${SHOW_CLOUD:-0}
+      # Etat initial de la carte FastMapping sous 'm' : 0 rien, 1 les cellules
+      # occupees, 2 occupees et libres. Meme role que SHOW_FLOOR et SHOW_CLOUD,
+      # une capture scriptable sans clavier. Touche distincte de 'p' : le nuage
+      # dit "maintenant" et la carte "tout ce qui a ete vu", et les deux servent
+      # en meme temps.
+      SHOW_MAP: ${SHOW_MAP:-0}
       GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
       GF_OBSTACLE_LABEL: ${GF_OBSTACLE_LABEL:-5}
       # Meme valeur que pour le sim, sinon la superposition affirmerait une
