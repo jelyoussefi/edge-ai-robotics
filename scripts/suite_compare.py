@@ -293,9 +293,58 @@ def clip_to_arena(boxes, arena=ARENA):
     return out, outside
 
 
+def spot_map(records, frames: int, radius: float = 0.5):
+    """Group unmatched rectangles by where they are. Returns a list of spots.
+
+    The per-frame counts say how MANY rectangles neither side could pair. They
+    cannot say whether that is one stable object each side keeps missing or a
+    different piece of noise every frame, and those two call for opposite
+    responses. This separates them: a spot recurring in 90% of frames is an
+    object, a spot at 5% is a flicker.
+
+    Leader clustering on the centre rather than k-means or single-link. k-means
+    needs a k we do not know, and single-link chains along a wall -- exactly the
+    failure ADBSCAN itself has here, which would be an unfortunate way to
+    measure it. `radius` is 0.5 m, under the smallest gap between the real
+    objects in this room and over the frame-to-frame jitter of either detector.
+
+    Persistence counts DISTINCT frames, not rectangles: two fragments of one
+    object in one frame must not read as twice the persistence.
+    """
+    spots = []
+    for frame, b in records:
+        cx, cy = 0.5 * (b[0] + b[1]), 0.5 * (b[2] + b[3])
+        best, best_d = None, radius
+        for s in spots:
+            d = ((cx - s["cx"]) ** 2 + (cy - s["cy"]) ** 2) ** 0.5
+            if d < best_d:
+                best, best_d = s, d
+        if best is None:
+            best = {"cx": cx, "cy": cy, "n": 0, "frames": set(),
+                    "w": [], "h": [], "x0": [], "x1": [], "y0": [], "y1": []}
+            spots.append(best)
+        best["n"] += 1
+        best["frames"].add(frame)
+        best["cx"] += (cx - best["cx"]) / best["n"]
+        best["cy"] += (cy - best["cy"]) / best["n"]
+        best["w"].append(b[1] - b[0])
+        best["h"].append(b[3] - b[2])
+        for k, v in zip(("x0", "x1", "y0", "y1"), b):
+            best[k].append(v)
+    md = lambda xs: sorted(xs)[len(xs) // 2]
+    for s in spots:
+        s["persistence"] = len(s["frames"]) / frames if frames else 0.0
+        s["med_w"], s["med_h"] = md(s["w"]), md(s["h"])
+        s["span"] = (md(s["x0"]), md(s["x1"]), md(s["y0"]), md(s["y1"]))
+    spots.sort(key=lambda s: -s["persistence"])
+    return spots
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seconds", type=float, default=30.0)
+    ap.add_argument("--unmatched", action="store_true",
+                    help="carte des rectangles non apparies, par emplacement")
     args = ap.parse_args()
 
     sub = Subscriber([topics.PATROL_ROI, topics.GROUNDFLOOR_OBSTACLES,
@@ -310,6 +359,10 @@ def main() -> int:
     # Groupe : plusieurs-vers-un, dans les deux sens. `t_in_o` groupe leurs
     # clusters dans nos empreintes, `o_in_t` fait l'inverse.
     grp_t_in_o, grp_o_in_t = [], []
+    # (numero de trame, rectangle) pour chaque rectangle non apparie, les deux
+    # cotes. Le numero de trame est l'index dans clu_samples : c'est le meme
+    # denominateur que le taux d'appariement rapporte plus haut.
+    un_ours, un_theirs = [], []
     theirs_seen, floor_seen, clu_seen = 0, 0, 0
     deadline = time.time() + args.seconds
     print(f"  ecoute pendant {args.seconds:.0f} s ...")
@@ -348,6 +401,9 @@ def main() -> int:
             a_ours, out_ours = clip_to_arena(ours)
             a_theirs, out_theirs = clip_to_arena(clusters)
             cp, c_only_a, c_only_b = match(a_ours, a_theirs)
+            frame = len(clu_samples)
+            un_ours.extend((frame, a_ours[i]) for i in c_only_a)
+            un_theirs.extend((frame, a_theirs[j]) for j in c_only_b)
             clu_samples.append((len(a_ours), len(a_theirs), len(cp)))
             clu_counts.append((len(c_only_a), len(c_only_b)))
             clu_outside.append((out_ours, out_theirs))
@@ -492,6 +548,57 @@ def main() -> int:
                  "nos empreintes", "clusters")
             _grp(grp_o_in_t, "nos empreintes groupees dans leurs clusters",
                  "leurs clusters", "empreintes")
+
+        # Nommer le desaccord. Les compteurs disent combien de rectangles
+        # personne n'apparie ; ils ne disent pas si c'est toujours le meme.
+        #
+        # MESURE, 60 s, 509 trames, arene rognee (taux par cluster 16%) :
+        #
+        #   nous seulement    98%  (5.80, -1.99)  1.40 x 1.21  cuisine du fond
+        #                     41%  (3.48,  1.03)  2.64 x 0.96  table a manger
+        #                     29%  (4.44,  1.04)  4.19 x 0.71  la meme, etendue
+        #   eux seulement     60%  (3.99, -0.52)  5.00 x 4.10  TOUTE L'ARENE
+        #                     19%  (4.58, -1.40)  3.81 x 2.43  moitie droite
+        #                     15%  (4.00, -1.37)  4.99 x 2.52  moitie droite
+        #                     14%  (2.10, -1.11)  1.19 x 1.09  pilier + comptoir
+        #
+        # Leur cote n'est pas un jeu d'objets. Cinq de leurs six emplacements
+        # font plus de 2.4 m dans une dimension et couvrent la moitie de
+        # l'arene : c'est UN amas, redecoupe autrement d'une trame a l'autre.
+        # Le rognage de bridge.py a retire les murs, pas le chainage.
+        #
+        # C'est aussi pourquoi le groupage plus haut ne rattrape rien. Il
+        # suppose que leurs rectangles sont plus PETITS que les notres, des
+        # morceaux a recoller ; ils sont plus GRANDS. Le seul cas d'objet reel
+        # vu des deux cotes avec des tailles differentes est le pilier proche a
+        # droite : 0.40 x 0.44 chez nous, 1.19 x 1.09 chez eux, centres a 0.53 m
+        # l'un de l'autre -- juste au-dela du rayon de regroupement.
+        if args.unmatched:
+            def _spots(records, label):
+                spots = spot_map(records, len(clu_samples))
+                print(f"\n      {label}")
+                if not spots:
+                    print("        aucun")
+                    return
+                print("        persist.  centre (x, y)   taille       "
+                      "etendue x / y")
+                for s in spots:
+                    if s["persistence"] < 0.05:
+                        continue
+                    x0, x1, y0, y1 = s["span"]
+                    print(f"        {s['persistence']:6.0%}   "
+                          f"{s['cx']:5.2f}, {s['cy']:5.2f}   "
+                          f"{s['med_w']:4.2f} x {s['med_h']:4.2f}   "
+                          f"{x0:4.2f}-{x1:4.2f} / {y0:5.2f}-{y1:5.2f}")
+                weak = sum(1 for s in spots if s["persistence"] < 0.05)
+                if weak:
+                    print(f"        (+ {weak} emplacements sous 5%, du "
+                          f"scintillement)")
+
+            print("\n    CARTE DES NON APPARIES (regroupes a 0.5 m, "
+                  f"{len(clu_samples)} trames)")
+            _spots(un_ours, "vus par nous seulement")
+            _spots(un_theirs, "vus par eux seulement")
 
         print("\n    HORS ARENE (rectangles entierement dehors, ecartes)")
         print(f"      ce projet : {cavg([c[0] for c in clu_outside]):.1f} "
