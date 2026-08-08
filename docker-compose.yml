@@ -545,8 +545,13 @@ services:
       # Trois buts distincts, enchaines a mesure qu'ils sont atteints.
       ITS_GOALS: ${ITS_GOALS:-2.1,-1.9;4.6,-1.8;2.6,0.9}
       GOAL_TOL: ${GOAL_TOL:-0.45}
+      ITS_MIN_SAMPLES: ${ITS_MIN_SAMPLES:-250}
     volumes:
       - ./config:/config:ro
+      # Monte pour scripts/its_sweep.py, qui doit s'executer DANS ce conteneur :
+      # c'est un client d'action de planner_server, et le but est de mesurer le
+      # planificateur tel qu'il est configure, pas de le reimplementer.
+      - ./scripts:/scripts:ro
 
   recorder:
     build:

@@ -21,7 +21,29 @@ planner_server:
       buffer_size: 10
       build_road_map_once: True
       enable_k: False
-      min_samples: 250
+      # Rendered by entrypoint.sh from ITS_MIN_SAMPLES. A template because this
+      # is read in configure() and the roadmap is built once
+      # (build_road_map_once), so it cannot be changed with `ros2 param set` on
+      # a running planner -- sweeping it means restarting the node.
+      #
+      # SWEPT, and the answer is that their 250 is already enough. Ten planning
+      # attempts on the corridor leg that failed during the first E2 run,
+      # (6.10, 0.42) -> (4.14, -1.34), at each sample count:
+      #
+      #   min_samples   success   plan time (median / max)   length
+      #        250       10/10          4 ms / 5 ms          2.18 m
+      #        500       10/10          3 ms / 6 ms          2.18 m
+      #       1000       10/10          3 ms / 4 ms          2.18 m
+      #       2000       10/10          5 ms / 7 ms          2.18 m
+      #
+      # Identical success, identical path, and the time differences are noise
+      # at this scale. Roadmap density was NOT what made goal 2 unreachable,
+      # and raising it would have bought nothing while looking like a fix. Kept
+      # at their value. The real suspect is the map: FastMapping accumulates and
+      # never clears, so occupancy only ever grows -- 8788 to 10278 cells within
+      # one session here -- and a leg that plans at one moment can be blocked
+      # later by a person who walked through and was burned in permanently.
+      min_samples: @MIN_SAMPLES@
       roadmap: "PROBABILISTIC"
       w: 32
       h: 32

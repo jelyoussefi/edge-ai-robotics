@@ -21,8 +21,14 @@ set -euo pipefail
 
 source /opt/ros-env.sh
 
-PARAMS=/app/params.yaml
-echo "itsplanner: planner_server + global costmap on /world/map" >&2
+# min_samples is the roadmap's sample count. Rendered rather than fixed because
+# it is read in configure() and the roadmap is built once, so a sweep has to
+# restart the node -- see docs, and scripts/its_sweep.py which measures it.
+MIN_SAMPLES="${ITS_MIN_SAMPLES:-250}"
+PARAMS=/tmp/its_params.yaml
+sed "s/@MIN_SAMPLES@/${MIN_SAMPLES}/" /app/params.yaml.in > "$PARAMS"
+echo "itsplanner: planner_server + global costmap on /world/map, " \
+     "min_samples=${MIN_SAMPLES}" >&2
 
 python3 /app/bridge.py &
 BRIDGE=$!
