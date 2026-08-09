@@ -627,10 +627,10 @@ services:
     restart: unless-stopped
 
   # Charge et puissance des trois moteurs, pour le panneau Platform de la
-  # console. Un service a part et pas un fil dans `web` : il lit /proc et /sys
-  # de l'HOTE, ce qui demande des montages et le compte root, et la console n'a
-  # aucune raison d'avoir l'un ou l'autre. Ce qui n'est pas expose par ce pilote
-  # (puissance iGPU, puissance NPU) part en null et s'affiche comme tel.
+  # console. Un service a part et pas un fil dans `web` : il lance des binaires
+  # privilegies (PCM lit les MSR) et il faut lui donner des capabilities que la
+  # console, exposee sur le LAN et sans authentification, ne doit surtout pas
+  # avoir. La separation est le point.
   telemetry:
     build:
       context: .
@@ -639,42 +639,38 @@ services:
     environment:
       <<: *bus-env
       TELEMETRY_PERIOD: ${TELEMETRY_PERIOD:-1.0}
+      # PCM et qmassa coutent ~1,3 s et ~2 s par mesure : ils tournent sur
+      # leurs propres fils, derriere le verrou PMU, a cette periode-la. La
+      # publication reste a TELEMETRY_PERIOD avec la derniere valeur connue.
+      PMU_PERIOD: ${PMU_PERIOD:-2.0}
     volumes:
-      # Tout en lecture seule. powercap porte les compteurs RAPL, en 0400
-      # root:root depuis CVE-2020-8694, d'ou le conteneur en root ; drm porte le
-      # compteur d'inactivite du GT xe et la frequence ; accel porte le temps
-      # occupe du NPU. /proc/stat est deja celui de l'hote, le conteneur ne
-      # changeant pas de namespace PID pour les compteurs globaux.
-      # /sys/class/* ne contient que des liens symboliques vers /sys/devices.
-      # Monter /sys/devices en bloc ne suffit pas : le bind n'est pas recursif,
-      # et le sous-arbre powercap arrive vide. On monte donc le repertoire reel
-      # en plus des liens, sinon energy_uj est introuvable et la puissance
-      # passerait pour "non exposee" alors qu'elle est seulement non montee -
-      # exactement la confusion que ce panneau doit eviter.
-      - /sys/class/powercap:/sys/class/powercap:ro
-      - /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro
+      # PCM : les MSR, un noeud par coeur. En rw, il ecrit dans certains MSR.
+      - /dev/cpu:/dev/cpu:rw
+      # qmassa : decouverte du BDF PCI du GPU Intel (pilote xe, tile*/gt*).
       - /sys/class/drm:/sys/class/drm:ro
+      # NPU : temps occupe, frequence, memoire. Pas de compteur d'energie.
       - /sys/class/accel:/sys/class/accel:ro
-    # Docker masque /sys/devices/virtual/powercap par un tmpfs vide en lecture
-    # seule, par defaut, a cause du canal auxiliaire de puissance RAPL
-    # (CVE-2020-8694) : le montage ci-dessus est bien applique, puis recouvert.
-    # Sans ceci la puissance paquet est introuvable et le panneau l'annoncerait
-    # comme "non exposee par ce pilote", ce qui serait faux - elle est exposee,
-    # c'est le runtime qui la cache. On demasque donc, plutot que de mentir ou
-    # de passer le conteneur en privileged : il ne fait que lire du sysfs monte
-    # en lecture seule.
-    # Les DEUX sont necessaires, verifie : systempaths retire le masque tmpfs,
-    # et le profil AppArmor par defaut de Docker refuse encore la lecture de
-    # energy_uj ensuite (Permission denied alors que le conteneur est root et
-    # que le fichier est en 0400 root:root). Sans apparmor=unconfined la
-    # puissance reste illisible. Portee au seul conteneur telemetry, qui ne
-    # fait que lire du sysfs monte en lecture seule.
-    #
-    # Si un operateur prefere ne pas desserrer cela, il enleve ces deux lignes :
-    # le collecteur distingue alors "bloque par le runtime" de "non expose par
-    # le pilote" et le panneau affiche la vraie raison, sans jamais inventer 0 W.
+    devices:
+      - /dev/dri:/dev/dri
+    # Ouvrir /dev/cpu/N/msr echoue en EPERM sans ceci, meme en root et meme le
+    # noeud monte : c'est le cgroup device qui refuse le caractere majeur 202.
+    # Regle ciblee plutot que privileged.
+    device_cgroup_rules:
+      - 'c 202:* rmw'
+    # Le binaire pcm porte ses file capabilities (setcap +ep dans le
+    # Dockerfile), mais une file capability ne peut accorder que ce que
+    # l'ensemble BOUNDING du conteneur contient deja. Sans ces trois, execve
+    # echoue en rc=126 "Operation not permitted" sans nommer la cause.
+    # Mesure : qmassa n'a besoin d'aucune des trois.
+    cap_add:
+      - SYS_RAWIO
+      - SYS_ADMIN
+      - DAC_OVERRIDE
+    # Necessaire pour PCM seul, verifie en le retirant : avec les capabilities
+    # et la regle cgroup mais le profil AppArmor par defaut, pcm sort en rc=1.
+    # qmassa fonctionne sans. systempaths=unconfined n'est plus utile depuis
+    # que la puissance vient de PCM et non de /sys/class/powercap.
     security_opt:
-      - systempaths=unconfined
       - apparmor=unconfined
     restart: unless-stopped
 

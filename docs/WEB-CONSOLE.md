@@ -156,117 +156,217 @@ precisely so they never go through msgpack as floats. The stream went from
 1 frame per client to **30.1 fps, 2.17 MB/s**, and frame age from -46 s to
 0.01 s.
 
-## 4. Status panel
+## 4. Layout
 
-Deliberately carries **no frame count, frame age or encode time**. Those
-describe the console's own plumbing; a viewer wants to know what the robot is
-doing. They remain measurable — the compositor logs the encode cost and
-`make web-latency` reads the stamp.
+Three columns inside one viewport-height shell: **Status left, video centre,
+Platform right**. No panel titles — the rows label themselves, and a heading
+saying "Status" above rows that obviously are status is a line of pixels the
+video could have had.
 
-What is shown: obstacle source, nav mode, map cells known and occupied, active
-goal, planned path length, clearance, robot position, stream resolution.
+**It must fit at any zoom, with no scrollbars.** Browser zoom shrinks the CSS
+viewport, so a layout that fits at 100 % and overflows at 150 % was measured in
+pixels somewhere. Nothing here is:
 
-## 5. Platform panel
+- the shell is `100%` height with `overflow:hidden`, a flex column;
+- `main` is `grid-template-columns: minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr)`
+  — `minmax(0,Nfr)` and not `Nfr`, so a column may be **narrower than its
+  content** instead of pushing the grid past the viewport, which is exactly what
+  creates a scrollbar at high zoom;
+- every column and panel carries `min-height:0`, without which a grid or flex
+  child refuses to shrink below its content;
+- text is `clamp(9px, 1.05vmin, 15px)` and all spacing is in `em`, so the panels
+  scale with the viewport rather than fighting it;
+- the video is `width:100%; height:100%; object-fit:contain` — not `max-width`
+  with `auto`, which refuses to scale a 1280x720 composite **up** and left it
+  sitting at native size in the middle of an empty column on a large screen.
 
-CPU, GPU and NPU load and power, from a small `telemetry` service publishing
-`platform.telemetry` at 1 Hz. Gauges and 60 s sparklines are hand-written inline
-SVG — an arc and a polyline — with no charting library.
+Verified in headless Chrome at three zoom levels, emulated as the CSS viewport a
+1920x1080 screen presents at each:
 
-Read straight from sysfs. `qmassa` and `intel_gpu_top` read the same attributes;
-going through one would add a binary, a parser and another thing that can be
-absent, for no extra measurement.
+| zoom | CSS viewport | scrollbars | video | status | platform |
+|---|---|---|---|---|---|
+| 50 % | 3840x2160 | none | 2244x2060, fully in view | fully in view | fully in view |
+| 100 % | 1920x1080 | none | 1115x1004, fully in view | fully in view | fully in view |
+| 150 % | 1280x720 | none | 741x659, fully in view | fully in view | fully in view |
 
-| reading | source | this board |
-|---|---|---|
-| CPU busy, total and per thread | `/proc/stat` | yes |
-| Package / core / uncore / dram / psys power | `/sys/class/powercap/intel-rapl:*/energy_uj` | yes |
-| GPU busy | `xe` `tile0/gt0/gtidle/idle_residency_ms` | yes |
-| GPU frequency, achieved and requested | `freq0/act_freq`, `freq0/cur_freq` | yes |
-| GPU power | any `card*/device/hwmon/*/power1_average` | **absent** |
-| NPU busy | `accel0/device/npu_busy_time_us` | yes |
-| NPU frequency, memory | `npu_current_frequency_mhz`, `npu_memory_utilization` | yes |
-| NPU power | — | **absent** |
+"Fully in view" is checked against the viewport rectangle, not eyeballed, and
+`scrollWidth`/`scrollHeight` are compared with `clientWidth`/`clientHeight` in
+both axes. The check is `scripts/zoom_check.js`; run it against a running
+console with any Chrome that has puppeteer:
 
-Live sample:
-
-```json
-{"cpu_pct": 96.4, "pkg_w": 56.16, "core_w": 46.05, "uncore_w": 3.67,
- "dram_w": 1.37, "psys_w": 78.29, "gpu_pct": 37.6, "gpu_mhz": 2500.0,
- "gpu_w": null, "npu_pct": 32.0, "npu_mhz": 950.0, "npu_w": null,
- "npu_mem_mb": 134.1,
- "unavailable": {"gpu_w": "not exposed by this driver",
-                 "npu_w": "not exposed by this driver"}}
+```bash
+docker run --rm --user root -e PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppeteer \
+  --network edge-ai-robotics_default -v "$PWD/scripts:/work" -w /work \
+  ghcr.io/puppeteer/puppeteer:latest node /work/zoom_check.js http://web:8080/
 ```
+
+![console at 100 %](images/web-console-v3-100.png)
+![console at 150 %](images/web-console-v3-150.png)
+
+## 5. Status panel
+
+Obstacle source, nav mode, map cells known and occupied, active goal, path
+length, clearance, stream resolution.
+
+Deliberately absent: frame counts, frame age, encode time — those describe the
+console's own plumbing — and the **robot pose row**, which was the raw
+`(x, y)` of the base and told a viewer nothing the picture does not.
+
+## 6. Platform panel
+
+Value + bar per row driven by `data-max`, exactly the shape of
+`reference/intel-toolkit/metrics-panel.js::setMetricRow`, plus a 60 s sparkline
+per engine drawn as hand-written inline SVG. No charting library: an area, a
+polyline and a caption are the whole requirement.
+
+`data-max` values are **display ceilings, not measurements**: percentages cap at
+100 by definition, and the wattage ceilings (80 W package, 30 W iGPU) are what
+this board actually draws rounded up, so a full bar means "working hard" and not
+"at a limit the silicon knows about".
+
+### Power: Intel PCM over the MSRs
+
+By the reference's `get_power_usage`: run `pcm 1 -csv -i=1 -nc -silent` for one
+interval, find the header row containing `Date,Time`, strip the `1|"..."|`
+prefix every line carries, and read the energy columns. Joules measured over one
+second **are** watts, so there is no conversion. Counter priority is the
+reference's: **Proc + DRAM > System > CPU**. On this board PCM offers
+`Proc Energy (Joules)`, `Power Plane 0/1` and `SYSTEM Energy` but no DRAM
+column, so Proc is used alone.
+
+**The packaged `pcm` cannot measure this machine.** Debian's 202502-1 exits
+rc=1 before touching an MSR:
+
+```
+Error: unsupported processor ... CPU family 6 model number 204
+Brand: "Intel(R) Core(TM) Ultra X7 358H"
+```
+
+Upstream has since added Panther Lake as `PTL = PCM_CPU_FAMILY_MODEL(6, 204)`,
+so the image builds PCM from a pinned commit. That is the whole reason for a
+source build, and no amount of capability granting substitutes for it.
+
+### GPU: qmassa
+
+`qmassa -x -t <json> -n 2 -m <ms> -d <bdf> --drv-options xe=engines=pmu`, then
+the max across `eng_usage` engines — the GPU is busy when any engine is, which
+is what xpu-smi and intel_gpu_top mean — plus `act_freq` and `gpu_cur_power`.
+Not packaged anywhere (not apt, not crates.io), so it is built from a pinned
+upstream commit too.
+
+**Correction to an earlier version of this document:** it stated that iGPU power
+is "not exposed by this driver". That was wrong. It is absent from
+`/sys/class/hwmon`, which is where the previous collector looked, but qmassa
+reports it — measured at **7.9 W** while the demo runs. The only figure on this
+board that is genuinely not exposed is **NPU power**: the accel driver publishes
+busy time, frequency and memory, and no energy counter.
+
+### The PMU lock
+
+PCM and qmassa both claim hardware PMU counters while initialising, and the
+kernel allows one client at a time; whichever starts second fails. They run on
+**two separate threads** here — neither is fast enough to sit inside a 1 Hz
+loop, PCM taking about 1.3 s and qmassa about 2 s — so a single
+`threading.Lock` around the subprocess call is the only thing keeping them
+apart. It is not a formality and it is not defensive: remove it and one of the
+two starts failing. The lock is released before parsing.
+
+Cheap readings (CPU jiffies, NPU sysfs) stay on the main loop at 1 Hz. Power and
+GPU carry whatever the workers last produced, so both ship their own age
+(`pkg_w_age`, `gpu_age`) rather than pretending to be instantaneous.
+
+### What the host and the container need
+
+**On the host:** the `msr` kernel module.
+
+```bash
+sudo modprobe msr          # and /etc/modules-load.d/msr.conf to persist it
+ls /dev/cpu/0/msr          # must exist
+```
+
+Without it PCM cannot open an MSR handle and reports so.
+
+**In the image:** the PCM binary carries file capabilities, set at build time as
+the reference does.
+
+```dockerfile
+RUN setcap cap_sys_rawio,cap_sys_admin,cap_dac_override+ep /usr/local/sbin/pcm
+```
+
+**In compose**, established by removing each one and re-testing:
+
+| setting | needed by | symptom without it |
+|---|---|---|
+| `cap_add: SYS_RAWIO, SYS_ADMIN, DAC_OVERRIDE` | pcm | rc=126, `Operation not permitted` on execve |
+| `device_cgroup_rules: 'c 202:* rmw'` | pcm | `EPERM` opening `/dev/cpu/N/msr`, though the node is mounted and visible |
+| `security_opt: apparmor=unconfined` | pcm | rc=1 |
+| `/dev/cpu:/dev/cpu:rw` | pcm | no MSR nodes |
+| `/dev/dri` + `/sys/class/drm:ro` | qmassa | no GPU found |
+
+**qmassa needs none of the capabilities or security options** — measured. And
+`systempaths=unconfined`, which the previous RAPL-sysfs collector required to
+get past Docker's powercap mask, is gone: power no longer comes from
+`/sys/class/powercap`.
+
+A file capability can only grant what the container's **bounding** set already
+contains, which is why `setcap` alone is not enough and `cap_add` alone would
+be. Both are kept: the setcap so the binary carries its own requirement, the
+cap_add so the bounding set permits it.
+
+This is scoped to the `telemetry` container, which is why telemetry is **not**
+part of the `web` service. The console is LAN-facing and unauthenticated;
+giving it `SYS_RAWIO` and MSR access to save a container would be trading the
+one thing worth protecting for nothing.
 
 ### Missing is rendered as missing
 
-Every figure is a number or `null`, and **`null` never renders as 0**. A gauge
-reading 0 W for a running NPU is a lie shaped like a measurement, so the widget
-draws an empty ring and prints the reason.
+Every figure is a number or `null`, and `null` never renders as 0 — the row
+shows an em dash and a zero-width bar. Two reasons are kept apart because they
+are different problems:
 
-There are two different reasons and the panel prints whichever applies:
-
-- **"not exposed by this driver"** — a fact about the hardware. True here of
-  iGPU power (the `xe` driver registers no hwmon node; `/sys/class/hwmon` holds
-  `acpi_fan`, `acpitz`, `nvme`, `ucsi`, `asus`, `coretemp`, `iwlwifi` and
-  nothing for the GPU) and of NPU power (no energy attribute at all).
+- **"not exposed by this driver"** — a fact about the hardware. On this board:
+  NPU power, and nothing else.
 - **"blocked by the container runtime"** — a fact about how we launched, and
-  fixable. The hwmon path is still probed every start, so a driver update starts
-  reporting power with no code change: *not exposed* stays a measurement rather
-  than a belief.
+  fixable in compose. This is what appears if the caps, the cgroup rule or the
+  AppArmor option are removed.
 
-`act_freq` reads **0 while the GT is gated at the sampling instant**, which
-happens even at 40 % busy because busy is averaged over the second and the
-frequency is a spot reading. Both the achieved and the requested frequency are
-published rather than one number that would quietly mean two things.
+### Measured
 
-All counters — jiffies, idle residency, busy microseconds — are **differenced**,
-so the first tick after start is skipped rather than published as a flat zero.
+Live during the demo at 720p: CPU 91 %, package **55.4 W**, GPU 23.6 % at
+2500 MHz drawing **7.3 W**, NPU 34.9 % at 950-1050 MHz, 134 MB.
 
-### What has to be mounted, and the two security options
+The panel tracks real change. Stopping and restarting `perception` — the
+service that holds ~1400 % CPU and owns the NPU — gives a clean step:
 
-All read-only:
+| | CPU % | package W | GPU % | GPU W | NPU % |
+|---|---|---|---|---|---|
+| demo running | 91.4 | 55.4 | 23.6 | 7.3 | 34.9 |
+| perception stopped | **17.2** | **25.4** | 24.4 | 6.4 | **1.4** |
+| restarted | 90.9 | 56.0 | 24.0 | 7.5 | 34.8 |
 
-```yaml
-- /sys/class/powercap:/sys/class/powercap:ro
-- /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro
-- /sys/class/drm:/sys/class/drm:ro
-- /sys/class/accel:/sys/class/accel:ro
-security_opt:
-  - systempaths=unconfined
-  - apparmor=unconfined
-```
+GPU busy barely moves across that step, correctly: the compositor keeps
+rendering whether or not anything is being detected.
 
-`/sys/class/*` holds only symlinks into `/sys/devices`, and mounting
-`/sys/devices` wholesale does not work — the bind is not recursive and the
-powercap subtree arrives empty — so the real directory is mounted as well.
+**Starting the three suite bricks moves the panel very little** — CPU 91.4 to
+90.7, package 55.4 W to 54.4 W. That is not the panel being inert, it is the
+board being saturated: `perception` alone already holds the CPU at ~91 %, so
+extra work is redistributed rather than added. Worth knowing before reading a
+flat gauge as a broken one.
 
-**Both security options are needed, established by testing each:**
+The collector costs **0.1 % CPU and 9.6 MB**, PMU tools included.
 
-1. Docker masks `/sys/devices/virtual/powercap` with an empty read-only tmpfs by
-   default, hardening against the RAPL power side-channel (CVE-2020-8694). The
-   bind mount is applied and then covered. Symptom: `No such file or directory`.
-2. With the mask gone, the default AppArmor profile still denies the read, even
-   though the container is root and the file is `0400 root:root`. Symptom:
-   `Permission denied`.
+## 7. Overlays: keyboard only
 
-Scoped to the `telemetry` container, which only reads read-only sysfs. It is not
-`privileged`. **If you would rather not loosen this, delete both lines** — the
-collector then reports `blocked by the container runtime` and the panel says so,
-instead of inventing 0 W.
+The on-page overlay panel is gone. `f` floor, `s` detections, `p` suite cloud,
+`m` map and `r` reset still work **at the machine**, unchanged.
 
-The collector costs **0.1 % CPU and 9.6 MB**.
+The `POST /cmd/<action>` endpoint is deliberately kept even though no button
+calls it: it is how a scripted capture drives the overlays without a keyboard,
+which is how the figures in `docs/images/` are made. It publishes `UI_CMD`,
+which carries an **action, never a state**, so the compositor remains the single
+owner of what is displayed.
 
-## 6. Overlay controls
-
-Buttons for `f` floor, `s` detections, `p` suite cloud, `m` map, `r` reset. They
-publish `UI_CMD`, which carries an **action, never a state** — so the compositor
-stays the single owner of what is displayed, cycling actions advance one step
-exactly as a keypress does, and a page opened mid-demo cannot reset anybody's
-overlays. The keyboard on the machine keeps working: a demo is often driven from
-the machine and watched from a phone.
-
-## 7. X is still required — for rendering, not for viewing
+## 8. X is still required — for rendering, not for viewing
 
 `DISPLAY_MODE` is `web`, `glfw` or `both` (default `both`).
 
