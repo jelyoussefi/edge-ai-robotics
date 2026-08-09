@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 
@@ -103,6 +104,7 @@ uniform float floor_tol;        // tolerance (m) for floor match
 uniform float floor_alpha;      // overlay strength, 0..1
 uniform float floor_tol_rel;    // legacy, kept for the depth criterion
 uniform float floor_h_tol;      // |height above ground| gate, metres
+uniform float occlude_h_min;    // camera points below this height cannot occlude
 uniform sampler2D floor_paint;  // 1.0 force floor, 0.5 force not-floor, 0 auto
 // Scale check: up to three horizontal reference lines, given as image rows in
 // 0..1 counted from the TOP. Negative means unused.
@@ -148,6 +150,35 @@ void main() {
     vec3 cam_rgb = texture(cam_col, cuv).bgr;
     float cam_z = texture(cam_depth, cuv).r;        // metres (0 = no data)
 
+    // How high above the calibrated ground plane the camera point sits. Computed
+    // once here and reused by both the occlusion test and the floor overlay:
+    // two copies of this geometry would be two things to keep in step, and the
+    // overlay would stop meaning what the composite acted on.
+    float yv = (cuv.y * cam_res.y - ppy_i) / fy_i;
+    float world_dir_z = -yv * cos(cam_pitch) - sin(cam_pitch);
+    float cam_height_above = cam_height + cam_z * world_dir_z;
+    // The floor cannot occlude a robot standing ON it. At ground contact the two
+    // depths converge by construction, so the comparison is decided entirely by
+    // whatever the two sources disagree about -- and they do. Measured at the
+    // sole: MuJoCo renders it at 2.168 m, exactly where the calibration puts the
+    // floor for that pixel, while the D455 reads 1.97-2.00 m. The gap is not a
+    // gross calibration error; fitting the plane from the per-row far percentile
+    // of the depth (the floor is the FARTHEST thing a downward ray can hit)
+    // gives 14.67 deg / 1.503 m against the calibrated 14.08 deg / 1.560 m. That
+    // ~6 cm, ~0.6 deg residual is small in the plane and enormous along the ray:
+    // near the bottom of the frame the floor is grazed at |world_dir_z| ~ 0.72,
+    // so it lands as 0.12-0.17 m of depth, seven times depth_bias_m.
+    //
+    // Chasing the residual would not fix this. Even a perfect calibration leaves
+    // sensor noise at grazing incidence, and the test would still be decided by
+    // it. Raising depth_bias_m to cover 0.17 m would disable real occlusion
+    // everywhere. Barring the ground from occluding is the statement that is
+    // actually true, and it is bounded: only camera points BELOW occlude_h_min
+    // are excused, so a person or a chair still cuts the robot normally. The
+    // cost is that a genuine obstacle shorter than that no longer occludes --
+    // the right trade for a robot that is always touching the floor.
+    bool cam_is_ground = (world_dir_z < -1e-3) && (cam_height_above < occlude_h_min);
+
     int   ss  = max(1, subsamples);
     float inv = 1.0 / float(ss * ss);
     for (int dy = 0; dy < ss; ++dy) {
@@ -175,7 +206,7 @@ void main() {
             bool depth_valid = rds > 0.0 && rds < 0.9999;
             float lum = max(rc.r, max(rc.g, rc.b));
             bool drawn = depth_valid || (rds >= 1.0 && lum > 0.02);
-            bool occluded = depth_valid && (cam_z > 0.0)
+            bool occluded = depth_valid && (cam_z > 0.0) && !cam_is_ground
                             && (robot_z > cam_z + depth_bias_m);
             acc += (drawn && !occluded) ? rc.rgb : cam_rgb;
         }
@@ -190,12 +221,10 @@ void main() {
         // ray matters; with no camera roll the horizontal angle is parallel to
         // the floor. A single height gate is correct at every distance, because
         // it maps to a depth tolerance of floor_h_tol / |world_dir_z|, which
-        // widens with distance on its own.
-        float yv = (cuv.y * cam_res.y - ppy_i) / fy_i;
-        float world_dir_z = -yv * cos(cam_pitch) - sin(cam_pitch);
-        float height = cam_height + cam_z * world_dir_z;
+        // widens with distance on its own. The height itself comes from the
+        // block at the top, the same one the occlusion test uses.
         bool is_floor = cam_z > 0.0 && world_dir_z < -1e-3
-                        && abs(height) < floor_h_tol;
+                        && abs(cam_height_above) < floor_h_tol;
         // Hand-painted corrections from `make calibrate`. Polished tiles reflect
         // the IR pattern away and return no depth at all, so those pixels can
         // never be decided from the sensor: the operator paints them once and
@@ -310,7 +339,8 @@ class GLCompositor:
             "show_floor", "cam_height", "cam_pitch", "fx_i", "fy_i",
             "ppx_i", "ppy_i", "cam_res", "floor_tol", "floor_alpha", "floor_tol_rel",
             "floor_h_tol", "floor_paint", "has_paint",
-            "ref_rows", "ref_px", "subsamples", "depth_far")}
+            "ref_rows", "ref_px", "subsamples", "depth_far",
+            "occlude_h_min")}
         # Floor-overlay parameters, set via configure_floor().
         self._paint_tex = None
         self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
@@ -318,7 +348,9 @@ class GLCompositor:
                            alpha=float(os.environ.get("FLOOR_ALPHA", "0.35")),
                            tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
                            has_paint=0, ref_rows=(-1.0, -1.0, -1.0),
-                           h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")))
+                           h_tol=float(os.environ.get("FLOOR_H_TOL", "0.08")),
+                           occlude_h=float(os.environ.get(
+                               "FLOOR_OCCLUDE_H", "0.25")))
 
     def _probe_mujoco_depth(self):
         """Internal format of MuJoCo's offscreen depth buffer, and whether it
@@ -596,6 +628,70 @@ class GLCompositor:
         # robot depth==1 (not drawn) so acc gets cam_rgb. Present as usual.
         self.present(win_w, win_h)
 
+    def probe_column(self, u_img: int, v_lo: int, v_hi: int) -> list[tuple]:
+        """Read the blitted robot depth down one output column, as the shader sees it.
+
+        Diagnostic for the ground-contact case: the feet are where robot_z and
+        cam_z converge, so the occlusion test decides them on a difference that
+        approaches zero, and any error in either depth flips it. Reading the
+        numbers is the only way to tell a convention bug from a noise margin.
+
+        The coordinates given are OUTPUT pixels in image convention (row 0 at the
+        top). The robot textures live at `scale`x and GL's row 0 is the BOTTOM,
+        so the mapping back is (h - 1 - v) * scale -- the same one
+        composite_to_array's flipud undoes. Getting it wrong reads the robot
+        upside down and would make the feet look like the head.
+
+        Returns one (v, rd_raw, rds, robot_z) per output row, rd_raw being the
+        NEAREST subsample of the scale x scale block: the shader ORs coverage
+        over the block, so the nearest sample is the one that can win.
+        """
+        v_lo, v_hi = max(0, min(v_lo, v_hi)), min(self.h - 1, max(v_lo, v_hi))
+        rows = v_hi - v_lo + 1
+        x0 = int(u_img) * self.scale
+        y0 = (self.h - 1 - v_hi) * self.scale
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.robot_fbo)
+        buf = GL.glReadPixels(x0, y0, self.scale, rows * self.scale,
+                              GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT)
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+        blk = np.asarray(buf, np.float32).reshape(rows * self.scale, self.scale)
+        out = []
+        for j in range(rows):
+            sub = blk[j * self.scale:(j + 1) * self.scale, :]
+            # Reversed buffer: the nearest geometry holds the LARGEST raw value,
+            # so "nearest subsample" is a max there and a min in the classic one.
+            rd = float(sub.min() if self.depth_far > 0.5 else sub.max())
+            rds = rd if self.depth_far > 0.5 else 1.0 - rd
+            z_ndc = rds * 2.0 - 1.0
+            den = self.zfar + self.znear - z_ndc * (self.zfar - self.znear)
+            robot_z = (2.0 * self.znear * self.zfar / den) if abs(den) > 1e-9 else 0.0
+            # GL row j counts up from the bottom of the block, image rows down.
+            out.append((v_hi - j, rd, rds, robot_z))
+        return out
+
+    def robot_depth_mask(self, path: str | None = None) -> np.ndarray:
+        """Where the blitted robot depth says the robot is, at OUTPUT resolution.
+
+        The column probe can only say where the depth is along one line. When the
+        answer is "not where the robot looks like it is", the next question is
+        two-dimensional -- which part of the body carries depth -- and that needs
+        the whole buffer. Reduced to 1x by OR-ing each scale x scale block, which
+        is what the shader's coverage accumulation does.
+        """
+        sw, sh = self.w * self.scale, self.h * self.scale
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, self.robot_fbo)
+        buf = GL.glReadPixels(0, 0, sw, sh, GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT)
+        GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0)
+        d = np.flipud(np.asarray(buf, np.float32).reshape(sh, sw))
+        rds = d if self.depth_far > 0.5 else 1.0 - d
+        drawn = (rds > 0.0) & (rds < 0.9999)
+        s = self.scale
+        drawn = drawn.reshape(self.h, s, self.w, s).any(axis=(1, 3))
+        if path is not None:
+            import cv2 as _cv2
+            _cv2.imwrite(path, (drawn * 255).astype(np.uint8))
+        return drawn
+
     def _ensure_readback_fbo(self) -> None:
         """Create the offscreen FBO the composite is rendered into for readback."""
         if getattr(self, "_read_fbo", None) is not None:
@@ -655,6 +751,7 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform1f(self._uni["occlude_h_min"], float(f["occlude_h"]))
         GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
         GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
         GL.glUniform1i(self._uni["subsamples"], int(self.scale))
@@ -720,6 +817,7 @@ class GLCompositor:
         GL.glUniform1f(self._uni["floor_alpha"], float(f["alpha"]))
         GL.glUniform1f(self._uni["floor_tol_rel"], float(f["tol_rel"]))
         GL.glUniform1f(self._uni["floor_h_tol"], float(f["h_tol"]))
+        GL.glUniform1f(self._uni["occlude_h_min"], float(f["occlude_h"]))
         GL.glUniform3f(self._uni["ref_rows"], *[float(v) for v in f["ref_rows"]])
         GL.glUniform1f(self._uni["ref_px"], 1.5 / float(self.h))
         GL.glUniform1i(self._uni["subsamples"], int(self.scale))
@@ -1047,6 +1145,10 @@ WINDOW_NAME = "Edge AI Robotics"
 # anything). Fixing that made the gate matter -- a demo left running would
 # otherwise fill /data with 4K PNGs nobody asked for.
 DIAG_FRAMES = int(os.environ.get("DIAG_FRAMES", "0") or 0)
+# Seconds between ground-contact depth probes, 0 to disable. A period rather
+# than a frame count because it reads back the depth attachment, which stalls
+# the GL pipeline: fine once a second, ruinous every frame.
+DEPTH_PROBE = float(os.environ.get("DEPTH_PROBE", "0") or 0)
 # Overlays on from the first frame, without anyone at the keyboard. 'f' still
 # toggles them; this only sets the initial state, so a diagnostic capture can be
 # scripted on a machine whose X display is not the one this renders to.
@@ -1987,6 +2089,96 @@ def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
     except Exception as exc:
         log.warning("could not save diagnostic frame: %s", exc)
 
+def _log_depth_probe(gpu, data, cam_height, cam_pitch_deg, fx, fy, ppx, ppy,
+                     depth_metres, w, h, floor_det=None) -> None:
+    """Print the two depths the occlusion test compares, down through a foot.
+
+    The composite decides every pixel on `robot_z > cam_z + depth_bias_m`. At the
+    ground contact that difference tends to zero by construction -- the foot and
+    the floor behind it are the same point in space -- so the test is decided by
+    whatever error either depth carries, and reading both numbers is the only way
+    to attribute a missing foot to the convention, the projection or the sensor.
+
+    The column is chosen from the depth buffer, NOT from the robot's ground
+    contact pixel. The contact point is the base projected to z = 0, which lands
+    BETWEEN the feet: a column there passes through the gap under the pelvis and
+    reads background all the way down, which reads exactly like a truncated
+    silhouette and is not one. The lowest drawn column is a foot by construction.
+    """
+    if depth_metres is None:
+        return
+    fwd, lat = float(data.qpos[0]), float(data.qpos[1])
+    contact = _world_to_pixel(cam_height, cam_pitch_deg, fx, fy, ppx, ppy,
+                              fwd, lat, w, h)
+    dh, dw = depth_metres.shape
+    try:
+        cov = gpu.robot_depth_mask()
+    except Exception as exc:
+        log.warning("depth probe: could not read the robot depth (%s)", exc)
+        return
+    ys, xs = np.nonzero(cov)
+    if not xs.size:
+        log.info("depth probe: the robot carries no depth anywhere this frame")
+        return
+    u = int(xs[np.argmax(ys)])            # column holding the lowest drawn pixel
+    v_bot = int(ys.max())
+    log.info("depth probe: robot at (%.2f, %.2f) m, contact pixel %s, "
+             "far=%.0f bias=%.3f m znear=%.3f zfar=%.1f",
+             fwd, lat, contact, gpu.depth_far, gpu.depth_bias_m,
+             gpu.znear, gpu.zfar)
+    log.info("   silhouette box x %d..%d y %d..%d; probing the foot column %d, "
+             "whose lowest drawn row is %d",
+             int(xs.min()), int(xs.max()), int(ys.min()), v_bot, u, v_bot)
+    rows = [r for r in gpu.probe_column(u, v_bot - 44, min(h - 1, v_bot + 8))]
+    log.info("   row   rd_raw     rds    robot_z    cam_z     diff   camh  "
+             "drawn grnd occl")
+    n_cut = n_ground = n_drawn = 0
+    occl_h = float(gpu._floor["occlude_h"])
+    p = math.radians(abs(cam_pitch_deg))
+    for v, rd, rds, rz in rows[::4]:
+        du = min(dw - 1, max(0, int(u * dw / w)))
+        dv = min(dh - 1, max(0, int(v * dh / h)))
+        cz = float(depth_metres[dv, du])
+        # The same two lines the shader runs, not an equivalent of them: a probe
+        # that asserts a test the composite no longer applies is worse than none.
+        yv = ((v + 0.5) * (480.0 / h) - ppy) / fy
+        wdz = -yv * math.cos(p) - math.sin(p)
+        camh = cam_height + cz * wdz
+        ground = wdz < -1e-3 and camh < occl_h
+        valid = 0.0 < rds < 0.9999
+        occl = valid and cz > 0.0 and not ground and rz > cz + gpu.depth_bias_m
+        n_cut += int(occl)
+        n_ground += int(valid and ground)
+        n_drawn += int(valid)
+        log.info("  %4d  %8.6f  %6.4f  %7.3f  %7.3f  %+7.3f  %+5.2f    %d    "
+                 "%d    %d", v, rd, rds, rz if valid else float("nan"), cz,
+                 (rz - cz) if valid else float("nan"), camh,
+                 int(valid), int(ground), int(occl))
+    log.info("   of %d drawn rows in this foot column, %d are cut by the camera "
+             "depth and %d are excused because the camera point is ground "
+             "(below %.2f m)", n_drawn, n_cut, n_ground, occl_h)
+    # Is the disagreement local to the robot's spot or global? The virtual foot
+    # is placed by the calibration, so if the sensor's floor sits systematically
+    # above the calibrated plane the two depth sources are offset everywhere and
+    # the feet are only where that offset first matters.
+    # Use the project's own floor detector rather than a second copy of the
+    # geometry: if the sensor and the calibration were systematically offset,
+    # this is the mask that would have collapsed, and it did not (etape B
+    # measured a floor IoU of 0.530 against Intel's segmenter with it).
+    if floor_det is not None:
+        mask = floor_det.height_mask(depth_metres)
+        hgt = floor_det.height_map(depth_metres)
+        on = hgt[mask] if mask.any() else np.zeros(1, np.float32)
+        log.info("   floor mask holds %.1f%% of the frame, and over those "
+                 "pixels the sensor sits %+.3f m from the calibrated plane "
+                 "(p05 %+.3f, p95 %+.3f) -- the plane is right where the "
+                 "calibration puts it, away from the robot's spot",
+                 100.0 * mask.mean(), float(np.median(on)),
+                 float(np.percentile(on, 5)), float(np.percentile(on, 95)))
+        for line in floor_det.report(depth_metres):
+            log.info("     %s", line)
+
+
 def _log_floor_stats(detector, depth_metres, on: bool,
                      cam_height: float = 0.0, cam_pitch_deg: float = 0.0) -> None:
     """Report what fraction of the frame the floor geometry accepts.
@@ -2220,6 +2412,7 @@ def main() -> None:
     seg_mask_t = 0.0
     show_seg = False      # 's' toggles the segmentation overlay
     roi_next_t = 0.0      # next republication of the walkable floor
+    probe_next_t = 0.0    # next ground-contact depth probe (DEPTH_PROBE)
     roi_cached = None     # computed once: the camera does not move
     # Same geometry as the shader's expected_floor_z(), used only to report how
     # many pixels the overlay should be tinting.
@@ -2509,6 +2702,18 @@ def main() -> None:
                 bg if bg is not None else np.zeros((WINDOW_H, WINDOW_W, 3), np.uint8),
                 depth_metres if depth_metres is not None
                 else np.zeros((WINDOW_H, WINDOW_W), np.float32))
+            # Ground-contact diagnostic, off by default. Must run here: the robot
+            # FBO holds this frame's blit and the camera depth is still the frame
+            # it was paired with.
+            if DEPTH_PROBE > 0.0 and time.perf_counter() >= probe_next_t:
+                probe_next_t = time.perf_counter() + DEPTH_PROBE
+                try:
+                    _log_depth_probe(gpu, data, cam_height, _cam_pitch_deg,
+                                     fx, fy, ppx, ppy, depth_metres,
+                                     WINDOW_W, WINDOW_H, floor_det)
+                except Exception as exc:      # diagnostic only, never fatal
+                    log.warning("depth probe failed (%s)", exc)
+
             # The shader's own per-pixel test is never used for the overlay: it
             # has no closing, no hole filling and no component filter, so shiny
             # tiles that drop a few pixels of depth show up as holes in a floor
