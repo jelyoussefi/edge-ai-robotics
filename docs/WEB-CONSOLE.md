@@ -160,8 +160,8 @@ precisely so they never go through msgpack as floats. The stream went from
 
 **Header**, two centred lines stacked above the columns:
 
-- **Edge AI Robotics** — bold, centred, and clearly the largest thing on the
-  page, with a horizontal gradient painted through the glyphs:
+- **Edge AI Robotics** — bold, centred, ~2.6rem, and clearly the largest thing
+  on the page, with a horizontal gradient painted through the glyphs:
   `linear-gradient(90deg, #1A4B8C 0%, #C99A5B 50%, #1A4B8C 100%)` plus
   `background-clip:text` and `color:transparent`. The element is
   `display:inline-block`: `background-clip:text` on an *inline* box clips to
@@ -173,14 +173,41 @@ precisely so they never go through msgpack as floats. The stream went from
 **Three top-aligned cards** below it: Status left, video centre, Platform right.
 `align-items:start` — the grid spelling of `flex-start` — so each card is only
 as tall as its own content and the three share a top edge instead of the short
-ones stretching to match the tall one. Each card is white, `1px #E3E8EC`,
-`border-radius:10px`, `box-shadow:0 2px 10px rgba(0,40,90,0.08)`, with the same
-padding. No panel titles: the rows label themselves.
+ones stretching to match the tall one. No panel titles: the rows label
+themselves.
 
-The palette went light because the cards are specified white — near-white text
-on a white card is unreadable, so the whole page follows rather than only the
-cards. Borders and radii stay in px exactly as given; they do not drive layout,
-so they cannot cause an overflow.
+Every card carries the same **luminous Energy Blue edge** — a solid hairline
+`rgba(0,199,253,0.55)`, a tight ring just outside it, a soft bloom, then an
+ordinary drop shadow so the card still has weight:
+
+```css
+border: 1px solid rgba(0,199,253,0.55);
+box-shadow: 0 0 0 1px rgba(0,199,253,0.25),
+            0 0 18px rgba(0,199,253,0.35),
+            0 4px 20px rgba(0,40,90,0.15);
+border-radius: 10px;
+```
+
+The two **gauge panels are deep Intel blue**,
+`linear-gradient(160deg,#00285A,#004A86)`, with `#BCD6EE` labels, white values,
+and Energy Blue `#00C7FD` bars on a `rgba(255,255,255,0.12)` track. The **video
+card stays white** so the picture is the brightest thing on the page.
+
+Those colours are set by **redefining the custom properties** on
+`.card.metrics`, not by overriding each rule. The bar fill, the group label and
+the sparkline stroke all already read `var(--accent)`, so one declaration moves
+all three to Energy Blue and there is no second copy of the widget CSS to drift
+out of step.
+
+**The page background stayed light** — the one judgement call. The title
+gradient ends on `#1A4B8C` at both sides; on a dark navy page those ends sink
+into the background and "Edge" and "Robotics" stop being readable while the
+copper middle stays bright. The cost is that the outer bloom of the glow is
+subtler on light than it would be on dark; the hairline and the tight ring still
+read clearly, which is what makes the edge look lit.
+
+Borders and radii stay in px exactly as given; they do not drive layout, so they
+cannot cause an overflow.
 
 ### Fitting at any zoom
 
@@ -200,9 +227,11 @@ overflows at 150 % was measured in pixels somewhere. What keeps it honest:
 - the video card is `align-self:start` with `width:100%; height:auto`, so it
   hugs the 16:9 frame and there is no white letterbox band inside a white card.
 
-**Type sizes are clamps whose ceiling is the size asked for**, not flat rem
-values: `clamp(1.1rem, 3.2vmin, 2.2rem)` for the title and
-`clamp(.6rem, 1.5vmin, 1rem)` for the subtitle. A flat rem does not shrink with
+**Type sizes and the header's spacing are clamps whose ceiling is the size asked
+for**, not flat rem values: `clamp(1.15rem, 3.9vmin, 2.6rem)` for the title,
+`clamp(.6rem, 1.5vmin, 1rem)` for the subtitle, `clamp(.25rem, .9vmin, .5rem)`
+for the gap under the title and `clamp(.6rem, 2vmin, 1.2rem)` for the header's
+bottom padding. A flat rem does not shrink with
 the viewport, so at 150 % zoom on a small screen a 2.2rem heading plus a 16:9
 video plus two cards is taller than the viewport, and "~2.2rem" and "no
 scrollbars at 150 %" would contradict each other. The clamp honours the size
@@ -213,14 +242,14 @@ each zoom:
 
 | zoom | CSS viewport | scrollbars | video | card tops aligned | title / subtitle / body |
 |---|---|---|---|---|---|
-| 50 % | 3840x2160 | none | 2214x1245 | yes | 35.2 / 16.0 / 15.0 px |
-| 100 % | 1920x1080 | none | 1092x614 | yes | 34.6 / 16.0 / 11.3 px |
-| 150 % | 1280x720 | none | 722x406 | yes | 23.0 / 10.8 / 9.0 px |
+| 50 % | 3840x2160 | none | 2214x1245 | yes | 41.6 / 16.0 / 15.0 px |
+| 100 % | 1920x1080 | none | 1092x614 | yes | 41.6 / 16.0 / 11.3 px |
+| 150 % | 1280x720 | none | 722x406 | yes | 28.1 / 10.8 / 9.0 px |
 
 Header, both cards and the video are each checked **fully inside the viewport
 rectangle**, `scrollWidth`/`scrollHeight` are compared with
 `clientWidth`/`clientHeight` in both axes, and the three card tops are compared
-for equality. At 100 % the title lands at 34.6 px = 2.16rem and the subtitle at
+for equality. At 100 % the title lands at 41.6 px = exactly 2.6rem and the subtitle at
 exactly 1rem; at 150 % the clamp gives way, by design.
 
 The check is `scripts/zoom_check.js`, against a running console:
@@ -324,20 +353,42 @@ the reference does.
 RUN setcap cap_sys_rawio,cap_sys_admin,cap_dac_override+ep /usr/local/sbin/pcm
 ```
 
-**In compose**, established by removing each one and re-testing:
+**In compose**, each established by removing it and re-testing:
 
 | setting | needed by | symptom without it |
 |---|---|---|
 | `cap_add: SYS_RAWIO, SYS_ADMIN, DAC_OVERRIDE` | pcm | rc=126, `Operation not permitted` on execve |
 | `device_cgroup_rules: 'c 202:* rmw'` | pcm | `EPERM` opening `/dev/cpu/N/msr`, though the node is mounted and visible |
 | `security_opt: apparmor=unconfined` | pcm | rc=1 |
+| `security_opt: systempaths=unconfined` | pcm | rc=1, `Unsupported mode. NMI watchdog is enabled and Linux perf_event driver is not used` |
 | `/dev/cpu:/dev/cpu:rw` | pcm | no MSR nodes |
 | `/dev/dri` + `/sys/class/drm:ro` | qmassa | no GPU found |
 
-**qmassa needs none of the capabilities or security options** — measured. And
-`systempaths=unconfined`, which the previous RAPL-sysfs collector required to
-get past Docker's powercap mask, is gone: power no longer comes from
-`/sys/class/powercap`.
+**qmassa needs none of the capabilities or security options** — measured.
+
+### The NMI watchdog, and a measurement that lied
+
+`systempaths=unconfined` is here for a different reason than it once was. PCM
+refuses to start while the kernel's NMI watchdog is enabled and it is not using
+the perf_event driver; it turns the watchdog off for the measurement and back on
+afterwards, which needs `/proc/sys` **writable**.
+
+An earlier pass concluded this option was unnecessary, and published that. It
+was wrong, and the way it was wrong is worth recording: the test ran shortly
+after a PCM invocation that had been killed mid-sample, leaving
+`kernel.nmi_watchdog` at 0 on the host. PCM then found nothing to change and
+succeeded without needing to write anything. **The measurement was reading
+leftover host state, not the configuration under test.** It surfaced later as
+`package power —` on the panel with the host back at `nmi_watchdog = 1`.
+
+`PCM_USE_PERF=1`, which should route PCM through perf_event and sidestep the
+watchdog entirely, does **not** work here — same denial. Tested.
+
+**A less permissive alternative, not verified here** because it needs root on
+the host: set `kernel.nmi_watchdog=0` once, persistently. PCM would then find it
+already off and have nothing to write, and `systempaths=unconfined` could come
+out. Worth doing if someone can test it — as it stands PCM toggles a host-wide
+kernel setting on every sample, twice per `PMU_PERIOD`.
 
 A file capability can only grant what the container's **bounding** set already
 contains, which is why `setcap` alone is not enough and `cap_add` alone would

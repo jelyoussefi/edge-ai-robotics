@@ -11,8 +11,10 @@ column: `minmax(0,Nfr)` tracks so a column may be narrower than its content,
 `min-height:0` on every child, all spacing in `em`, and type sized with
 `clamp()` against `vmin`.
 
-Type sizes are given as clamps whose CEILING is the size asked for -- the title
-tops out at 2.2rem and the subtitle at 1rem -- rather than as flat rem values.
+Type sizes, and the header's spacing, are given as clamps whose CEILING is the
+size asked for -- the title tops out at 2.6rem, the subtitle at 1rem, the gap
+under the title at 0.5rem and the header's bottom padding at 1.2rem -- rather
+than as flat rem values.
 A flat rem does not shrink with the viewport, so at 150 % zoom on a small screen
 a 2.2rem heading plus a 16:9 video plus two cards is taller than the viewport,
 and the fit requirement and the size requirement would contradict each other.
@@ -20,8 +22,23 @@ The clamp honours the size wherever there is room for it and gives way where
 there is not, which is what "~2.2rem" plus "no scrollbars at 150 %" can both
 mean at once.
 
-The palette is light because the cards are specified white; near-white text on a
-white card is unreadable, so the whole page follows rather than only the cards.
+Palette: a light page, two deep-Intel-blue gauge panels, and the video card left
+white so the picture stays the brightest thing on the screen. Every card carries
+the same luminous Energy Blue edge.
+
+The page stayed light rather than going dark with the panels, which is the one
+judgement call here. The title gradient ends on #1A4B8C at both sides; on a dark
+navy page those ends sink into the background and the words "Edge" and
+"Robotics" stop being readable, while the middle stays bright. Keeping the page
+light preserves the title that was asked for. The cost is that the outer bloom
+of the glow is subtler on light than it would be on dark -- the hairline and the
+tight ring still read clearly, which is what makes the edge look lit.
+
+Colours inside the dark panels are set by REDEFINING the custom properties on
+`.card.metrics`, not by overriding each rule. The bar fill, the group label and
+the sparkline stroke all already read `var(--accent)`, so one declaration moves
+all three to Energy Blue and there is no second copy of the widget CSS to drift.
+
 Borders and radii stay in px exactly as specified -- they do not drive layout,
 so they cannot cause an overflow.
 
@@ -43,11 +60,17 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Edge AI Robotics</title><style>
 :root{
   --bg:#EEF2F6; --card:#FFFFFF; --line:#E3E8EC;
-  --fg:#1B2733; --dim:#5A6B7B;
+  --fg:#1B2733; --dim:#5A6B7B; --na:#93A2B0;
   --accent:#1A4B8C;          /* the blue at both ends of the title gradient */
+  --energy:#00C7FD;          /* Intel Energy Blue: the glow, and the bars */
   --olive:#8A9A3B;           /* the subtitle */
   --barbg:#E9EEF3;
-  --shadow:0 2px 10px rgba(0,40,90,0.08);
+  /* The luminous edge: a solid hairline, a tight ring just outside it, a soft
+     bloom, then an ordinary drop shadow for depth. The first three are the
+     glow; the last is what stops the card floating with no weight. */
+  --glow:0 0 0 1px rgba(0,199,253,0.25),
+         0 0 18px rgba(0,199,253,0.35),
+         0 4px 20px rgba(0,40,90,0.15);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
@@ -57,9 +80,11 @@ font:400 clamp(9px,1.05vmin,15px)/1.45 "Intel One Text",system-ui,
 display:flex;flex-direction:column}
 
 /* ---- header: two centred lines, stacked, above the columns ------------- */
-header{flex:0 0 auto;text-align:center;padding:1.1em 1em .85em}
+header{flex:0 0 auto;text-align:center;
+padding:1.1em 1em clamp(.6rem,2vmin,1.2rem)}
 .title{
-  font-size:clamp(1.1rem,3.2vmin,2.2rem);
+  font-size:clamp(1.15rem,3.9vmin,2.6rem);
+  margin-bottom:clamp(.25rem,.9vmin,.5rem);
   font-weight:700;line-height:1.12;letter-spacing:.01em;
   /* The gradient is painted through the glyphs. display:inline-block matters:
      background-clip:text on an inline box clips to the line box rather than
@@ -70,7 +95,7 @@ header{flex:0 0 auto;text-align:center;padding:1.1em 1em .85em}
   color:transparent;-webkit-text-fill-color:transparent;
 }
 .subtitle{font-size:clamp(.6rem,1.5vmin,1rem);color:var(--olive);
-letter-spacing:.06em;margin-top:.35em;font-weight:500}
+letter-spacing:.06em;font-weight:500}
 
 /* ---- three top-aligned cards: status | video | platform ---------------- */
 /* align-items:start is the grid spelling of flex-start: each card is only as
@@ -87,9 +112,26 @@ main{flex:1 1 auto;min-height:0;display:grid;
 grid-template-columns:minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr);
 grid-template-rows:minmax(0,1fr);
 align-items:start;gap:1em;padding:0 1em 1em}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
-box-shadow:var(--shadow);padding:1em 1.1em;
+.card{background:var(--card);border:1px solid rgba(0,199,253,0.55);
+border-radius:10px;box-shadow:var(--glow);padding:1em 1.1em;
 min-width:0;min-height:0;max-height:100%;overflow:hidden}
+
+/* The two gauge panels are deep Intel blue; the video card stays white so the
+   picture is the brightest thing on the page. Everything inside the panels
+   re-themes by REDEFINING the custom properties rather than by overriding each
+   rule: the bar, the group label and the sparkline stroke all already read
+   var(--accent), so one declaration moves all three to Energy Blue and there is
+   no second copy of the widget CSS to keep in step. */
+.card.metrics{
+  background:linear-gradient(160deg,#00285A 0%,#004A86 100%);
+  --fg:#FFFFFF;                       /* values */
+  --dim:#BCD6EE;                      /* labels */
+  --accent:var(--energy);             /* bars, group labels, sparkline */
+  --barbg:rgba(255,255,255,0.12);     /* translucent track */
+  --line:rgba(255,255,255,0.18);      /* separators */
+  --na:#9FC0DE;                       /* the "not exposed" notes */
+  color:var(--fg);
+}
 /* The video card hugs the video: height from the 16:9 image rather than
    stretched to the row, so there is no white letterbox band above and below a
    widescreen frame inside a white card. */
@@ -109,14 +151,15 @@ white-space:nowrap;font-weight:700}
 border-radius:.21em;overflow:hidden}
 .fill{height:100%;width:0;background:var(--accent);border-radius:.21em;
 transition:width .35s ease}
-.na{color:#93A2B0;font-style:italic;font-size:.85em;padding:.1em 0 .2em}
+.na{color:var(--na);font-style:italic;font-size:.85em;padding:.1em 0 .2em}
 .sep{height:1px;background:var(--line);margin:.55em 0 .4em}
 .grp{color:var(--accent);font-size:.82em;letter-spacing:.08em;
 text-transform:uppercase;font-weight:700;padding-bottom:.15em}
 .sparkwrap{position:relative;margin-top:.35em;background:#F2F6F9;
 border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.card.metrics .sparkwrap{background:rgba(255,255,255,0.07)}
 .spark{width:100%;height:2.6em;display:block}
-.sparkwrap .cap{position:absolute;right:.35em;top:.1em;color:#93A2B0;
+.sparkwrap .cap{position:absolute;right:.35em;top:.1em;color:var(--na);
 font-size:.72em;letter-spacing:.04em}
 .foot{flex:0 0 auto;color:var(--dim);font-size:.82em;padding:0 1em .7em;
 text-align:center}
@@ -128,9 +171,9 @@ text-align:center}
 </header>
 
 <main>
-  <div class="card" id="status"></div>
+  <div class="card metrics" id="status"></div>
   <div class="card view"><img src="/stream" alt="live composite"></div>
-  <div class="card" id="platform"></div>
+  <div class="card metrics" id="platform"></div>
 </main>
 
 <p class="foot">LAN only, no authentication &middot; overlays from the keyboard

@@ -666,12 +666,28 @@ services:
       - SYS_RAWIO
       - SYS_ADMIN
       - DAC_OVERRIDE
-    # Necessaire pour PCM seul, verifie en le retirant : avec les capabilities
-    # et la regle cgroup mais le profil AppArmor par defaut, pcm sort en rc=1.
-    # qmassa fonctionne sans. systempaths=unconfined n'est plus utile depuis
-    # que la puissance vient de PCM et non de /sys/class/powercap.
+    # Les deux, et pour deux raisons differentes :
+    #
+    #   apparmor=unconfined     acces MSR. Sans lui pcm sort en rc=1.
+    #   systempaths=unconfined  rend /proc/sys accessible en ECRITURE. PCM
+    #                           refuse de demarrer tant que le chien de garde
+    #                           NMI est actif et qu'il n'utilise pas perf :
+    #                           "Unsupported mode. NMI watchdog is enabled and
+    #                           Linux perf_event driver is not used". Il le
+    #                           desactive lui-meme le temps de la mesure puis le
+    #                           remet, ce qui demande /proc/sys en ecriture.
+    #
+    # Un test anterieur avait conclu que systempaths etait inutile : il etait
+    # fausse par l'etat de l'hote, une execution precedente ayant laisse
+    # kernel.nmi_watchdog a 0. PCM_USE_PERF=1 ne remplace pas ceci, verifie.
+    #
+    # Alternative moins permissive, NON verifiee ici faute de droits root sur
+    # l'hote : poser kernel.nmi_watchdog=0 une fois sur l'hote. PCM le trouverait
+    # deja a 0 et n'aurait plus rien a ecrire. A preferer si quelqu'un peut le
+    # tester, car en l'etat PCM bascule ce reglage de l'hote a chaque mesure.
     security_opt:
       - apparmor=unconfined
+      - systempaths=unconfined
     restart: unless-stopped
 
   recorder:

@@ -203,8 +203,10 @@ class PowerWorker(threading.Thread):
             log.warning("PCM not present at %s: package power unavailable",
                         PCM_BIN)
 
-    def _warn(self, msg: str, reason: str = RUNTIME_BLOCKED) -> None:
-        UNAVAILABLE["pkg_w"] = reason
+    def _warn(self, msg: str, reason: str = "") -> None:
+        # The reason shown in the panel carries PCM's own words when it gave
+        # any, so the browser shows what actually went wrong.
+        UNAVAILABLE["pkg_w"] = reason or f"{RUNTIME_BLOCKED} [{msg}]"[:300]
         if not self._warned:
             self._warned = True
             log.warning("%s -- reporting as: %s", msg, reason)
@@ -222,10 +224,18 @@ class PowerWorker(threading.Thread):
             self._warn(f"PCM failed to run: {exc}")
             return None
         if res.returncode != 0:
-            tail = (res.stderr or res.stdout or "")[-300:]
-            # rc=126 is execve refused: the binary's +ep file capabilities
-            # cannot be raised because the container's bounding set lacks them.
-            self._warn(f"PCM exited rc={res.returncode}: {tail!r}")
+            # Surface PCM's OWN diagnostic rather than a generic reason. Its
+            # failures name their cause precisely and the causes are different
+            # problems: rc=126 is execve refused because the bounding set lacks
+            # the file capabilities; "NMI watchdog is enabled" means /proc/sys
+            # is not writable so PCM cannot turn it off for the measurement;
+            # "unsupported processor" would mean the binary predates this CPU.
+            # Collapsing them into one grey message costs an afternoon.
+            blob = (res.stdout or "") + (res.stderr or "")
+            why = next((ln.strip() for ln in blob.splitlines()
+                        if "ERROR" in ln or "denied" in ln), "")
+            self._warn(f"PCM exited rc={res.returncode}"
+                       + (f": {why}" if why else ""))
             return None
         joules = parse_pcm_energy_joules(res.stdout)
         if joules <= 0:
