@@ -132,6 +132,26 @@ SUITE_MAP = "suite.map"
 #    "start": [x, y], "goal": [x, y], "planner": str, "stamp": float}
 SUITE_PATH = "suite.path"
 
+# compositor -> web. The FINAL annotated frame, JPEG-encoded: exactly what the
+# window shows, overlays included, so a browser and the TV cannot disagree.
+#
+# Encoded from the CPU copy the overlays are already drawn on, not re-rendered.
+# Re-rendering for the web would be a second composite path that could drift
+# from the first, which is the failure this project keeps finding elsewhere.
+#   {"jpeg": bytes, "w": int, "h": int, "t": float, "encode_ms": float}
+COMPOSITED_FRAME = "compositor.frame"
+
+# web -> compositor. Overlay toggles from the browser, the same actions the
+# keyboard has. The keys are not replaced: a demo is often driven from the
+# machine and watched from a phone at the same time, and either has to work.
+#
+# `action` is one of "floor", "detections", "cloud", "map", "reset", matching
+# the f / s / p / m / r keys. Cycling actions advance one state per message,
+# exactly as a keypress does, so the browser holds no state of its own -- the
+# compositor remains the single owner of what is displayed.
+#   {"action": str, "stamp": float}
+UI_CMD = "ui.cmd"
+
 # sim -> viewer, dashboard. Full configuration of the model.
 #   {"t": float, "qpos": list[float], "fallen": bool}
 ROBOT_STATE = "robot.state"

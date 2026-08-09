@@ -1110,7 +1110,21 @@ CLOUD_OBSTACLE_LABEL = int(os.environ.get("GF_OBSTACLE_LABEL", "5"))
 # already owns the context, which is what gpu_compositor.py was designed for:
 # no readback, no second toolkit, one context. "cv2" is the previous HighGUI
 # path, kept for comparison. "none" is headless.
-DISPLAY_MODE = "glfw"   # present in the render context, no readback
+# "glfw" presents in the render context, "web" publishes the frame on the bus
+# for the web console and opens no window, "both" does both, "cv2"/"none" are
+# the old paths. Default "both": the TV keeps working and the LAN gets a view.
+#
+# WEB MODE STILL NEEDS X. It skips the GLFW *window*, not the rendering: MuJoCo
+# renders offscreen through GLX here because EGL fails on this driver with a
+# gladLoadGL error, so the X session and `xhost +local:root` are still required.
+# What web mode removes is the need for a screen to LOOK at, not for X to exist.
+DISPLAY_MODE = os.environ.get("DISPLAY_MODE", "both").strip().lower()
+if DISPLAY_MODE not in ("glfw", "web", "both", "cv2", "none"):
+    raise SystemExit(f"DISPLAY_MODE={DISPLAY_MODE!r} is not one of "
+                     f"glfw, web, both, cv2, none")
+WANT_WINDOW = DISPLAY_MODE in ("glfw", "both")
+WANT_WEB = DISPLAY_MODE in ("web", "both")
+JPEG_QUALITY = int(os.environ.get("WEB_JPEG_QUALITY", "80"))
 NO_CV2 = DISPLAY_MODE != "cv2"
 
 # COCO class id -> readable label, for the classes the detector reports.
@@ -2168,7 +2182,8 @@ def main() -> None:
     sub = Subscriber([topics.ROBOT_STATE, topics.DETECTIONS,
                       topics.OBSTACLE_MASK, topics.GROUNDFLOOR_FLOOR,
                       topics.SUITE_CLOUD, topics.SUITE_CLUSTERS,
-                      topics.SUITE_MAP, topics.SUITE_PATH])
+                      topics.SUITE_MAP, topics.SUITE_PATH,
+                      topics.UI_CMD])
 
     bg = None           # latest camera colour (BGR uint8); None until first frame
     bg_t = 0.0
@@ -2235,6 +2250,7 @@ def main() -> None:
     # is what bounds the robot, and it is cheap to keep in step with the scene.
     frames = 0
     last_log = time.perf_counter()
+    _encode_ms_acc: list = []
 
     frame_min_dt = 1.0 / float(os.environ.get("MAX_FPS", "60"))
     last_frame_t = 0.0
@@ -2330,6 +2346,29 @@ def main() -> None:
                     suite_map_t = time.time()
                 except Exception as exc:
                     log.warning("bad occupancy grid (%s)", exc)
+                continue
+
+            if topic == topics.UI_CMD:
+                # The same actions the keys have, applied to the same state.
+                # The browser sends an ACTION, never a state: the compositor
+                # stays the single owner of what is displayed, so a page opened
+                # halfway through a demo cannot silently reset the overlays.
+                act = str(payload.get("action") or "")
+                if act == "floor":
+                    show_floor = not show_floor
+                elif act == "detections":
+                    show_seg = not show_seg
+                elif act == "cloud":
+                    cloud_mode = (cloud_mode + 1) % 3
+                elif act == "map":
+                    map_mode = (map_mode + 1) % 3
+                elif act == "reset":
+                    pub.send(topics.CMD_RESET, {"stamp": time.time()})
+                else:
+                    log.warning("unknown ui action %r", act)
+                    continue
+                log.info("ui: %s -> floor=%s seg=%s cloud=%d map=%d",
+                         act, show_floor, show_seg, cloud_mode, map_mode)
                 continue
 
             if topic == topics.SUITE_PATH:
@@ -2575,7 +2614,32 @@ def main() -> None:
             if _diag_written >= DIAG_FRAMES:
                 log.info("wrote %d diagnostic frame(s) to /data, stopping",
                          _diag_written)
-        if DISPLAY_MODE == "glfw":
+        if WANT_WEB:
+            # Encoded from the SAME CPU copy the overlays were drawn on, so the
+            # browser and the TV cannot disagree about what is on screen. The
+            # timestamp is burned into the pixels rather than only carried in
+            # the message: end-to-end latency is then measurable by photographing
+            # a browser next to a clock, which is the only way to include the
+            # browser's own decode and paint in the number.
+            _t_now = time.time()
+            cv2.putText(out, f"{_t_now:.3f}", (12, out.shape[0] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(out, f"{_t_now:.3f}", (12, out.shape[0] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                        cv2.LINE_AA)
+            _e0 = time.perf_counter()
+            _ok, _buf = cv2.imencode(".jpg", out,
+                                     [int(cv2.IMWRITE_JPEG_QUALITY),
+                                      JPEG_QUALITY])
+            _enc_ms = (time.perf_counter() - _e0) * 1000.0
+            if _ok:
+                _encode_ms_acc.append(_enc_ms)
+                pub.send(topics.COMPOSITED_FRAME, {
+                    "jpeg": _buf.tobytes(), "w": int(out.shape[1]),
+                    "h": int(out.shape[0]), "t": _t_now,
+                    "encode_ms": round(_enc_ms, 2)})
+
+        if WANT_WINDOW and window is not None:
             _fbw, _fbh = glfw.get_framebuffer_size(window)
             if _annotated:
                 # The overlay and the patrol ring are drawn on the CPU copy, so
@@ -2598,8 +2662,12 @@ def main() -> None:
         if now - last_log >= 30.0:
             fps = frames / (now - last_log)
             age = time.time() - bg_t if bg_t else -1
-            log.info("composited %.1f fps, bg age %.2fs, depth paired=%s",
-                     fps, age, depth_ok)
+            log.info("composited %.1f fps, bg age %.2fs, depth paired=%s%s",
+                     fps, age, depth_ok,
+                     (f", jpeg encode median {sorted(_encode_ms_acc)[len(_encode_ms_acc) // 2]:.1f} ms"
+                      f" over {len(_encode_ms_acc)} frames")
+                     if _encode_ms_acc else "")
+            _encode_ms_acc.clear()
             frames = 0
             last_log = now
 
@@ -2654,7 +2722,12 @@ def main() -> None:
                                  cam_height, _cam_pitch_deg)
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
-        else:
+        elif not WANT_WEB:
+            # The 65-frame stop is for DISPLAY_MODE=none, a smoke test with
+            # nobody watching. Web mode has a viewer -- it is just not on this
+            # machine -- so it must run indefinitely. Missing this turned the
+            # first web run into a compositor that served 65 frames and exited,
+            # restarted, and served 65 more: "headless: 65 frames done".
             if frames > 65:
                 log.info("headless: 65 frames done, stopping")
                 break

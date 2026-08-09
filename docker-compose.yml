@@ -230,6 +230,17 @@ services:
       # dit "maintenant" et la carte "tout ce qui a ete vu", et les deux servent
       # en meme temps.
       SHOW_MAP: ${SHOW_MAP:-0}
+      # web | glfw | both. "both" par defaut : la television continue de
+      # marcher et le reseau local voit la meme image.
+      #
+      # LE MODE WEB A ENCORE BESOIN DE X. Il saute l'AFFICHAGE dans la fenetre,
+      # pas le rendu : MuJoCo rend hors ecran via GLX ici (EGL echoue sur ce
+      # pilote), et la fenetre GLFW porte le contexte GL -- ce pilote refuse de
+      # rendre un contexte courant sur une fenetre X non mappee. La session X
+      # et `xhost +local:root` restent donc necessaires pour RENDRE, pas pour
+      # REGARDER.
+      DISPLAY_MODE: ${DISPLAY_MODE:-both}
+      WEB_JPEG_QUALITY: ${WEB_JPEG_QUALITY:-80}
       # Fait attendre DIAG_FRAMES qu'un chemin soit arrive. Le chemin arrive
       # apres la carte, qui arrive apres les premieres trames annotees, donc
       # une capture scriptee ecrivait la carte sans le chemin.
@@ -552,6 +563,30 @@ services:
       # c'est un client d'action de planner_server, et le but est de mesurer le
       # planificateur tel qu'il est configure, pas de le reimplementer.
       - ./scripts:/scripts:ro
+
+  # Console web. Profil de base : la demo doit etre regardable depuis un
+  # navigateur du reseau local, le NUC etant loin de la television. Ne rend
+  # rien lui-meme, il retransmet les trames deja encodees par le compositeur --
+  # un second chemin de rendu serait libre de diverger du premier.
+  #
+  # AUCUNE AUTHENTIFICATION, RESEAU LOCAL UNIQUEMENT. Ecoute sur 0.0.0.0:8080 ;
+  # quiconque atteint le port voit la camera et bascule les superpositions.
+  web:
+    build:
+      context: .
+      dockerfile: services/web/Dockerfile
+    depends_on: [bus]
+    environment:
+      <<: *bus-env
+      WEB_PORT: ${WEB_PORT:-8080}
+      # Affiches tels quels dans le panneau d'etat. Ce sont les memes variables
+      # que lisent sim et compositor, donc le panneau ne peut pas annoncer un
+      # mode different de celui qui tourne.
+      OBSTACLE_SOURCE: ${OBSTACLE_SOURCE:-ours}
+      NAV_MODE: ${NAV_MODE:-patrol}
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    restart: unless-stopped
 
   recorder:
     build:
