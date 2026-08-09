@@ -13,7 +13,10 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
     const w = Math.round(1920 / (z/100)), h = Math.round(1080 / (z/100));
     await page.setViewport({width: w, height: h, deviceScaleFactor: z/100});
     await page.goto(url, {waitUntil: 'domcontentloaded'});
-    await new Promise(r => setTimeout(r, 3500));   // let the pollers fill in
+    // Long enough for the MJPEG stream to decode a first frame AND for the
+    // web service to accumulate two history samples, or the video measures
+    // zero-height and the sparklines are legitimately empty.
+    await new Promise(r => setTimeout(r, 9000));
     const m = await page.evaluate(() => {
       const d = document.documentElement;
       const vis = (sel) => { const e = document.querySelector(sel);
@@ -26,7 +29,16 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
         scrollW: d.scrollWidth, clientW: d.clientWidth,
         scrollH: d.scrollHeight, clientH: d.clientHeight,
         video: vis('.view img'), status: vis('#status'),
-        platform: vis('#platform'),
+        platform: vis('#platform'), header: vis('header'),
+        title: vis('.title'), subtitle: vis('.subtitle'),
+        // Top alignment: the three cards must share a top edge.
+        tops: [...document.querySelectorAll('main > .card')]
+                .map(e => Math.round(e.getBoundingClientRect().top)),
+        titlePx: parseFloat(getComputedStyle(
+                   document.querySelector('.title')).fontSize),
+        subPx: parseFloat(getComputedStyle(
+                 document.querySelector('.subtitle')).fontSize),
+        bodyPx: parseFloat(getComputedStyle(document.body).fontSize),
         statusRows: document.querySelectorAll('#status .metrics-row').length,
         platRows: document.querySelectorAll('#platform .metrics-row').length,
         sparks: document.querySelectorAll('#platform svg.spark path').length,
@@ -41,6 +53,11 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
     console.log(`  video   ${m.video.w}x${m.video.h} fullyInView=${m.video.inView}`);
     console.log(`  status  ${m.status.w}x${m.status.h} fullyInView=${m.status.inView} rows=${m.statusRows}`);
     console.log(`  platform ${m.platform.w}x${m.platform.h} fullyInView=${m.platform.inView} rows=${m.platRows} sparklines=${m.sparks}`);
+    console.log(`  header  ${m.header.w}x${m.header.h} fullyInView=${m.header.inView}` +
+                ` title=${m.titlePx.toFixed(1)}px subtitle=${m.subPx.toFixed(1)}px` +
+                ` body=${m.bodyPx.toFixed(1)}px`);
+    console.log(`  card tops=${JSON.stringify(m.tops)} aligned=` +
+                `${new Set(m.tops).size === 1}`);
     console.log(`  buttons=${m.overlayButtons} h2Titles=${m.headings}`);
     await page.screenshot({path: `/out/zoom-${z}.png`});
     await page.close();

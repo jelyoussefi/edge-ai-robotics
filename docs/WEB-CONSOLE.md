@@ -156,43 +156,74 @@ precisely so they never go through msgpack as floats. The stream went from
 1 frame per client to **30.1 fps, 2.17 MB/s**, and frame age from -46 s to
 0.01 s.
 
-## 4. Layout
+## 4. Header and layout
 
-Three columns inside one viewport-height shell: **Status left, video centre,
-Platform right**. No panel titles — the rows label themselves, and a heading
-saying "Status" above rows that obviously are status is a line of pixels the
-video could have had.
+**Header**, two centred lines stacked above the columns:
 
-**It must fit at any zoom, with no scrollbars.** Browser zoom shrinks the CSS
-viewport, so a layout that fits at 100 % and overflows at 150 % was measured in
-pixels somewhere. Nothing here is:
+- **Edge AI Robotics** — bold, centred, and clearly the largest thing on the
+  page, with a horizontal gradient painted through the glyphs:
+  `linear-gradient(90deg, #1A4B8C 0%, #C99A5B 50%, #1A4B8C 100%)` plus
+  `background-clip:text` and `color:transparent`. The element is
+  `display:inline-block`: `background-clip:text` on an *inline* box clips to
+  the line box rather than the text, and the fill comes out cut at the
+  descenders.
+- **Unitree G1 · MuJoCo · RealSense D455** — smaller, centred beneath it, light
+  letter-spacing, solid olive `#8A9A3B`.
 
-- the shell is `100%` height with `overflow:hidden`, a flex column;
-- `main` is `grid-template-columns: minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr)`
-  — `minmax(0,Nfr)` and not `Nfr`, so a column may be **narrower than its
-  content** instead of pushing the grid past the viewport, which is exactly what
-  creates a scrollbar at high zoom;
-- every column and panel carries `min-height:0`, without which a grid or flex
-  child refuses to shrink below its content;
-- text is `clamp(9px, 1.05vmin, 15px)` and all spacing is in `em`, so the panels
-  scale with the viewport rather than fighting it;
-- the video is `width:100%; height:100%; object-fit:contain` — not `max-width`
-  with `auto`, which refuses to scale a 1280x720 composite **up** and left it
-  sitting at native size in the middle of an empty column on a large screen.
+**Three top-aligned cards** below it: Status left, video centre, Platform right.
+`align-items:start` — the grid spelling of `flex-start` — so each card is only
+as tall as its own content and the three share a top edge instead of the short
+ones stretching to match the tall one. Each card is white, `1px #E3E8EC`,
+`border-radius:10px`, `box-shadow:0 2px 10px rgba(0,40,90,0.08)`, with the same
+padding. No panel titles: the rows label themselves.
 
-Verified in headless Chrome at three zoom levels, emulated as the CSS viewport a
-1920x1080 screen presents at each:
+The palette went light because the cards are specified white — near-white text
+on a white card is unreadable, so the whole page follows rather than only the
+cards. Borders and radii stay in px exactly as given; they do not drive layout,
+so they cannot cause an overflow.
 
-| zoom | CSS viewport | scrollbars | video | status | platform |
+### Fitting at any zoom
+
+Browser zoom shrinks the CSS viewport, so a layout that fits at 100 % and
+overflows at 150 % was measured in pixels somewhere. What keeps it honest:
+
+- `minmax(0,Nfr)` column tracks rather than `Nfr`, so a column may be **narrower
+  than its content** instead of widening the grid past the viewport — the usual
+  cause of a scrollbar at high zoom;
+- an explicit `grid-template-rows:minmax(0,1fr)`. Without it the row height is
+  content-driven, so `max-height:100%` on a card resolves against an indefinite
+  height — a circular constraint Chrome settles at **zero**, which measured as a
+  2214x0 video before it was caught;
+- `min-height:0` on every child, without which a grid or flex child refuses to
+  shrink below its content;
+- all spacing in `em`, and type in `clamp()` against `vmin`;
+- the video card is `align-self:start` with `width:100%; height:auto`, so it
+  hugs the 16:9 frame and there is no white letterbox band inside a white card.
+
+**Type sizes are clamps whose ceiling is the size asked for**, not flat rem
+values: `clamp(1.1rem, 3.2vmin, 2.2rem)` for the title and
+`clamp(.6rem, 1.5vmin, 1rem)` for the subtitle. A flat rem does not shrink with
+the viewport, so at 150 % zoom on a small screen a 2.2rem heading plus a 16:9
+video plus two cards is taller than the viewport, and "~2.2rem" and "no
+scrollbars at 150 %" would contradict each other. The clamp honours the size
+wherever there is room and gives way where there is not.
+
+Verified in headless Chrome at the CSS viewport a 1920x1080 screen presents at
+each zoom:
+
+| zoom | CSS viewport | scrollbars | video | card tops aligned | title / subtitle / body |
 |---|---|---|---|---|---|
-| 50 % | 3840x2160 | none | 2244x2060, fully in view | fully in view | fully in view |
-| 100 % | 1920x1080 | none | 1115x1004, fully in view | fully in view | fully in view |
-| 150 % | 1280x720 | none | 741x659, fully in view | fully in view | fully in view |
+| 50 % | 3840x2160 | none | 2214x1245 | yes | 35.2 / 16.0 / 15.0 px |
+| 100 % | 1920x1080 | none | 1092x614 | yes | 34.6 / 16.0 / 11.3 px |
+| 150 % | 1280x720 | none | 722x406 | yes | 23.0 / 10.8 / 9.0 px |
 
-"Fully in view" is checked against the viewport rectangle, not eyeballed, and
-`scrollWidth`/`scrollHeight` are compared with `clientWidth`/`clientHeight` in
-both axes. The check is `scripts/zoom_check.js`; run it against a running
-console with any Chrome that has puppeteer:
+Header, both cards and the video are each checked **fully inside the viewport
+rectangle**, `scrollWidth`/`scrollHeight` are compared with
+`clientWidth`/`clientHeight` in both axes, and the three card tops are compared
+for equality. At 100 % the title lands at 34.6 px = 2.16rem and the subtitle at
+exactly 1rem; at 150 % the clamp gives way, by design.
+
+The check is `scripts/zoom_check.js`, against a running console:
 
 ```bash
 docker run --rm --user root -e PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppeteer \

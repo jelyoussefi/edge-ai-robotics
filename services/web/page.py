@@ -3,16 +3,30 @@
 """The console page, kept out of app.py so the server stays readable.
 
 Layout contract, and the reason every rule below is written the way it is:
-**the video and both panels must be visible together, with no scrollbars, at
-any browser zoom.** Browser zoom shrinks the CSS viewport, so a layout that
+**the header and all three cards must be visible together, with no scrollbars,
+at any browser zoom.** Browser zoom shrinks the CSS viewport, so a layout that
 fits at 100 % and overflows at 150 % is a layout that was measured in pixels
-somewhere. Nothing here is: the shell is a grid of fractional columns inside a
-100dvh column, every panel carries `min-height: 0` so a grid child may actually
-shrink below its content, text is sized with `clamp()` against `vmin`, and the
-video is `object-fit: contain` inside a flexible cell rather than a width.
+somewhere. The structure is a fixed three-column grid inside a full-height
+column: `minmax(0,Nfr)` tracks so a column may be narrower than its content,
+`min-height:0` on every child, all spacing in `em`, and type sized with
+`clamp()` against `vmin`.
 
-The widgets follow reference/intel-toolkit/metrics-panel.js: one row per
-metric, carrying `data-max`, with a `<prefix>-<kind>-val` number and a
+Type sizes are given as clamps whose CEILING is the size asked for -- the title
+tops out at 2.2rem and the subtitle at 1rem -- rather than as flat rem values.
+A flat rem does not shrink with the viewport, so at 150 % zoom on a small screen
+a 2.2rem heading plus a 16:9 video plus two cards is taller than the viewport,
+and the fit requirement and the size requirement would contradict each other.
+The clamp honours the size wherever there is room for it and gives way where
+there is not, which is what "~2.2rem" plus "no scrollbars at 150 %" can both
+mean at once.
+
+The palette is light because the cards are specified white; near-white text on a
+white card is unreadable, so the whole page follows rather than only the cards.
+Borders and radii stay in px exactly as specified -- they do not drive layout,
+so they cannot cause an overflow.
+
+The widgets follow reference/intel-toolkit/metrics-panel.js: one row per metric,
+carrying `data-max`, with a `<prefix>-<kind>-val` number and a
 `<prefix>-<kind>-bar` whose width is the value against that maximum. A missing
 value writes an em dash and a zero-width bar -- never a zero that reads as a
 measurement. The sparkline is the one addition, hand-written inline SVG.
@@ -21,14 +35,20 @@ from __future__ import annotations
 
 # data-max values are DISPLAY CEILINGS, not measurements, and are labelled as
 # such: percentages cap at 100 by definition; the wattage ceilings come from
-# what this board actually draws (package measured at 56.6 W under the full
-# demo, iGPU at 7.9 W) rounded up to a round number so a bar near the top means
+# what this board actually draws (package measured at 55.4 W under the full
+# demo, iGPU at 7.3 W) rounded up to a round number so a bar near the top means
 # "working hard" rather than "at a limit the silicon knows about".
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Edge AI Robotics</title><style>
-:root{--bg:#0b0e14;--panel:#141922;--line:#232b39;--fg:#e6edf7;--dim:#8b98ad;
---accent:#00c7fd;--bar:#00c7fd;--barbg:#1b2230}
+:root{
+  --bg:#EEF2F6; --card:#FFFFFF; --line:#E3E8EC;
+  --fg:#1B2733; --dim:#5A6B7B;
+  --accent:#1A4B8C;          /* the blue at both ends of the title gradient */
+  --olive:#8A9A3B;           /* the subtitle */
+  --barbg:#E9EEF3;
+  --shadow:0 2px 10px rgba(0,40,90,0.08);
+}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
 body{background:var(--bg);color:var(--fg);
@@ -36,65 +56,81 @@ font:400 clamp(9px,1.05vmin,15px)/1.45 "Intel One Text",system-ui,
 -apple-system,Segoe UI,sans-serif;
 display:flex;flex-direction:column}
 
-header{flex:0 0 auto;display:flex;align-items:center;gap:.8em;
-padding:.7em 1.2em;background:var(--panel);border-bottom:1px solid var(--line)}
-header b{font-weight:600;letter-spacing:.02em;font-size:1.15em}
-header .sp{margin-left:auto;color:var(--dim);font-size:.9em}
-.dot{width:.6em;height:.6em;border-radius:50%;background:var(--accent);
-flex:0 0 auto}
+/* ---- header: two centred lines, stacked, above the columns ------------- */
+header{flex:0 0 auto;text-align:center;padding:1.1em 1em .85em}
+.title{
+  font-size:clamp(1.1rem,3.2vmin,2.2rem);
+  font-weight:700;line-height:1.12;letter-spacing:.01em;
+  /* The gradient is painted through the glyphs. display:inline-block matters:
+     background-clip:text on an inline box clips to the line box rather than
+     the text, and the fill comes out cut off on the descenders. */
+  display:inline-block;
+  background:linear-gradient(90deg,#1A4B8C 0%,#C99A5B 50%,#1A4B8C 100%);
+  -webkit-background-clip:text;background-clip:text;
+  color:transparent;-webkit-text-fill-color:transparent;
+}
+.subtitle{font-size:clamp(.6rem,1.5vmin,1rem);color:var(--olive);
+letter-spacing:.06em;margin-top:.35em;font-weight:500}
 
-/* Three fractional columns: status | video | platform. minmax(0,Nfr) rather
-   than Nfr so a column is allowed to be narrower than its content instead of
-   pushing the grid wider than the viewport, which is what creates a
-   scrollbar at high zoom. */
+/* ---- three top-aligned cards: status | video | platform ---------------- */
+/* align-items:start is the grid spelling of flex-start: each card is only as
+   tall as its own content, so the three tops line up instead of the short ones
+   stretching to match the tall one. minmax(0,Nfr) rather than Nfr so a column
+   may be NARROWER than its content instead of widening the grid past the
+   viewport, which is what produces a scrollbar at high zoom. */
+/* An explicit 1fr ROW as well as the columns. Without it the row height is
+   content-driven, so `max-height:100%` on a card resolves against an
+   indefinite height -- a circular constraint that Chrome settles at zero, and
+   the video measured 2202x0. With a definite row the percentage means what it
+   says and acts as the backstop it was meant to be. */
 main{flex:1 1 auto;min-height:0;display:grid;
 grid-template-columns:minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr);
-gap:.8em;padding:.8em}
-.col{min-width:0;min-height:0;overflow:hidden;display:flex;
-flex-direction:column;gap:.6em}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:.4em;
-padding:.8em .9em;min-height:0;overflow:hidden}
-.view{min-width:0;min-height:0;display:flex;align-items:center;
-justify-content:center}
-/* width/height 100% + contain, NOT max-width with auto: the latter refuses to
-   scale a 1280x720 composite up, so on a large screen (or at 50% zoom) the
-   video sat at native size in the middle of an empty column while the panels
-   grew around it. contain still preserves the aspect ratio and never crops. */
-.view img{width:100%;height:100%;object-fit:contain;background:transparent}
+grid-template-rows:minmax(0,1fr);
+align-items:start;gap:1em;padding:0 1em 1em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+box-shadow:var(--shadow);padding:1em 1.1em;
+min-width:0;min-height:0;max-height:100%;overflow:hidden}
+/* The video card hugs the video: height from the 16:9 image rather than
+   stretched to the row, so there is no white letterbox band above and below a
+   widescreen frame inside a white card. */
+.card.view{align-self:start;padding:.7em}
+.view img{width:100%;height:auto;display:block;border-radius:6px;
+background:#0b0e14}
 
-/* Rows: label, value, bar. Same shape as the reference's metrics-row. */
+/* ---- rows: label, value, bar. The reference's metrics-row shape. ------- */
 .metrics-row{padding:.28em 0}
 .rl{display:flex;align-items:baseline;gap:.6em}
 .rl .k{color:var(--dim);white-space:nowrap;overflow:hidden;
 text-overflow:ellipsis}
 .rl .v{margin-left:auto;color:var(--fg);font-variant-numeric:tabular-nums;
-white-space:nowrap;font-weight:600}
+white-space:nowrap;font-weight:700}
 .rl .u{color:var(--dim);font-size:.85em;margin-left:.15em}
 .track{height:.42em;margin-top:.28em;background:var(--barbg);
 border-radius:.21em;overflow:hidden}
-.fill{height:100%;width:0;background:var(--bar);border-radius:.21em;
+.fill{height:100%;width:0;background:var(--accent);border-radius:.21em;
 transition:width .35s ease}
-.na{color:#6b7789;font-style:italic;font-size:.85em;padding:.1em 0 .2em}
-.sep{height:1px;background:var(--line);margin:.5em 0 .35em}
+.na{color:#93A2B0;font-style:italic;font-size:.85em;padding:.1em 0 .2em}
+.sep{height:1px;background:var(--line);margin:.55em 0 .4em}
 .grp{color:var(--accent);font-size:.82em;letter-spacing:.08em;
-text-transform:uppercase;font-weight:600;padding-bottom:.15em}
-.sparkwrap{position:relative;margin-top:.35em;background:#0f141d;
-border-radius:.25em;overflow:hidden}
+text-transform:uppercase;font-weight:700;padding-bottom:.15em}
+.sparkwrap{position:relative;margin-top:.35em;background:#F2F6F9;
+border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .spark{width:100%;height:2.6em;display:block}
-.sparkwrap .cap{position:absolute;right:.35em;top:.15em;color:#5a6678;
+.sparkwrap .cap{position:absolute;right:.35em;top:.1em;color:#93A2B0;
 font-size:.72em;letter-spacing:.04em}
-.foot{flex:0 0 auto;color:var(--dim);font-size:.82em;padding:.35em 1.2em .6em;
+.foot{flex:0 0 auto;color:var(--dim);font-size:.82em;padding:0 1em .7em;
 text-align:center}
 </style></head><body>
 
-<header><span class="dot"></span><b>Edge AI Robotics</b>
-<span style="color:var(--dim)">Unitree G1 &middot; MuJoCo &middot; RealSense D455</span>
-<span class="sp" id="hdr"></span></header>
+<header>
+  <div class="title">Edge AI Robotics</div>
+  <div class="subtitle">Unitree G1 &middot; MuJoCo &middot; RealSense D455</div>
+</header>
 
 <main>
-  <div class="col"><div class="panel" id="status"></div></div>
-  <div class="col view"><img src="/stream" alt="live composite"></div>
-  <div class="col"><div class="panel" id="platform"></div></div>
+  <div class="card" id="status"></div>
+  <div class="card view"><img src="/stream" alt="live composite"></div>
+  <div class="card" id="platform"></div>
 </main>
 
 <p class="foot">LAN only, no authentication &middot; overlays from the keyboard
@@ -147,13 +183,13 @@ function spark(series, max){
     const y = (H - (Math.max(0,Math.min(max||m, v))/(max||m))*(H-2) - 1).toFixed(2);
     d += (pen ? 'L' : 'M') + x + ' ' + y + ' '; pen = true;
   });
-  // Area under the line as well as the line: at low values the stroke alone
-  // is a faint scratch near the floor of the box, and the point of a sparkline
-  // is to be readable without being read.
+  // Area under the line as well as the line: at low values the stroke alone is
+  // a faint scratch near the floor of the box, and the point of a sparkline is
+  // to be readable without being read.
   const area = d ? d + `L ${W} ${H} L 0 ${H} Z` : '';
   return `<div class="sparkwrap"><svg class="spark" viewBox="0 0 ${W} ${H}"
       preserveAspectRatio="none">
-    <path d="${area}" fill="var(--accent)" opacity=".14"/>
+    <path d="${area}" fill="var(--accent)" opacity=".12"/>
     <path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.2"
       vector-effect="non-scaling-stroke" opacity=".95"/></svg>
     <span class="cap">60 s</span></div>`;
@@ -230,8 +266,6 @@ async function tickPlatform(){
     na('cpu-na', un, ['pkg_w']);
     na('gpu-na', un, ['gpu_pct','gpu_w','gpu_mhz']);
     na('npu-na', un, ['npu_pct','npu_w','npu_mhz']);
-    document.getElementById('hdr').textContent =
-      j.stamp ? 'PCM + qmassa' : 'telemetry offline';
   }catch(e){}
   setTimeout(tickPlatform, 1000);
 }
