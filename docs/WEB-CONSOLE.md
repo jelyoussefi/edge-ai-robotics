@@ -78,6 +78,52 @@ fell out of doing this:
 port (`640x640`) and letterboxes whatever frame it is given, aspect preserved.
 Confirmed at 720p: `yolo11m-seg.xml compiled for NPU, input 640x640`.
 
+### Proving the sensor really opened 720p
+
+`STREAM_RES=720p` being set proves nothing, and neither does a log line that
+echoes the numbers passed to `enable_stream` — it prints the same values whether
+or not the device honoured them. The source therefore reads the **active**
+profiles back off the pipeline and logs those:
+
+```
+source: requested 1280x720@30 colour + depth (scale 0.0010)
+RealSense negotiated: colour 1280x720@30 format.bgr8 | depth 1280x720@30 format.z16
+colour intrinsics from the SDK: 1280x720 fx=644.5 fy=644.6 ppx=649.3 ppy=359.4
+first published pair: colour array (720, 1280, 3), depth array (720, 1280)
+```
+
+If either stream comes back at a size other than the one requested, that is
+logged at ERROR, because the calibration describes the requested raster.
+
+**The depth line is the one that matters.** `rs.align(rs.stream.color)`
+resamples depth onto the colour resolution, so a depth stream opened at 848x480
+would still arrive on the bus as 1280x720 and nothing downstream could tell.
+The active profile is the only place the true depth stream size is visible;
+checking the bus payload cannot substitute for it.
+
+Independent end-to-end confirmation off the bus: the `CAMERA_RGB` JPEG decodes
+to `(720, 1280, 3)`, and `CAMERA_DEPTH` carries 1 843 200 bytes = 921 600 uint16
+= exactly 1280x720.
+
+### Why this makes recalibration non-negotiable
+
+The SDK's 720p intrinsics are not the 480p ones scaled:
+
+| | 720p, from the SDK | 480p, calibration on disk |
+|---|---|---|
+| fx / fy | 644.5 / 644.6 | 386.4 / 386.5 |
+| ppx / ppy | 649.3 / 359.4 | 325.6 / 239.6 |
+| HFOV / VFOV | **89.6° / 58.4°** | **79.3° / 63.7°** |
+
+Scaling the old `fx` by the width ratio 1280/640 = 2.0 gives 772.8. The sensor
+actually reports **644.5** — the naive scaling is **+19.9 % wrong**, and the
+field of view is 10° *wider* horizontally and 5° *narrower* vertically, because
+720p is a different sensor crop rather than an enlargement of 480p.
+
+That is the entire argument for `_intrinsics_reference()` and for the stale-
+calibration guard, in numbers: running 720p against the 480p calibration does
+not make distances slightly off, it makes them wrong by a fifth.
+
 ### Measured cost
 
 Same room, same scene, consecutive runs. `before` is the configuration as it

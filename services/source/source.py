@@ -66,7 +66,33 @@ def main() -> None:
     config.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
     profile = pipeline.start(config)
     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-    log.info("source: camera %dx%d@%d colour + depth (scale %.4f)", w, h, fps, depth_scale)
+    log.info("source: requested %dx%d@%d colour + depth (scale %.4f)",
+             w, h, fps, depth_scale)
+
+    # What the SDK actually gave back, read off the ACTIVE profiles rather than
+    # echoing what we asked for. The line above is only the request: it prints
+    # the same numbers whether or not the device honoured them, which makes it
+    # useless as evidence and was mistaken for proof once already.
+    #
+    # The depth line matters more than it looks. rs.align(color) below resamples
+    # depth onto the COLOUR resolution, so a depth stream opened at 848x480
+    # would still arrive on the bus as 1280x720 and nothing downstream could
+    # tell. The only place the true depth stream size is visible is here.
+    _cp = profile.get_stream(rs.stream.color).as_video_stream_profile()
+    _dp = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+    log.info("RealSense negotiated: colour %dx%d@%d %s | depth %dx%d@%d %s",
+             _cp.width(), _cp.height(), _cp.fps(), _cp.format(),
+             _dp.width(), _dp.height(), _dp.fps(), _dp.format())
+    for _name, _p in (("colour", _cp), ("depth", _dp)):
+        if (_p.width(), _p.height(), _p.fps()) != (w, h, fps):
+            log.error("the %s stream came back as %dx%d@%d, NOT the %dx%d@%d "
+                      "asked for. The calibration describes the requested "
+                      "raster, so every distance downstream is wrong.",
+                      _name, _p.width(), _p.height(), _p.fps(), w, h, fps)
+    _i = _cp.get_intrinsics()
+    log.info("colour intrinsics from the SDK: %dx%d fx=%.1f fy=%.1f "
+             "ppx=%.1f ppy=%.1f", _i.width, _i.height, _i.fx, _i.fy,
+             _i.ppx, _i.ppy)
 
     # Align depth to colour so a pixel (u,v) in the colour image maps to the same
     # point in the depth image. The D455's colour and depth sensors are physically
@@ -115,6 +141,7 @@ def main() -> None:
     depth_interval = 1.0 / DEPTH_HZ
     last_rgb = 0.0
     last_depth = 0.0
+    logged_shapes = False   # one-shot: what the first published pair really is
 
     while running:
         try:
@@ -132,6 +159,15 @@ def main() -> None:
             cf = frames.get_color_frame()
             if cf:
                 color = np.asanyarray(cf.get_data())
+                if not logged_shapes:
+                    logged_shapes = True
+                    # Post-alignment, which is what actually reaches the bus.
+                    _df0 = frames.get_depth_frame()
+                    log.info("first published pair: colour array %s, depth "
+                             "array %s (depth AFTER align to colour)",
+                             color.shape,
+                             np.asanyarray(_df0.get_data()).shape if _df0
+                             else "none")
                 ok, buf = cv2.imencode(".jpg", color, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if ok:
                     pub.send(topics.CAMERA_RGB,
