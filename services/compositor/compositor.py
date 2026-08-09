@@ -2148,6 +2148,38 @@ def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
     except Exception as exc:
         log.warning("could not save diagnostic frame: %s", exc)
 
+SNAPSHOT_DIR = os.environ.get("SNAPSHOT_DIR", "/docs/images")
+
+
+def _save_snapshot(frame) -> None:
+    """Write the frame currently on screen, named with the local date and time.
+
+    The frame passed in is the annotated CPU copy -- the same array the window
+    and the web console show -- so what lands on disk is what was being looked
+    at, overlays included, rather than a re-render that could differ.
+
+    The timestamp is LOCAL time, which needs /etc/localtime mounted into this
+    container: without it the clock inside is UTC and every capture would be
+    filed a couple of hours before it was taken. The name is sortable and
+    carries no counter, so two captures in the same second overwrite -- a
+    second is a long time to hold a key down.
+    """
+    if frame is None:
+        log.warning("nothing composited yet, nothing to save")
+        return
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        name = time.strftime("frame-%Y%m%d-%H%M%S") + ".png"
+        path = os.path.join(SNAPSHOT_DIR, name)
+        if not cv2.imwrite(path, frame):
+            raise OSError(f"cv2.imwrite refused {path}")
+        log.info("saved %s (%dx%d, local time %s)", path,
+                 frame.shape[1], frame.shape[0],
+                 time.strftime("%Y-%m-%d %H:%M:%S %Z"))
+    except Exception as exc:      # a capture must never take the demo down
+        log.warning("could not save the frame to %s: %s", SNAPSHOT_DIR, exc)
+
+
 def _log_depth_probe(gpu, data, cam_height, cam_pitch_deg, fx, fy, ppx, ppy,
                      depth_metres, w, h, floor_det=None) -> None:
     """Print the two depths the occlusion test compares, down through a foot.
@@ -2985,7 +3017,14 @@ def main() -> None:
             if _h and not prev_keys["h"]:
                 show_scale = not show_scale
                 log.info("scale reference lines %s", "on" if show_scale else "off")
-            if _s and not prev_keys["s"]:
+            # Shift+S saves, plain s toggles. GLFW reports a physical key, not
+            # a character, so the two are told apart by the modifier rather
+            # than by case -- there is no KEY_CAPITAL_S to ask for.
+            _shift = (glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS
+                      or glfw.get_key(window, glfw.KEY_RIGHT_SHIFT) == glfw.PRESS)
+            if _s and not prev_keys["s"] and _shift:
+                _save_snapshot(out)
+            elif _s and not prev_keys["s"]:
                 show_seg = not show_seg
                 log.info("segmentation overlay %s%s", "on" if show_seg else "off",
                          "" if seg_mask is not None else

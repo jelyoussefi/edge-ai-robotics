@@ -33,8 +33,10 @@ PORT = int(os.environ.get("WEB_PORT", "8080"))
 BOUNDARY = "edgebotframe"
 
 HISTORY = 60          # seconds of sparkline, at the collector's 1 Hz
+FPS_WINDOW = 30       # frames averaged for the FPS tile
 
 STATE: dict = {"frame": None, "t": 0.0, "platform": {}, "history": {},
+               "arrivals": [],
                "laps": 0, "source": "?", "mode": "?", "map_known": 0,
                "map_occupied": 0, "goal": None, "path_len": 0.0,
                "clearance": 0.0, "robot": None}
@@ -64,6 +66,13 @@ async def pump(app):
             if topic == topics.COMPOSITED_FRAME:
                 STATE["frame"] = payload["jpeg"]
                 STATE["t"] = float(payload.get("t", 0.0))
+                # FPS is measured HERE, from arrivals, not taken from the
+                # compositor's own counter: this is the rate the console is
+                # actually able to show, which is the number a viewer of this
+                # page is asking about.
+                a = STATE["arrivals"]
+                a.append(time.monotonic())
+                del a[:-FPS_WINDOW]
             elif topic == topics.SUITE_MAP:
                 STATE["map_known"] = int(payload.get("known", 0))
                 STATE["map_occupied"] = int(payload.get("occupied", 0))
@@ -157,6 +166,12 @@ async def platform(request):
     """
     p = dict(STATE["platform"])
     p["history"] = STATE["history"]
+    a = STATE["arrivals"]
+    # Two arrivals are the minimum that define a rate, and a stalled stream
+    # must read as no-data rather than as the last rate it had.
+    p["fps"] = (round((len(a) - 1) / (a[-1] - a[0]), 1)
+                if len(a) >= 2 and a[-1] - a[0] > 0
+                and time.monotonic() - a[-1] < 2.0 else None)
     return web.json_response(p)
 
 

@@ -346,26 +346,78 @@ docker run --rm --user root -e PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppete
 ![console at 100 %](images/web-console-v3-100.png)
 ![console at 150 %](images/web-console-v3-150.png)
 
-## 5. Status panel
+## 5. The monitor strip
 
-Obstacle source, nav mode, map cells known and occupied, active goal, path
-length, clearance, stream resolution.
+The Status panel is gone and the readings sit in a strip **under the video, the
+same width as it**, styled after `docs/monitor.png`: one tile per quantity, a
+blue uppercase label over a dark inset showing green digits.
 
-Deliberately absent: frame counts, frame age, encode time — those describe the
-console's own plumbing — and the **robot pose row**, which was the raw
-`(x, y)` of the base and told a viewer nothing the picture does not.
+| tile | source | note |
+|---|---|---|
+| CPU | `/proc/stat` | busy %, all threads |
+| GPU | qmassa `eng_usage` | max across engines |
+| NPU | `npu_busy_time_us` | differenced |
+| FPS | the web service | frames arriving per second |
+| VRAM | qmassa `mem_info` | **shared system memory** on this iGPU |
+| POWER | Intel PCM | package watts |
+| TEMP | `coretemp/temp1_input` | package, "Package id 0" |
 
-## 6. Platform panel
+**FPS is measured at the web service, from arrivals**, not taken from the
+compositor's counter — it is the rate this page can actually show. It reads a
+few fps under the compositor's own figure (35–37 against 40–43) because some
+frames are dropped at the bus high-water mark, and that difference is the
+honest part of the number.
 
-Value + bar per row driven by `data-max`, exactly the shape of
-`reference/intel-toolkit/metrics-panel.js::setMetricRow`, plus a 60 s sparkline
-per engine drawn as hand-written inline SVG. No charting library: an area, a
-polyline and a caption are the whole requirement.
+**VRAM is shared memory, and the tile says so on hover.** This iGPU reports
+`vram_total: 0`; the real figure is `smem_used`, system memory the GT is using.
+Both are carried in the payload with a `gpu_mem_shared` flag rather than
+quietly calling shared memory VRAM.
 
-`data-max` values are **display ceilings, not measurements**: percentages cap at
-100 by definition, and the wattage ceilings (80 W package, 30 W iGPU) are what
-this board actually draws rounded up, so a full bar means "working hard" and not
-"at a limit the silicon knows about".
+A null reading writes an em dash, never a zero, and the collector's own reason
+goes on the tile's tooltip — the readout has room for a number and nothing else.
+
+### Same width as the video, at any zoom
+
+The video and the strip are one centred column. The video's **height** is what
+is left after the header and the strip, its width follows from 16:9, and the
+column is `width:fit-content` — so the column ends up exactly as wide as the
+video and the strip's `width:100%` inherits that. Neither element needs to know
+the other's number.
+
+`--mon-h` is a length rather than a percentage for the same reason the row
+needed an explicit track earlier: `aspect-ratio` can only give a definite width
+from a definite height.
+
+| zoom | video | strip | width delta | tiles | scrollbars |
+|---|---|---|---|---|---|
+| 50 % | 3421x1924 (1.778) | 3421x81 | **0 px** | 7 | none |
+| 100 % | 1543x868 (1.778) | 1543x61 | **0 px** | 7 | none |
+| 150 % | 1000x563 (1.776) | 1000x49 | **0 px** | 7 | none |
+
+## 6. Saving a frame: Shift+S
+
+**Shift+S** in the compositor window writes what is on screen to
+`docs/images/frame-YYYYMMDD-HHMMSS.png`. Plain `s` still toggles the detections
+overlay — GLFW reports a physical key rather than a character, so the two are
+told apart by the shift modifier, not by case.
+
+What is written is the annotated CPU copy, the same array the window and the
+browser show, so the file is what was being looked at, overlays included.
+
+**The timestamp is local time, and that needed a mount.** The container clock is
+UTC: it read 17:34 while the host read 19:34 CEST, so every capture would have
+been filed two hours early. `/etc/localtime` and `/etc/timezone` are mounted
+read-only into the compositor, after which both clocks agree:
+
+```
+host      : 19:38:10 CEST
+compositor: 19:38:10 CEST
+```
+
+`./docs` is mounted so the file lands in the repository. It is written by root,
+like everything else the containers produce in `data/`. `SNAPSHOT_DIR` moves it.
+
+## 7. Where the readings come from
 
 ### Power: Intel PCM over the MSRs
 
@@ -520,7 +572,7 @@ flat gauge as a broken one.
 
 The collector costs **0.1 % CPU and 9.6 MB**, PMU tools included.
 
-## 7. Overlays: keyboard only
+## 8. Overlays: keyboard only
 
 The on-page overlay panel is gone. `f` floor, `s` detections, `p` suite cloud,
 `m` map and `r` reset still work **at the machine**, unchanged.
@@ -531,7 +583,7 @@ which is how the figures in `docs/images/` are made. It publishes `UI_CMD`,
 which carries an **action, never a state**, so the compositor remains the single
 owner of what is displayed.
 
-## 8. X is still required — for rendering, not for viewing
+## 9. X is still required — for rendering, not for viewing
 
 `DISPLAY_MODE` is `web`, `glfw` or `both` (default `both`).
 

@@ -274,6 +274,10 @@ services:
       # profondeur du robot sous les pieds et l'affiche a cote de celle de la
       # camera. Une lecture arriere bloque le pipeline GL, donc jamais par image.
       DEPTH_PROBE: ${DEPTH_PROBE:-0}
+      # Maj+S ecrit l'image affichee ici. 'docs/images' parce que c'est deja ou
+      # vivent les figures du projet ; une capture finit presque toujours dans
+      # un document.
+      SNAPSHOT_DIR: ${SNAPSHOT_DIR:-/docs/images}
       # Etat initial de l'affichage du nuage ('p') : 0 eteint, 1 par-dessus la
       # video, 2 nuage seul. Les deux etiquettes viennent des memes variables
       # que le pont, pour qu'elles ne puissent pas diverger.
@@ -333,6 +337,14 @@ services:
       - ./models:/models:ro
       - ./config:/config:ro
       - ./data:/data
+      # Maj+S ecrit la derniere image affichee ici.
+      - ./docs:/docs
+      # Pour que la date du fichier soit la bonne : sans ceci l'horloge du
+      # conteneur est en UTC et une capture prise a 19 h serait classee a 17 h.
+      # Verifie : le conteneur affichait 17:34 pendant que l'hote affichait
+      # 19:34 CEST.
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     restart: unless-stopped
 
   # Perception. Receives camera frames from the compositor over the bus and runs
@@ -632,7 +644,11 @@ services:
     depends_on: [bus]
     environment:
       <<: *bus-env
-      WEB_PORT: ${WEB_PORT:-8080}
+      # Le conteneur ecoute TOUJOURS sur 8080 ; WEB_PORT ne choisit que le port
+      # PUBLIE cote hote. Auparavant WEB_PORT etait aussi passe au service, si
+      # bien qu'une valeur non par defaut faisait ecouter l'application sur ce
+      # port-la pendant que la redirection visait toujours 8080 dans le
+      # conteneur : plus rien ne repondait, sans message d'erreur.
       # Affiches tels quels dans le panneau d'etat. Ce sont les memes variables
       # que lisent sim et compositor, donc le panneau ne peut pas annoncer un
       # mode different de celui qui tourne.
@@ -666,6 +682,8 @@ services:
       - /sys/class/drm:/sys/class/drm:ro
       # NPU : temps occupe, frequence, memoire. Pas de compteur d'energie.
       - /sys/class/accel:/sys/class/accel:ro
+      # Temperature paquet CPU : coretemp/temp1_input est "Package id 0".
+      - /sys/class/hwmon:/sys/class/hwmon:ro
     devices:
       - /dev/dri:/dev/dri
     # Ouvrir /dev/cpu/N/msr echoue en EPERM sans ceci, meme en root et meme le

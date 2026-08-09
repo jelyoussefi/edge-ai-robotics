@@ -19,67 +19,41 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
     await new Promise(r => setTimeout(r, 9000));
     const m = await page.evaluate(() => {
       const d = document.documentElement;
-      const vis = (sel) => { const e = document.querySelector(sel);
-        if (!e) return null; const r = e.getBoundingClientRect();
-        return {w: Math.round(r.width), h: Math.round(r.height),
-                inView: r.top >= -1 && r.left >= -1 &&
-                        r.bottom <= window.innerHeight + 1 &&
-                        r.right <= window.innerWidth + 1}; };
+      const r = (sel) => { const e = document.querySelector(sel);
+        if (!e) return null; const b = e.getBoundingClientRect();
+        return {w: Math.round(b.width), h: Math.round(b.height),
+                top: Math.round(b.top), bottom: Math.round(b.bottom),
+                inView: b.top >= -1 && b.left >= -1 &&
+                        b.bottom <= window.innerHeight + 1 &&
+                        b.right <= window.innerWidth + 1}; };
+      const vid = r('.card.view'), mon = r('.card.monitor');
       return {
         scrollW: d.scrollWidth, clientW: d.clientWidth,
         scrollH: d.scrollHeight, clientH: d.clientHeight,
-        video: vis('.view img'), status: vis('#status'),
-        platform: vis('#platform'), header: vis('header'),
-        title: vis('.title'), subtitle: vis('.subtitle'),
-        // Top alignment: the three cards must share a top edge.
-        tops: [...document.querySelectorAll('main > .card')]
-                .map(e => Math.round(e.getBoundingClientRect().top)),
-        bottoms: [...document.querySelectorAll('main > .card')]
-                .map(e => Math.round(e.getBoundingClientRect().bottom)),
-        // How much of the viewport the row actually reaches, and how wide the
-        // panels end up once the 16:9 video has taken its share.
-        rowBottomGap: Math.round(window.innerHeight -
-          Math.max(...[...document.querySelectorAll('main > .card')]
-            .map(e => e.getBoundingClientRect().bottom))),
-        // object-fit:contain means the ELEMENT box is the card and the
-        // picture is the largest 16:9 inside it. Report the picture, which is
-        // what a viewer sees, not the box.
-        picture: (() => { const r =
-          document.querySelector('.view img').getBoundingClientRect();
-          const w = Math.min(r.width, r.height * 16 / 9);
-          const h = Math.min(r.height, r.width * 9 / 16);
-          return {w: Math.round(w), h: Math.round(h),
-                  aspect: h ? +(w / h).toFixed(3) : null}; })(),
+        video: vid, monitor: mon, header: r('header'),
+        // "the strip must be the same width as the video"
+        widthDelta: (vid && mon) ? Math.abs(vid.w - mon.w) : null,
+        videoAspect: vid && vid.h ? +(vid.w / vid.h).toFixed(3) : null,
+        tiles: document.querySelectorAll('.card.monitor .tile').length,
+        labels: [...document.querySelectorAll('.tile .lbl')]
+                  .map(e => e.textContent.trim()).join(','),
+        readouts: [...document.querySelectorAll('.tile .lcd')]
+                  .map(e => e.textContent.trim().replace(/\s+/g, '')).join(' '),
+        statusPanel: document.querySelectorAll('#status').length,
         titlePx: parseFloat(getComputedStyle(
                    document.querySelector('.title')).fontSize),
-        subPx: parseFloat(getComputedStyle(
-                 document.querySelector('.subtitle')).fontSize),
-        bodyPx: parseFloat(getComputedStyle(document.body).fontSize),
-        statusRows: document.querySelectorAll('#status .metrics-row').length,
-        platRows: document.querySelectorAll('#platform .metrics-row').length,
-        sparks: document.querySelectorAll('#platform svg.spark path').length,
-        overlayButtons: document.querySelectorAll('button').length,
-        headings: document.querySelectorAll('h2').length,
       };
     });
     const overflowX = m.scrollW > m.clientW, overflowY = m.scrollH > m.clientH;
     console.log(`zoom ${z}% (viewport ${w}x${h} css px)`);
-    console.log(`  scrollbars: x=${overflowX} y=${overflowY}  ` +
-                `(scroll ${m.scrollW}x${m.scrollH} vs client ${m.clientW}x${m.clientH})`);
-    console.log(`  video   ${m.video.w}x${m.video.h} fullyInView=${m.video.inView}`);
-    console.log(`  status  ${m.status.w}x${m.status.h} fullyInView=${m.status.inView} rows=${m.statusRows}`);
-    console.log(`  platform ${m.platform.w}x${m.platform.h} fullyInView=${m.platform.inView} rows=${m.platRows} sparklines=${m.sparks}`);
-    console.log(`  header  ${m.header.w}x${m.header.h} fullyInView=${m.header.inView}` +
-                ` title=${m.titlePx.toFixed(1)}px subtitle=${m.subPx.toFixed(1)}px` +
-                ` body=${m.bodyPx.toFixed(1)}px`);
-    console.log(`  card tops=${JSON.stringify(m.tops)} aligned=` +
-                `${new Set(m.tops).size === 1}` +
-                `  bottoms=${JSON.stringify(m.bottoms)} aligned=` +
-                `${new Set(m.bottoms).size === 1}`);
-    console.log(`  gap below row=${m.rowBottomGap}px  picture=` +
-                `${m.picture.w}x${m.picture.h} aspect=${m.picture.aspect}` +
-                ` (16/9 = 1.778)`);
-    console.log(`  buttons=${m.overlayButtons} h2Titles=${m.headings}`);
+    console.log(`  scrollbars: x=${overflowX} y=${overflowY}`);
+    console.log(`  video   ${m.video.w}x${m.video.h} aspect=${m.videoAspect}` +
+                ` inView=${m.video.inView}`);
+    console.log(`  monitor ${m.monitor.w}x${m.monitor.h} inView=` +
+                `${m.monitor.inView}  width delta vs video=${m.widthDelta}px`);
+    console.log(`  tiles=${m.tiles} [${m.labels}]`);
+    console.log(`  readouts: ${m.readouts}`);
+    console.log(`  status panel present=${m.statusPanel}  title=${m.titlePx}px`);
     await page.screenshot({path: `/out/zoom-${z}.png`});
     await page.close();
   }

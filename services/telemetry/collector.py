@@ -55,6 +55,7 @@ log = logging.getLogger("telemetry")
 PERIOD = float(os.environ.get("TELEMETRY_PERIOD", "1.0"))
 ACCEL = os.environ.get("ACCEL_ROOT", "/sys/class/accel")
 DRM = os.environ.get("DRM_ROOT", "/sys/class/drm")
+HWMON = os.environ.get("HWMON_ROOT", "/sys/class/hwmon")
 PCM_BIN = os.environ.get("PCM_BIN", "/usr/local/sbin/pcm")
 QMASSA_BIN = os.environ.get("QMASSA_BIN", "/usr/local/bin/qmassa")
 # How often each PMU tool re-samples. Much below 2 s the two of them plus the
@@ -133,6 +134,26 @@ class CpuLoad:
         return total, [round(p, 1) for _, p in cores]
 
 
+def cpu_temp_path() -> str | None:
+    """The CPU package temperature sensor, if the platform has one.
+
+    coretemp's temp1_input is "Package id 0" on Intel; acpitz is the fallback
+    and is a chassis sensor rather than the die, so it is only used when
+    coretemp is absent and it is worth knowing the difference.
+    """
+    for want in ("coretemp", "k10temp", "acpitz"):
+        for node in sorted(glob.glob(os.path.join(HWMON, "hwmon*"))):
+            if _read(os.path.join(node, "name")) != want:
+                continue
+            p = os.path.join(node, "temp1_input")
+            if _read_float(p) is not None:
+                log.info("CPU temperature from %s (%s)", p, want)
+                return p
+    UNAVAILABLE["temp_c"] = NOT_EXPOSED
+    log.warning("no CPU temperature sensor under %s", HWMON)
+    return None
+
+
 # ---------------------------------------------------------------- PCM power
 
 _PCM_PREFIX_RE = re.compile(r'^\d+\|"[^"]*"\s*\|\s*')
@@ -206,10 +227,14 @@ class PowerWorker(threading.Thread):
     def _warn(self, msg: str, reason: str = "") -> None:
         # The reason shown in the panel carries PCM's own words when it gave
         # any, so the browser shows what actually went wrong.
-        UNAVAILABLE["pkg_w"] = reason or f"{RUNTIME_BLOCKED} [{msg}]"[:300]
+        # Compute the reason first and log THAT: logging the argument meant
+        # the interesting case -- reason empty, so PCM's own words are used --
+        # printed "reporting as:" and nothing at all.
+        why = reason or f"{RUNTIME_BLOCKED} [{msg}]"[:300]
+        UNAVAILABLE["pkg_w"] = why
         if not self._warned:
             self._warned = True
-            log.warning("%s -- reporting as: %s", msg, reason)
+            log.warning("%s -- reporting as: %s", msg, why)
 
     def _sample(self) -> float | None:
         # One second of sampling, so joules over that second ARE watts with no
@@ -283,6 +308,8 @@ class GpuWorker(threading.Thread):
         self.pct: float | None = None
         self.mhz: float | None = None
         self.watts: float | None = None
+        self.mem_mb: float | None = None
+        self.mem_is_shared = True
         self.t: float = 0.0
         self._warned = False
         self.bdf = (intel_gpu_bdfs() or [None])[0]
@@ -345,6 +372,19 @@ class GpuWorker(threading.Thread):
         if power and power[-1]:
             gw = power[-1].get("gpu_cur_power")
             self.watts = round(float(gw), 2) if gw is not None else None
+        # An integrated GPU has no dedicated VRAM: qmassa reports vram_total 0
+        # and the real figure is smem_used, system memory the GT is using. Both
+        # are carried, with a flag, rather than quietly calling shared memory
+        # "VRAM" -- it is the honest reading of the same tile.
+        mem = state.get("mem_info") or []
+        if mem and mem[-1]:
+            vt = float(mem[-1].get("vram_total") or 0.0)
+            if vt > 0:
+                self.mem_mb = round(float(mem[-1].get("vram_used") or 0) / 1e6, 1)
+                self.mem_is_shared = False
+            else:
+                self.mem_mb = round(float(mem[-1].get("smem_used") or 0) / 1e6, 1)
+                self.mem_is_shared = True
         for f in ("gpu_pct", "gpu_mhz", "gpu_w"):
             UNAVAILABLE.pop(f, None)
         self.t = time.time()
@@ -411,6 +451,7 @@ def main() -> None:
 
     pub = Publisher()
     cpu, npu = CpuLoad(), Npu()
+    temp_path = cpu_temp_path()
     power, gpu = PowerWorker(), GpuWorker()
     power.start()
     gpu.start()
@@ -421,6 +462,7 @@ def main() -> None:
         "gpu": f"{QMASSA_BIN} -d {gpu.bdf} (eng_usage max, act_freq, "
                f"gpu_cur_power)",
         "npu": (npu.base or "(absent)") + "/npu_busy_time_us",
+        "temp": temp_path or "(absent)",
     }
     log.info("publishing %s every %.1f s; the PMU tools resample every %.1f s",
              topics.PLATFORM, PERIOD, PMU_PERIOD)
@@ -430,6 +472,8 @@ def main() -> None:
         t0 = time.monotonic()
         cpu_pct, cores = cpu.sample()
         npu_pct, npu_mhz, npu_mem = npu.sample()
+        _t = _read_float(temp_path) if temp_path else None
+        temp_now = round(_t / 1000.0, 1) if _t is not None else None
         # The first tick has no previous counter to difference against;
         # skipping it costs a second and avoids opening every bar at a flat
         # zero that would look like a reading.
@@ -439,7 +483,9 @@ def main() -> None:
                 "pkg_w": power.watts,
                 "pkg_w_age": round(time.time() - power.t, 1) if power.t else None,
                 "gpu_pct": gpu.pct, "gpu_mhz": gpu.mhz, "gpu_w": gpu.watts,
+                "gpu_mem_mb": gpu.mem_mb, "gpu_mem_shared": gpu.mem_is_shared,
                 "gpu_age": round(time.time() - gpu.t, 1) if gpu.t else None,
+                "temp_c": temp_now,
                 "npu_pct": npu_pct, "npu_mhz": npu_mhz, "npu_w": None,
                 "npu_mem_mb": npu_mem,
                 "sources": sources, "unavailable": dict(UNAVAILABLE),
