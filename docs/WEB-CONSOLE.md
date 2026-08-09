@@ -216,26 +216,26 @@ precisely so they never go through msgpack as floats. The stream went from
 - **Unitree G1 · MuJoCo · RealSense D455** — smaller, centred beneath it, light
   letter-spacing, solid olive `#8A9A3B`.
 
-**Three full-height cards** below it: Status left, video centre, Platform right.
-The row is a flex row whose height is whatever the header leaves, with **no
-outer padding** — the cards run to the left, right and bottom edges of the
-viewport and only a 10 px gap separates them. All three are `height:100%`, so a
-shared top and bottom edge is structural rather than something to keep in sync.
-No panel titles: the rows label themselves.
+**Three cards** below it: Status left, video centre, Platform right, in a flex
+row whose height is whatever the header leaves. One 10 px gutter everywhere —
+between the cards and at the left and right edges of the viewport — so the
+spacing reads as a single rhythm rather than as an outer frame. The row still
+runs to the bottom edge.
 
 Card chrome is a single soft shadow cast down and right,
 `6px 6px 14px rgba(0,0,0,0.28)`, over a thin `1px rgba(0,199,253,0.4)` hairline
-and a 10 px radius. The shadows on the outermost edges are clipped by the
-viewport, which is the price of having no outer frame.
+and a 10 px radius.
 
-The two **gauge panels are deep Intel blue**,
-`linear-gradient(160deg,#00285A,#004A86)`, with `#BCD6EE` labels, white values,
-and Energy Blue `#00C7FD` bars on a `rgba(255,255,255,0.12)` track. The **video
-card stays white**. Those colours are set by **redefining the custom
-properties** on `.card.metrics`, not by overriding each rule: the bar fill, the
-group label and the sparkline stroke all already read `var(--accent)`, so one
-declaration moves all three and there is no second copy of the widget CSS to
-drift.
+The two **gauge panels are deep Intel blue and slightly translucent**,
+`linear-gradient(160deg, rgba(0,40,90,.86), rgba(0,74,134,.86))`, with `#BCD6EE`
+labels, white values, and Energy Blue `#00C7FD` bars on a
+`rgba(255,255,255,0.12)` track. The alpha goes on the gradient stops rather than
+on `opacity`, which would fade the text and the bars along with the background.
+
+Those colours are set by **redefining the custom properties** on
+`.card.metrics`, not by overriding each rule: the bar fill, the group label and
+the sparkline stroke all already read `var(--accent)`, so one declaration moves
+all three and there is no second copy of the widget CSS to drift.
 
 **The page background stayed light** — the one colour judgement. The title
 gradient ends on `#1A4B8C` at both sides; on a dark navy page those ends sink
@@ -261,18 +261,28 @@ have 208 px between them however they are written.
 
 So the binding constraint was inverted. The panels get a width **band** —
 `flex: 0 0 clamp(8.5em, 11%, 16em)`, relative so it holds at any zoom and does
-not run away on an ultra-wide display — and the video card takes what is left,
-at full height. Inside it the picture is the largest strict 16:9 that fits,
-`width:100%; height:100%; object-fit:contain`, centred: never stretched, never
-cropped, and the vertical slack becomes an even mat against the white card.
+not run away on an ultra-wide display — and the video card takes what is left.
+
+**The card carries the aspect ratio, not the image.** `aspect-ratio: 16/9` on
+`.card.view` with the width coming from flex means the card's own height is
+`width x 9/16`, so there is no slack inside it and therefore nothing around the
+picture: no mat, no letterbox, no white. The card *is* the frame. It is
+`align-self:center`, centred in the row rather than stretched, because
+stretching is precisely what would put the white back.
+
+The image is `width:100%; height:100%; object-fit:cover`. Cover rather than
+contain: the two are already the same aspect so cover crops nothing, but cover
+cannot leave a sliver of background on a sub-pixel rounding difference and
+contain can.
 
 `width:auto` with `max-width/max-height` was tried first and is wrong: it
 refuses to scale the 1280x720 composite **up**, so on a large screen the video
 sat at native size in the middle of its card.
 
-The result keeps every stated property except that the picture no longer reaches
-the full row height on a 16:9 display — the *card* does. On a window taller than
-16:9 relative to the panel band, it reaches the full height on its own.
+**What this costs:** the video card no longer shares a top and bottom edge with
+the panels — it is 16:9 and centred, they are full height. That alignment used
+to exist only because the card was padded out with white, so removing the white
+and keeping the alignment are the same request twice, and the white lost.
 
 ### Fitting at any zoom
 
@@ -305,19 +315,21 @@ wherever there is room and gives way where there is not.
 Verified in headless Chrome at the CSS viewport a 1920x1080 screen presents at
 each zoom:
 
-| zoom | CSS viewport | scrollbars | picture (aspect) | panel width | gap below row |
+| zoom | CSS viewport | scrollbars | picture (aspect) | video card | panel width |
 |---|---|---|---|---|---|
-| 50 % | 3840x2160 | none | 3326x1871 (1.778) | 240 px | 0 px |
-| 100 % | 1920x1080 | none | 1523x857 (1.778) | 181 px | 0 px |
-| 150 % | 1280x720 | none | 964x542 (1.778) | 141 px | 0 px |
+| 50 % | 3840x2160 | none | 3316x1866 (1.778) | 3318x1866 | 240 px |
+| 100 % | 1920x1080 | none | 1514x851 (1.778) | 1515x851 | 181 px |
+| 150 % | 1280x720 | none | 959x540 (1.778) | 961x540 | 139 px |
 
-Card tops and bottoms are equal at all three, and the bottoms sit exactly on the
-viewport edge. Type: title 41.6 / 41.6 / 28.1 px, subtitle 16.0 / 16.0 / 10.8 px.
+Picture and card are the same box to within a pixel at every zoom, which is the
+check that there is no white around the video. The panels run to the bottom
+edge (gap below the row: 0 px); the video card is centred. Type: title
+41.6 / 41.6 / 28.1 px, subtitle 16.0 / 16.0 / 10.8 px.
 
 Header, both panels and the video are each checked **fully inside the viewport
 rectangle**; `scrollWidth`/`scrollHeight` are compared with
-`clientWidth`/`clientHeight` in both axes; the three card tops **and bottoms**
-are compared for equality; and the picture's aspect is computed from the element
+`clientWidth`/`clientHeight` in both axes; the card tops and bottoms are
+reported (equal for the two panels; the video card is centred by design); and the picture's aspect is computed from the element
 box (`object-fit:contain` means the box is the card, so the check reports the
 picture a viewer actually sees, not the box). At 100 % the title lands at
 41.6 px = exactly 2.6rem and the subtitle at exactly 1rem; at 150 % the clamp

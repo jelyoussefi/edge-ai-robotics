@@ -75,10 +75,10 @@ display:flex;flex-direction:column}
 
 /* ---- header: two centred lines, stacked, above the columns ------------- */
 header{flex:0 0 auto;text-align:center;
-padding:.8em 1em clamp(.5rem,1.6vmin,1rem)}
+padding:clamp(.8rem,2.2vmin,1.6rem) 1em clamp(.8rem,2.2vmin,1.6rem)}
 .title{
   font-size:clamp(1.15rem,3.9vmin,2.6rem);
-  margin-bottom:clamp(.25rem,.9vmin,.5rem);
+  margin-bottom:clamp(.4rem,1.4vmin,.85rem);
   font-weight:700;line-height:1.12;letter-spacing:.01em;
   /* The gradient is painted through the glyphs. display:inline-block matters:
      background-clip:text on an inline box clips to the line box rather than
@@ -112,7 +112,7 @@ letter-spacing:.06em;font-weight:500}
    shrink-wraps it (flex:0 0 auto). The two panels then share whatever width is
    left (flex:1 1 0). Nothing is stretched and nothing is cropped. */
 main{flex:1 1 auto;min-height:0;display:flex;align-items:stretch;
-gap:10px;padding:0}
+gap:10px;padding:0 10px}
 .card{background:var(--card);border:1px solid rgba(0,199,253,0.4);
 border-radius:10px;box-shadow:6px 6px 14px rgba(0,0,0,0.28);
 padding:1em 1.1em;min-width:0;min-height:0;overflow:hidden}
@@ -131,7 +131,11 @@ padding:1em 1.1em;min-width:0;min-height:0;overflow:hidden}
    var(--accent), so one declaration moves all three to Energy Blue and there is
    no second copy of the widget CSS to keep in step. */
 .card.metrics{
-  background:linear-gradient(160deg,#00285A 0%,#004A86 100%);
+  /* Slightly translucent, so the panels sit on the page rather than on top of
+     it. Alpha on the gradient stops rather than `opacity`, which would fade
+     the text and the bars along with the background. */
+  background:linear-gradient(160deg,rgba(0,40,90,0.86) 0%,
+                             rgba(0,74,134,0.86) 100%);
   --fg:#FFFFFF;                       /* values */
   --dim:#BCD6EE;                      /* labels */
   --accent:var(--energy);             /* bars, group labels, sparkline */
@@ -155,16 +159,22 @@ padding:1em 1.1em;min-width:0;min-height:0;overflow:hidden}
    panels need; on a 16:9 display it starves them. This way the video is as
    large as it can be without doing that, and on a taller or wider-than-16:9
    window it does reach the full height on its own. */
-.card.view{flex:1 1 0;height:100%;padding:6px;min-width:0;
-display:flex;align-items:center;justify-content:center}
+/* The card takes the leftover width and derives its own height from 16:9, so
+   there is no slack inside it and therefore no white mat around the picture --
+   the card IS the frame. It is centred vertically in the row rather than
+   stretched, because stretching is exactly what would put white back. */
+.card.view{flex:1 1 0;align-self:center;aspect-ratio:16/9;max-height:100%;
+padding:0;min-width:0;background:#0b0e14;overflow:hidden}
 /* 100%/100% + contain, NOT auto with max-*: `width:auto` refuses to scale the
    1280x720 composite UP, so on a large screen the video sat at native size in
    the middle of its card. Filling the box and containing the pixels gives the
    largest 16:9 picture that fits, centred, never stretched and never cropped;
    the slack becomes an even margin, which against the white card reads as a
    mat rather than as a letterbox. */
-.view img{width:100%;height:100%;object-fit:contain;display:block;
-border-radius:6px}
+/* cover, not contain: the card is already 16:9, so the two agree and cover
+   crops nothing -- but cover cannot leave a sliver of background on a rounding
+   difference, and contain can. */
+.view img{width:100%;height:100%;object-fit:cover;display:block}
 
 /* ---- rows: label, value, bar. The reference's metrics-row shape. ------- */
 .metrics-row{padding:.28em 0}
