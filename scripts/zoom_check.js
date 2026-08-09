@@ -34,6 +34,22 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
         // Top alignment: the three cards must share a top edge.
         tops: [...document.querySelectorAll('main > .card')]
                 .map(e => Math.round(e.getBoundingClientRect().top)),
+        bottoms: [...document.querySelectorAll('main > .card')]
+                .map(e => Math.round(e.getBoundingClientRect().bottom)),
+        // How much of the viewport the row actually reaches, and how wide the
+        // panels end up once the 16:9 video has taken its share.
+        rowBottomGap: Math.round(window.innerHeight -
+          Math.max(...[...document.querySelectorAll('main > .card')]
+            .map(e => e.getBoundingClientRect().bottom))),
+        // object-fit:contain means the ELEMENT box is the card and the
+        // picture is the largest 16:9 inside it. Report the picture, which is
+        // what a viewer sees, not the box.
+        picture: (() => { const r =
+          document.querySelector('.view img').getBoundingClientRect();
+          const w = Math.min(r.width, r.height * 16 / 9);
+          const h = Math.min(r.height, r.width * 9 / 16);
+          return {w: Math.round(w), h: Math.round(h),
+                  aspect: h ? +(w / h).toFixed(3) : null}; })(),
         titlePx: parseFloat(getComputedStyle(
                    document.querySelector('.title')).fontSize),
         subPx: parseFloat(getComputedStyle(
@@ -57,7 +73,12 @@ const puppeteer = require('/home/pptruser/node_modules/puppeteer');
                 ` title=${m.titlePx.toFixed(1)}px subtitle=${m.subPx.toFixed(1)}px` +
                 ` body=${m.bodyPx.toFixed(1)}px`);
     console.log(`  card tops=${JSON.stringify(m.tops)} aligned=` +
-                `${new Set(m.tops).size === 1}`);
+                `${new Set(m.tops).size === 1}` +
+                `  bottoms=${JSON.stringify(m.bottoms)} aligned=` +
+                `${new Set(m.bottoms).size === 1}`);
+    console.log(`  gap below row=${m.rowBottomGap}px  picture=` +
+                `${m.picture.w}x${m.picture.h} aspect=${m.picture.aspect}` +
+                ` (16/9 = 1.778)`);
     console.log(`  buttons=${m.overlayButtons} h2Titles=${m.headings}`);
     await page.screenshot({path: `/out/zoom-${z}.png`});
     await page.close();

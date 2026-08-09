@@ -65,12 +65,6 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   --energy:#00C7FD;          /* Intel Energy Blue: the glow, and the bars */
   --olive:#8A9A3B;           /* the subtitle */
   --barbg:#E9EEF3;
-  /* The luminous edge: a solid hairline, a tight ring just outside it, a soft
-     bloom, then an ordinary drop shadow for depth. The first three are the
-     glow; the last is what stops the card floating with no weight. */
-  --glow:0 0 0 1px rgba(0,199,253,0.25),
-         0 0 18px rgba(0,199,253,0.35),
-         0 4px 20px rgba(0,40,90,0.15);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden}
@@ -81,7 +75,7 @@ display:flex;flex-direction:column}
 
 /* ---- header: two centred lines, stacked, above the columns ------------- */
 header{flex:0 0 auto;text-align:center;
-padding:1.1em 1em clamp(.6rem,2vmin,1.2rem)}
+padding:.8em 1em clamp(.5rem,1.6vmin,1rem)}
 .title{
   font-size:clamp(1.15rem,3.9vmin,2.6rem);
   margin-bottom:clamp(.25rem,.9vmin,.5rem);
@@ -108,13 +102,27 @@ letter-spacing:.06em;font-weight:500}
    indefinite height -- a circular constraint that Chrome settles at zero, and
    the video measured 2202x0. With a definite row the percentage means what it
    says and acts as the backstop it was meant to be. */
-main{flex:1 1 auto;min-height:0;display:grid;
-grid-template-columns:minmax(0,1fr) minmax(0,2.9fr) minmax(0,1fr);
-grid-template-rows:minmax(0,1fr);
-align-items:start;gap:1em;padding:0 1em 1em}
-.card{background:var(--card);border:1px solid rgba(0,199,253,0.55);
-border-radius:10px;box-shadow:var(--glow);padding:1em 1.1em;
-min-width:0;min-height:0;max-height:100%;overflow:hidden}
+/* A flex ROW whose height is whatever the header leaves, with no outer
+   padding: the cards run to the screen edges and only a small gap separates
+   them. The three children are all height:100%, so "equal top and bottom" is
+   structural rather than something to keep in sync.
+
+   The video is the only one whose WIDTH is derived: height:100% plus
+   aspect-ratio 16/9 on the image gives width = height x 16/9, and the card
+   shrink-wraps it (flex:0 0 auto). The two panels then share whatever width is
+   left (flex:1 1 0). Nothing is stretched and nothing is cropped. */
+main{flex:1 1 auto;min-height:0;display:flex;align-items:stretch;
+gap:10px;padding:0}
+.card{background:var(--card);border:1px solid rgba(0,199,253,0.4);
+border-radius:10px;box-shadow:6px 6px 14px rgba(0,0,0,0.28);
+padding:1em 1.1em;min-width:0;min-height:0;overflow:hidden}
+/* Panels: full row height, and a width band rather than "whatever is left".
+   Left to share the leftover they collapsed to 87 px on a 1920x1080 screen and
+   clipped their own labels -- the arithmetic is unforgiving, because a 16:9
+   video at full height under a header already wants 1737 of 1920 px. The band
+   is relative (em floor, % target, em ceiling) so it holds at every zoom and
+   does not run away on an ultra-wide display. */
+.card.metrics{flex:0 0 clamp(8.5em,11%,16em);height:100%;min-width:0}
 
 /* The two gauge panels are deep Intel blue; the video card stays white so the
    picture is the brightest thing on the page. Everything inside the panels
@@ -132,12 +140,31 @@ min-width:0;min-height:0;max-height:100%;overflow:hidden}
   --na:#9FC0DE;                       /* the "not exposed" notes */
   color:var(--fg);
 }
-/* The video card hugs the video: height from the 16:9 image rather than
-   stretched to the row, so there is no white letterbox band above and below a
-   widescreen frame inside a white card. */
-.card.view{align-self:start;padding:.7em}
-.view img{width:100%;height:auto;display:block;border-radius:6px;
-background:#0b0e14}
+/* Height-driven: the card is as tall as the row and exactly as wide as a 16:9
+   frame of that height needs. flex:0 0 auto keeps flex from stretching or
+   shrinking it, min-width:0 lets it give way rather than push a scrollbar if
+   the viewport is ever too narrow for it plus the panels. */
+/* The video card takes the width the panels leave and the full row height, so
+   all three cards share a top and a bottom edge. The IMAGE inside is the
+   largest strict 16:9 box that fits: max-width and max-height both 100% with
+   aspect-ratio 16/9, so it is never stretched and never cropped, and whichever
+   dimension has slack becomes an even margin either side of it.
+
+   Height-first would have been truer to "the video drives everything", but it
+   only works where the screen is taller than 16:9 relative to the space the
+   panels need; on a 16:9 display it starves them. This way the video is as
+   large as it can be without doing that, and on a taller or wider-than-16:9
+   window it does reach the full height on its own. */
+.card.view{flex:1 1 0;height:100%;padding:6px;min-width:0;
+display:flex;align-items:center;justify-content:center}
+/* 100%/100% + contain, NOT auto with max-*: `width:auto` refuses to scale the
+   1280x720 composite UP, so on a large screen the video sat at native size in
+   the middle of its card. Filling the box and containing the pixels gives the
+   largest 16:9 picture that fits, centred, never stretched and never cropped;
+   the slack becomes an even margin, which against the white card reads as a
+   mat rather than as a letterbox. */
+.view img{width:100%;height:100%;object-fit:contain;display:block;
+border-radius:6px}
 
 /* ---- rows: label, value, bar. The reference's metrics-row shape. ------- */
 .metrics-row{padding:.28em 0}
@@ -161,8 +188,12 @@ border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .spark{width:100%;height:2.6em;display:block}
 .sparkwrap .cap{position:absolute;right:.35em;top:.1em;color:var(--na);
 font-size:.72em;letter-spacing:.04em}
-.foot{flex:0 0 auto;color:var(--dim);font-size:.82em;padding:0 1em .7em;
-text-align:center}
+/* The LAN/keys note moved into the Status card. A page-level footer would eat
+   the very height the video is supposed to reach into, and the note belongs
+   next to the other "what is this demo doing" lines anyway. */
+.hint{margin-top:1em;padding-top:.7em;border-top:1px solid var(--line);
+color:var(--dim);font-size:.82em;line-height:1.5}
+.hint b{color:var(--fg)}
 </style></head><body>
 
 <header>
@@ -175,10 +206,6 @@ text-align:center}
   <div class="card view"><img src="/stream" alt="live composite"></div>
   <div class="card metrics" id="platform"></div>
 </main>
-
-<p class="foot">LAN only, no authentication &middot; overlays from the keyboard
-on the machine: <b>f</b> floor &nbsp; <b>s</b> detections &nbsp; <b>p</b> cloud
-&nbsp; <b>m</b> map &nbsp; <b>r</b> reset</p>
 
 <script>
 // ---- the reference's setMetricRow, kept to the letter --------------------
@@ -257,6 +284,11 @@ const PLATFORM_HTML =
   + row('npu','mem','memory','MB',2048)
   + `<div id="npu-spark"></div><div id="npu-na"></div>`;
 
+const HINT = `<div class="hint">LAN only, no authentication.<br>
+Overlays from the keyboard on the machine:
+<b>f</b> floor &middot; <b>s</b> detections &middot; <b>p</b> cloud &middot;
+<b>m</b> map &middot; <b>r</b> reset</div>`;
+
 const STATUS_ROWS = [
   ['source','obstacles'], ['nav_mode','nav mode'],
   ['map_known','map cells known'], ['map_occupied','occupied'],
@@ -277,7 +309,7 @@ async function tickStatus(){
         else if (typeof v === 'number') v = (Number.isInteger(v) ? v : v.toFixed(2));
         return `<div class="metrics-row"><div class="rl">
           <span class="k">${l}</span><span class="v">${v}</span></div></div>`;
-      }).join('');
+      }).join('') + HINT;
   }catch(e){}
   setTimeout(tickStatus, 1000);
 }
