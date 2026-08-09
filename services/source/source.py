@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from edgebot import topics
+from edgebot.camera import stream_mode, stream_name
 from edgebot.bus import Publisher
 
 log = logging.getLogger("source")
@@ -45,7 +46,15 @@ def main() -> None:
     import pyrealsense2 as rs
     with open(CONFIG_PATH) as fh:
         spec = json.load(fh)[0]
-    w, h, fps = spec["width"], spec["height"], spec["fps"]
+    # STREAM_RES wins over the JSON's width/height/fps. The JSON still owns the
+    # serial, the model and the confidence -- things that do not change with
+    # resolution -- but the resolution itself has to come from one place that
+    # `calibrate` reads too, or the intrinsics on disk stop describing the
+    # frames on the bus. See common/edgebot/camera.py.
+    w, h, fps = stream_mode()
+    if (w, h) != (spec.get("width"), spec.get("height")):
+        log.info("STREAM_RES=%s overrides %s (%sx%s)", stream_name(),
+                 CONFIG_PATH, spec.get("width"), spec.get("height"))
 
     pipeline = rs.pipeline()
     config = rs.config()

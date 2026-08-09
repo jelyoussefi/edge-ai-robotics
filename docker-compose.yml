@@ -8,6 +8,22 @@ x-bus-env: &bus-env
   BUS_SUB: tcp://bus:5556
   PYTHONUNBUFFERED: "1"
 
+# Resolution du capteur. C'est un reglage QUI PORTE LA CALIBRATION, pas une
+# preference d'affichage : fx, fy, ppx, ppy sont exprimes dans un raster
+# precis, et 1280x720 n'est pas un 640x480 agrandi (rapport d'aspect different,
+# crop capteur different). Changer STREAM_RES invalide donc
+# config/camera_calibration.json ET config/floor_mask.png ; il faut relancer
+#     make calibrate HEIGHT=<metres>
+# Les trois services qui doivent etre d'accord le lisent d'ici, via
+# common/edgebot/camera.py : source ouvre le capteur, calibrate le rouvre pour
+# lire les intrinseques, compositor dimensionne sa fenetre dessus.
+#
+# Le cout mesure des deux modes (encode, travail par image, debit bus, latence
+# web bout en bout) est dans docs/WEB-CONSOLE.md, avec la ligne de reference
+# d'avant le changement.
+x-camera-env: &camera-env
+  STREAM_RES: ${STREAM_RES:-720p}
+
 services:
 
   # Message broker. Every other service connects here, so adding perception
@@ -162,7 +178,7 @@ services:
       # aggressively the contour is simplified.
       STRAIGHTEN: ${STRAIGHTEN:-1}
       STRAIGHTEN_TOL: ${STRAIGHTEN_TOL:-0.012}
-      <<: *bus-env
+      <<: [*bus-env, *camera-env]
       SOURCE_CONFIG: /config/streams.d455.json
       DISPLAY: ${DISPLAY:-:0}
       # The RealSense spatial/temporal/hole-filling filters. Set to 0 to see the
@@ -212,7 +228,13 @@ services:
       # Supersampling of the robot render. The silhouette gets scale^2 coverage
       # levels per output pixel: 4 at scale 2, 9 at scale 3, 16 at scale 4.
       # Cost grows with the square, and so does the offscreen buffer.
-      RENDER_SCALE: ${RENDER_SCALE:-3}
+      # 2, pas 3. Le hors-ecran fait fenetre x RENDER_SCALE dans les deux
+      # dimensions, donc le cout croit au carre : a 1280x720 un scale de 3
+      # demanderait 3840x2160 alors que le compositeur tenait deja tout juste
+      # dans son budget de 33 ms a 480p (30,4 ms mesures). A 2 le hors-ecran
+      # fait 2560x1440, soit MOINS de pixels que les 2880x2160 d'avant, et le
+      # travail par image descend a 24,9 ms tout en montant en resolution.
+      RENDER_SCALE: ${RENDER_SCALE:-2}
       # Diagnostics, off by default. DIAG_FRAMES is a COUNT: the compositor
       # writes that many annotated frames to /data and then stops for good.
       # SHOW_FLOOR=1 starts with the 'f' overlays already on, so a capture can
@@ -275,7 +297,7 @@ services:
       SUITE_X_MAX: ${SUITE_X_MAX:-6.5}
       SUITE_Y_MIN: ${SUITE_Y_MIN:--2.6}
       SUITE_Y_MAX: ${SUITE_Y_MAX:-1.5}
-      <<: *bus-env
+      <<: [*bus-env, *camera-env]
       ROBOT: g1_walker
       DISPLAY: ${DISPLAY:-:0}
       # GLFW creates the visible GL context (validated: GL 4.6 + FBO on the host).
@@ -602,6 +624,58 @@ services:
       NAV_MODE: ${NAV_MODE:-patrol}
     ports:
       - "${WEB_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  # Charge et puissance des trois moteurs, pour le panneau Platform de la
+  # console. Un service a part et pas un fil dans `web` : il lit /proc et /sys
+  # de l'HOTE, ce qui demande des montages et le compte root, et la console n'a
+  # aucune raison d'avoir l'un ou l'autre. Ce qui n'est pas expose par ce pilote
+  # (puissance iGPU, puissance NPU) part en null et s'affiche comme tel.
+  telemetry:
+    build:
+      context: .
+      dockerfile: services/telemetry/Dockerfile
+    depends_on: [bus]
+    environment:
+      <<: *bus-env
+      TELEMETRY_PERIOD: ${TELEMETRY_PERIOD:-1.0}
+    volumes:
+      # Tout en lecture seule. powercap porte les compteurs RAPL, en 0400
+      # root:root depuis CVE-2020-8694, d'ou le conteneur en root ; drm porte le
+      # compteur d'inactivite du GT xe et la frequence ; accel porte le temps
+      # occupe du NPU. /proc/stat est deja celui de l'hote, le conteneur ne
+      # changeant pas de namespace PID pour les compteurs globaux.
+      # /sys/class/* ne contient que des liens symboliques vers /sys/devices.
+      # Monter /sys/devices en bloc ne suffit pas : le bind n'est pas recursif,
+      # et le sous-arbre powercap arrive vide. On monte donc le repertoire reel
+      # en plus des liens, sinon energy_uj est introuvable et la puissance
+      # passerait pour "non exposee" alors qu'elle est seulement non montee -
+      # exactement la confusion que ce panneau doit eviter.
+      - /sys/class/powercap:/sys/class/powercap:ro
+      - /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro
+      - /sys/class/drm:/sys/class/drm:ro
+      - /sys/class/accel:/sys/class/accel:ro
+    # Docker masque /sys/devices/virtual/powercap par un tmpfs vide en lecture
+    # seule, par defaut, a cause du canal auxiliaire de puissance RAPL
+    # (CVE-2020-8694) : le montage ci-dessus est bien applique, puis recouvert.
+    # Sans ceci la puissance paquet est introuvable et le panneau l'annoncerait
+    # comme "non exposee par ce pilote", ce qui serait faux - elle est exposee,
+    # c'est le runtime qui la cache. On demasque donc, plutot que de mentir ou
+    # de passer le conteneur en privileged : il ne fait que lire du sysfs monte
+    # en lecture seule.
+    # Les DEUX sont necessaires, verifie : systempaths retire le masque tmpfs,
+    # et le profil AppArmor par defaut de Docker refuse encore la lecture de
+    # energy_uj ensuite (Permission denied alors que le conteneur est root et
+    # que le fichier est en 0400 root:root). Sans apparmor=unconfined la
+    # puissance reste illisible. Portee au seul conteneur telemetry, qui ne
+    # fait que lire du sysfs monte en lecture seule.
+    #
+    # Si un operateur prefere ne pas desserrer cela, il enleve ces deux lignes :
+    # le collecteur distingue alors "bloque par le runtime" de "non expose par
+    # le pilote" et le panneau affiche la vraie raison, sans jamais inventer 0 W.
+    security_opt:
+      - systempaths=unconfined
+      - apparmor=unconfined
     restart: unless-stopped
 
   recorder:

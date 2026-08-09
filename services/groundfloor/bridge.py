@@ -90,10 +90,24 @@ class GroundfloorBridge(Node):
 
         self.height = float(calib.get("camera_height_m", 1.56))
         self.pitch = math.radians(abs(float(calib.get("pitch_deg", 0.0))))
-        self.fx = float(calib.get("fx", 386.4))
-        self.fy = float(calib.get("fy", 386.5))
-        self.ppx = float(calib.get("ppx", 325.6))
-        self.ppy = float(calib.get("ppy", 239.6))
+        # These live under "intrinsics", not at the top level. Reading them
+        # from the top level meant every one of these fell back to its default
+        # -- which happened to be the 640x480 D455 values, so it worked by
+        # coincidence for as long as the camera ran 640x480 and would have
+        # published a CameraInfo describing the wrong lens the moment it did
+        # not. `width`/`height` come along because they are the raster fx and
+        # ppx are expressed in, and that is what the scaling below needs.
+        _i = calib.get("intrinsics", {})
+        self.fx = float(_i.get("fx", calib.get("fx", 386.4)))
+        self.fy = float(_i.get("fy", calib.get("fy", 386.5)))
+        self.ppx = float(_i.get("ppx", calib.get("ppx", 325.6)))
+        self.ppy = float(_i.get("ppy", calib.get("ppy", 239.6)))
+        self.ref_w = float(_i.get("width", 640.0))
+        self.ref_h = float(_i.get("height", 480.0))
+        self.get_logger().info(
+            f"intrinsics fx={self.fx:.1f} fy={self.fy:.1f} "
+            f"ppx={self.ppx:.1f} ppy={self.ppy:.1f} at "
+            f"{self.ref_w:.0f}x{self.ref_h:.0f}")
 
         # Best effort matches what a camera driver would use, and their node
         # takes `use_best_effort_qos` for the same reason: a dropped depth frame
@@ -232,7 +246,7 @@ class GroundfloorBridge(Node):
             info = CameraInfo()
             info.header = img.header
             info.height, info.width = h, w
-            sx, sy = w / 640.0, h / 480.0
+            sx, sy = w / self.ref_w, h / self.ref_h
             info.k = [self.fx * sx, 0.0, self.ppx * sx,
                       0.0, self.fy * sy, self.ppy * sy,
                       0.0, 0.0, 1.0]

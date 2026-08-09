@@ -141,6 +141,29 @@ SUITE_PATH = "suite.path"
 #   {"jpeg": bytes, "w": int, "h": int, "t": float, "encode_ms": float}
 COMPOSITED_FRAME = "compositor.frame"
 
+# telemetry -> web. What the three engines are actually doing, once a second.
+#
+# Every field is either a number or **null**, and null means "this platform does
+# not expose it" -- not zero, and not "we did not look". The distinction is the
+# whole point of the topic: this board publishes NPU busy time but no NPU power,
+# and a gauge reading 0 W for a running NPU is a lie that looks like a
+# measurement. The consumer is required to render null as "not exposed by this
+# driver". `sources` records the sysfs path each figure came from so a reading
+# that looks wrong can be traced without reading this file.
+#
+#   {"cpu_pct": float, "cpu_per_core": [float, ...],
+#    "pkg_w": float|null, "core_w": float|null, "uncore_w": float|null,
+#    "dram_w": float|null, "psys_w": float|null,
+#    "gpu_pct": float|null, "gpu_mhz": float|null, "gpu_w": float|null,
+#    "npu_pct": float|null, "npu_mhz": float|null, "npu_w": float|null,
+#    "npu_mem_mb": float|null,
+#    "sources": {str: str}, "stamp": float}
+#
+# Busy percentages are DIFFERENCED counters (jiffies, idle residency ms, busy
+# microseconds), so the first sample after start has nothing to difference
+# against and is skipped rather than published as zero.
+PLATFORM = "platform.telemetry"
+
 # web -> compositor. Overlay toggles from the browser, the same actions the
 # keyboard has. The keys are not replaced: a demo is often driven from the
 # machine and watched from a phone at the same time, and either has to work.

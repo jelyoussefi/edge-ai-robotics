@@ -33,8 +33,23 @@ class Publisher:
         self._sock.connect(addr)
 
     def send(self, topic: str, payload: dict[str, Any]) -> None:
+        # Doubles, NOT single floats. `use_single_float=True` used to be set
+        # here to save bytes, and it silently destroyed every timestamp on the
+        # bus: a float32 has 24 bits of mantissa, so around a Unix epoch of
+        # 1.79e9 its ULP is 2^31 / 2^24 = 128 SECONDS. Every `time.time()` on
+        # every topic was being snapped to a 128 s grid.
+        #
+        # What that broke, all from the one line: the web console's MJPEG
+        # stream sent a client exactly one frame and then went quiet, because
+        # it only writes frames whose stamp differs from the last one it sent
+        # and the stamp did not change for two minutes at a time; frame ages
+        # sawtoothed between -64 s and +64 s; and no end-to-end latency could
+        # be measured at all. The saving it bought was nothing measurable --
+        # payloads here are dominated by JPEG and by raw byte blobs (SUITE_CLOUD
+        # packs its points itself precisely so they do not go through msgpack
+        # as floats), so the float64s are a handful of bytes per message.
         self._sock.send_multipart(
-            [topic.encode(), msgpack.packb(payload, use_single_float=True)],
+            [topic.encode(), msgpack.packb(payload)],
             flags=zmq.NOBLOCK,
         )
 

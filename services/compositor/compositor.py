@@ -33,6 +33,7 @@ import mujoco
 import numpy as np
 from OpenGL import GL
 from edgebot import topics
+from edgebot.camera import stream_mode, stream_name
 from edgebot.floor import (box_footprints, clear_of_boxes, clip_footprints,
                            mask_footprints, polygon_from_mask, shrink,
                            straighten)
@@ -344,7 +345,7 @@ class GLCompositor:
         # Floor-overlay parameters, set via configure_floor().
         self._paint_tex = None
         self._floor = dict(show=0, height=1.5, pitch=0.122, fx=386.0, fy=386.0,
-                           ppx=325.6, ppy=239.6, res=(640.0, 480.0), tol=0.15,
+                           ppx=325.6, ppy=239.6, res=(CAM_REF_W, CAM_REF_H), tol=0.15,
                            alpha=float(os.environ.get("FLOOR_ALPHA", "0.35")),
                            tol_rel=float(os.environ.get("FLOOR_TOL_REL", "0.04")),
                            has_paint=0, ref_rows=(-1.0, -1.0, -1.0),
@@ -885,10 +886,10 @@ class FloorDetector:
         vs = np.arange(dh)
         uu, vv = np.meshgrid(us, vs)
         # Intrinsics scaled to the depth resolution.
-        fx = self.fx * dw / 640.0
-        fy = self.fy * dh / 480.0
-        ppx = self.ppx * dw / 640.0
-        ppy = self.ppy * dh / 480.0
+        fx = self.fx * dw / CAM_REF_W
+        fy = self.fy * dh / CAM_REF_H
+        ppx = self.ppx * dw / CAM_REF_W
+        ppy = self.ppy * dh / CAM_REF_H
         # Ray in the camera optical frame (x right, y down, z optical axis). A
         # point at sensor-depth Z along this ray is (x*Z, y*Z, Z) in camera frame.
         x = (uu - ppx) / fx
@@ -914,8 +915,8 @@ class FloorDetector:
     def _rays(self, dw: int, dh: int):
         """Per-pixel camera-frame ray components (x right, y down, z forward)."""
         uu, vv = np.meshgrid(np.arange(dw), np.arange(dh))
-        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
-        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        fx, fy = self.fx * dw / CAM_REF_W, self.fy * dh / CAM_REF_H
+        ppx, ppy = self.ppx * dw / CAM_REF_W, self.ppy * dh / CAM_REF_H
         return (uu - ppx) / fx, (vv - ppy) / fy
 
     def height_map(self, depth_m: np.ndarray) -> np.ndarray:
@@ -983,8 +984,8 @@ class FloorDetector:
 
     def project_many(self, u, v, dw: int, dh: int):
         """to_world for whole arrays. Same maths, no Python loop."""
-        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
-        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        fx, fy = self.fx * dw / CAM_REF_W, self.fy * dh / CAM_REF_H
+        ppx, ppy = self.ppx * dw / CAM_REF_W, self.ppy * dh / CAM_REF_H
         x, y = (np.asarray(u) - ppx) / fx, (np.asarray(v) - ppy) / fy
         cp, sp = np.cos(self.pitch), np.sin(self.pitch)
         den = y * cp + sp
@@ -1001,8 +1002,8 @@ class FloorDetector:
         measured depth is least trustworthy. Returns None for a ray that does
         not descend to the floor at all.
         """
-        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
-        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        fx, fy = self.fx * dw / CAM_REF_W, self.fy * dh / CAM_REF_H
+        ppx, ppy = self.ppx * dw / CAM_REF_W, self.ppy * dh / CAM_REF_H
         x, y = (u - ppx) / fx, (v - ppy) / fy
         cp, sp = np.cos(self.pitch), np.sin(self.pitch)
         den = y * cp + sp
@@ -1130,8 +1131,13 @@ SCENES = {
 # against a camera that sees 79.3 deg. The robot then comes out too narrow, its
 # lateral position drifts off the floor, and the error grows toward the edges.
 # 4:3 makes both fields agree exactly, and the 640x480 frame scales uniformly.
-WINDOW_W = int(os.environ.get("WINDOW_W", "960"))
-WINDOW_H = int(os.environ.get("WINDOW_H", "720"))
+# The composite is produced at the camera's own resolution by default. Anything
+# else resamples the backdrop for no reason, and at 16:9 the old fixed 960x720
+# would letterbox the room into a 4:3 box. WINDOW_W/WINDOW_H still override, for
+# a machine that cannot drive the full size.
+_STREAM_W, _STREAM_H, _ = stream_mode()
+WINDOW_W = int(os.environ.get("WINDOW_W", str(_STREAM_W)))
+WINDOW_H = int(os.environ.get("WINDOW_H", str(_STREAM_H)))
 WINDOW_NAME = "Edge AI Robotics"
 # Bump this whenever the file changes. If the log shows an older tag than the one
 # you just extracted, the container is running a stale image.
@@ -1288,6 +1294,54 @@ def load_calibration() -> dict | None:
         return None
 
 
+def _intrinsics_reference() -> tuple[float, float]:
+    """The resolution fx/fy/ppx/ppy in the calibration are expressed AT.
+
+    Every projection here scales the intrinsics to whatever raster it is working
+    on -- the depth image, the composite window -- by the ratio between that
+    raster and this reference. It used to be the literal 640x480 written into a
+    dozen expressions, which was true for as long as the D455 ran 640x480 and
+    silently wrong the moment it did not: a 1280x720 sensor is not the same
+    aspect ratio, so scaling its intrinsics by (w/640, h/480) stretches the
+    vertical and horizontal by different factors and tilts the whole ground
+    plane. The calibration already records what it measured at; read it.
+    """
+    try:
+        path = os.environ.get("CAMERA_CALIBRATION",
+                              "/config/camera_calibration.json")
+        with open(path) as fh:
+            intr = json.load(fh).get("intrinsics", {})
+        w, h = float(intr.get("width", 0)), float(intr.get("height", 0))
+        if w > 0 and h > 0:
+            return w, h
+    except (OSError, ValueError):
+        pass
+    return 640.0, 480.0
+
+
+CAM_REF_W, CAM_REF_H = _intrinsics_reference()
+
+
+def _warn_if_calibration_stale() -> None:
+    """Shout if the calibration was taken at a different resolution than we run.
+
+    This is the failure this whole change exists to prevent, and it is invisible
+    in the picture: the robot still composites, the floor overlay still paints
+    something, and every distance is quietly wrong because the intrinsics
+    describe a raster the sensor is no longer producing. A mismatched aspect
+    ratio is worse than a mismatched scale -- it tilts the ground plane rather
+    than just moving it.
+    """
+    sw, sh, _ = stream_mode()
+    if (round(CAM_REF_W), round(CAM_REF_H)) == (sw, sh):
+        return
+    log.error("CALIBRATION IS STALE: it was taken at %dx%d and STREAM_RES=%s "
+              "runs the sensor at %dx%d. Every projection here scales the "
+              "intrinsics by the ratio of those two, so distances, the floor "
+              "polygon and the obstacle footprints are all wrong until you run "
+              "'make calibrate HEIGHT=<metres>' and repaint the floor mask.",
+              round(CAM_REF_W), round(CAM_REF_H), stream_name(), sw, sh)
+
 # Margin left around every detected object, in metres of real floor.
 OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
 # Far wall of this room, measured at 6.2 m. Footprints are truncated here for
@@ -1364,7 +1418,7 @@ def _world_to_pixel(cam_h, pitch_deg, fx, fy, ppx, ppy, fwd, lat, w, h):
     zc = fwd * cp + cam_h * sp
     if zc <= 1e-6:
         return None
-    sx, sy = w / 640.0, h / 480.0
+    sx, sy = w / CAM_REF_W, h / CAM_REF_H
     u = (ppx + fx * (-lat) / zc) * sx
     v = (ppy + fy * (-fwd * sp + cam_h * cp) / zc) * sy
     if not (-4000 < u < 4000 and -4000 < v < 4000):
@@ -1394,7 +1448,7 @@ def _cloud_to_pixels(cam_h, pitch_deg, fx, fy, ppx, ppy, xyz, w, h):
     zc = fwd * cp + drop * sp
     ok = zc > 1e-6
     safe = np.where(ok, zc, 1.0)
-    sx, sy = w / 640.0, h / 480.0
+    sx, sy = w / CAM_REF_W, h / CAM_REF_H
     u = (ppx + fx * (-lat) / safe) * sx
     v = (ppy + fy * (-fwd * sp + drop * cp) / safe) * sy
     ok &= (u >= 0) & (u < w - 1) & (v >= 0) & (v < h - 1)
@@ -1625,7 +1679,7 @@ def _cloud_caption(out, drawn, total, ms, mode) -> None:
 
 
 def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
-                         img_rows=480.0):
+                         img_rows=None):
     """Image rows, 0..1 from the top, of three heights at a known distance.
 
     Returns (horizon, top of the object, its base). A point at the camera's own
@@ -1634,6 +1688,10 @@ def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
     robot against these settles the composition scale with a measurement instead
     of an impression.
     """
+    # None means "the raster the intrinsics were measured at", which is the
+    # only raster ppy and fy are consistent with. A literal default would go
+    # stale the moment the sensor changes resolution.
+    img_rows = CAM_REF_H if img_rows is None else img_rows
     p = np.radians(abs(pitch_deg))
     cp, sp = np.cos(p), np.sin(p)
 
@@ -1647,7 +1705,7 @@ def scale_reference_rows(cam_h, pitch_deg, fy, ppy, dist_m, obj_h,
     return row(cam_h), row(obj_h), row(0.0)
 
 
-def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=480.0):
+def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=None):
     """Invert the projection: what world height does this image row correspond to?
 
     The projection of a point at height h and distance F is
@@ -1658,6 +1716,7 @@ def height_from_row(cam_h, pitch_deg, fy, ppy, dist_m, row, img_rows=480.0):
     what is actually on screen, in metres, ready to compare with a mark on a
     real ruler.
     """
+    img_rows = CAM_REF_H if img_rows is None else img_rows
     p = np.radians(abs(pitch_deg))
     cp, sp = np.cos(p), np.sin(p)
     u = (row * img_rows - ppy) / fy
@@ -2035,8 +2094,8 @@ def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
         # defined in. This settles the scale with a measurement.
         rows = _np.nonzero((rimg.sum(axis=2) > 10).any(axis=1))[0]
         if rows.size:
-            top = (sh2 - 1 - int(rows.max())) * 480.0 / sh2
-            bot = (sh2 - 1 - int(rows.min())) * 480.0 / sh2
+            top = (sh2 - 1 - int(rows.max())) * CAM_REF_H / sh2
+            bot = (sh2 - 1 - int(rows.min())) * CAM_REF_H / sh2
             dist = float(_np.hypot(data.qpos[0], data.qpos[1]))
             hz, e_top, e_bot = scale_reference_rows(
                 cam_height, cam_pitch_deg, fy, ppy, max(0.3, dist),
@@ -2045,20 +2104,20 @@ def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
                      "(%.1f tall), expected %.1f..%.1f (%.1f tall) -> "
                      "%.0f%% of the expected height, top off by %+.1f rows",
                      dist, top, bot, bot - top,
-                     e_top * 480.0, e_bot * 480.0,
-                     (e_bot - e_top) * 480.0,
-                     100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * 480.0),
-                     top - e_top * 480.0)
+                     e_top * CAM_REF_H, e_bot * CAM_REF_H,
+                     (e_bot - e_top) * CAM_REF_H,
+                     100.0 * (bot - top) / max(1e-6, (e_bot - e_top) * CAM_REF_H),
+                     top - e_top * CAM_REF_H)
             # The same measurement in metres, which is what a ruler in
             # the room actually shows.
             h_top = height_from_row(cam_height, cam_pitch_deg, fy, ppy,
-                                    max(0.3, dist), top / 480.0)
+                                    max(0.3, dist), top / CAM_REF_H)
             h_bot = height_from_row(cam_height, cam_pitch_deg, fy, ppy,
-                                    max(0.3, dist), bot / 480.0)
+                                    max(0.3, dist), bot / CAM_REF_H)
             log.info("  on screen the robot spans %.3f m to %.3f m above "
                      "the floor, so it stands %.3f m tall at %.2f m",
                      h_bot, h_top, h_top - h_bot, dist)
-            if e_bot * 480.0 > 479.0 or e_top * 480.0 < 1.0:
+            if e_bot * CAM_REF_H > CAM_REF_H - 1.0 or e_top * CAM_REF_H < 1.0:
                 log.info("  (the robot does not fit in frame at this "
                          "distance, so the rendered height is clipped "
                          "and the percentage is meaningless)")
@@ -2141,7 +2200,7 @@ def _log_depth_probe(gpu, data, cam_height, cam_pitch_deg, fx, fy, ppx, ppy,
         cz = float(depth_metres[dv, du])
         # The same two lines the shader runs, not an equivalent of them: a probe
         # that asserts a test the composite no longer applies is worse than none.
-        yv = ((v + 0.5) * (480.0 / h) - ppy) / fy
+        yv = ((v + 0.5) * (CAM_REF_H / h) - ppy) / fy
         wdz = -yv * math.cos(p) - math.sin(p)
         camh = cam_height + cz * wdz
         ground = wdz < -1e-3 and camh < occl_h
@@ -2251,6 +2310,7 @@ def main() -> None:
     model.vis.global_.offheight = WINDOW_H
 
     calib = load_calibration()
+    _warn_if_calibration_stale()
 
     # Robot feet are placed on the real floor by pure camera geometry (height +
     # pitch + intrinsics), via the floor detector's feet_screen_y(). No reference
@@ -2354,7 +2414,7 @@ def main() -> None:
     floor_paint_cpu = (cv2.imread(_paint_path, cv2.IMREAD_GRAYSCALE)
                        if os.path.exists(_paint_path) else None)
     gpu.configure_floor(cam_height, np.radians(_cam_pitch_deg), fx, fy, ppx, ppy,
-                        (640.0, 480.0),
+                        (CAM_REF_W, CAM_REF_H),
                         tol=float(os.environ.get("FLOOR_TOL", "0.15")))
 
 
@@ -2435,7 +2495,7 @@ def main() -> None:
     log.info("floor geometry: height=%.2f m pitch=%.1f deg fx=%.1f fy=%.1f "
              "ppx=%.1f ppy=%.1f | expected vfov from fy = %.1f deg",
              cam_height, _cam_pitch_deg, fx, fy, ppx, ppy,
-             2.0 * np.degrees(np.arctan(240.0 / fy)))
+             2.0 * np.degrees(np.arctan(0.5 * CAM_REF_H / fy)))
     prev_keys = {"r": False, "f": False, "h": False, "s": False,
                  "p": False, "m": False}
     show_scale = False   # 'h' draws the horizon and the expected robot height
@@ -2444,6 +2504,13 @@ def main() -> None:
     frames = 0
     last_log = time.perf_counter()
     _encode_ms_acc: list = []
+    # Wall time of the compositor's own work for one frame: MuJoCo render, blit,
+    # camera upload, shader, readback, overlays, JPEG. NOT 1000/fps -- the loop
+    # is paced by the camera at 30 Hz, so fps reports the camera's rate and says
+    # nothing about how much of the 33 ms budget is actually spent. Raising the
+    # source resolution moves this number and leaves fps flat until it runs out.
+    _frame_ms_acc: list = []
+    _frame_t0 = None      # set at the top of each iteration that does work
 
     frame_min_dt = 1.0 / float(os.environ.get("MAX_FPS", "60"))
     last_frame_t = 0.0
@@ -2627,8 +2694,8 @@ def main() -> None:
                     # Scale intrinsics to the depth image resolution.
                     z = raw * scale
                     rng = deproject_direct(px, py, z,
-                                           fx * dw / 640.0, fy * dh / 480.0,
-                                           ppx * dw / 640.0, ppy * dh / 480.0)
+                                           fx * dw / CAM_REF_W, fy * dh / CAM_REF_H,
+                                           ppx * dw / CAM_REF_W, ppy * dh / CAM_REF_H)
             bearing = (cxn - 0.5) * HFOV_DEG
             obstacles.append({
                 "cx": cxn, "cy": cyn, "w": d.get("w", 0.0), "height": d.get("h", 0.0),
@@ -2694,6 +2761,7 @@ def main() -> None:
             # leave another GL context current on this thread. Re-assert ours
             # before touching the GPU: cheap, and a no-op when nothing stole it.
             _annotated = False
+            _frame_t0 = time.perf_counter()
             glfw.make_context_current(window)
             mujoco.mjr_setBuffer(mujoco.mjtFramebuffer.mjFB_OFFSCREEN, mjr)
             mujoco.mjr_render(mujoco.MjrRect(0, 0, sw, sh), scn, mjr)
@@ -2864,15 +2932,24 @@ def main() -> None:
 
         frames += 1
         now = time.perf_counter()
+        if _frame_t0 is not None:
+            _frame_ms_acc.append((now - _frame_t0) * 1000.0)
+            _frame_t0 = None
         if now - last_log >= 30.0:
             fps = frames / (now - last_log)
             age = time.time() - bg_t if bg_t else -1
-            log.info("composited %.1f fps, bg age %.2fs, depth paired=%s%s",
-                     fps, age, depth_ok,
+            _fm = sorted(_frame_ms_acc)
+            log.info("composited %.1f fps, frame work median %.1f ms "
+                     "(p95 %.1f), bg age %.2fs, depth paired=%s%s",
+                     fps,
+                     _fm[len(_fm) // 2] if _fm else -1.0,
+                     _fm[min(len(_fm) - 1, int(0.95 * len(_fm)))] if _fm else -1.0,
+                     age, depth_ok,
                      (f", jpeg encode median {sorted(_encode_ms_acc)[len(_encode_ms_acc) // 2]:.1f} ms"
                       f" over {len(_encode_ms_acc)} frames")
                      if _encode_ms_acc else "")
             _encode_ms_acc.clear()
+            _frame_ms_acc.clear()
             frames = 0
             last_log = now
 

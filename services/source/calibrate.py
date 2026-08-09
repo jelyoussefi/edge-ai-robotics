@@ -36,6 +36,7 @@ import os
 import sys
 import time
 
+from edgebot.camera import stream_mode
 from edgebot.floor import straighten
 
 try:
@@ -161,15 +162,19 @@ class FloorGeometry:
     with distance exactly as stereo error does.
     """
 
-    def __init__(self, height_m, pitch_deg, fx, fy, ppx, ppy):
+    def __init__(self, height_m, pitch_deg, fx, fy, ppx, ppy,
+                 ref_w=640.0, ref_h=480.0):
         self.H = height_m
         self.pitch = math.radians(abs(pitch_deg))
         self.fx, self.fy, self.ppx, self.ppy = fx, fy, ppx, ppy
+        # The raster fx/ppx are expressed in. Was the literal 640x480,
+        # which is a different ASPECT from 1280x720, not a scale of it.
+        self.ref_w, self.ref_h = float(ref_w), float(ref_h)
 
     def _rays(self, dw, dh):
         uu, vv = np.meshgrid(np.arange(dw), np.arange(dh))
-        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
-        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        fx, fy = self.fx * dw / self.ref_w, self.fy * dh / self.ref_h
+        ppx, ppy = self.ppx * dw / self.ref_w, self.ppy * dh / self.ref_h
         return (uu - ppx) / fx, (vv - ppy) / fy
 
     def height_map(self, depth_m):
@@ -179,7 +184,7 @@ class FloorGeometry:
     def mask(self, depth_m, tol_h=0.08):
         return (depth_m > 0) & (np.abs(self.height_map(depth_m)) < tol_h)
 
-    def project(self, fwd, lat, dw=640, dh=480):
+    def project(self, fwd, lat, dw=None, dh=None):
         """Project a point of the ground plane into the image.
 
         Inverse of the back-projection used everywhere else. The camera frame is
@@ -187,12 +192,14 @@ class FloorGeometry:
         z = (cos p, 0, -sin p), x = (0, -1, 0), y = (-sin p, 0, -cos p), and the
         camera sits at height H above the origin. Returns None behind the lens.
         """
+        dw = self.ref_w if dw is None else dw
+        dh = self.ref_h if dh is None else dh
         cp, sp = math.cos(self.pitch), math.sin(self.pitch)
         zc = fwd * cp + self.H * sp
         if zc <= 1e-6:
             return None
-        fx, fy = self.fx * dw / 640.0, self.fy * dh / 480.0
-        ppx, ppy = self.ppx * dw / 640.0, self.ppy * dh / 480.0
+        fx, fy = self.fx * dw / self.ref_w, self.fy * dh / self.ref_h
+        ppx, ppy = self.ppx * dw / self.ref_w, self.ppy * dh / self.ref_h
         return (ppx + fx * (-lat) / zc,
                 ppy + fy * (-fwd * sp + self.H * cp) / zc)
 
@@ -710,7 +717,8 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
 
             h = ui.sl["height"].value
             tol = ui.sl["tol"].value / 100.0
-            det = FloorGeometry(h, pitch, i["fx"], i["fy"], i["ppx"], i["ppy"])
+            det = FloorGeometry(h, pitch, i["fx"], i["fy"], i["ppx"], i["ppy"],
+                                i.get("width", 640), i.get("height", 480))
 
             if ui.fit_request:
                 ui.fit_request = False
@@ -802,9 +810,13 @@ def main() -> None:
     ap.add_argument("--height", type=float, required=True,
                     help="hauteur du centre optique au sol, en mètres (mesurée)")
     ap.add_argument("--serial", default=None, help="numéro de série du D455")
-    ap.add_argument("--width", type=int, default=640)
-    ap.add_argument("--height-px", type=int, default=480, dest="height_px")
-    ap.add_argument("--fps", type=int, default=30)
+    # Defaults from STREAM_RES, not literals: calibrating at a
+    # resolution the source does not run at produces a file that looks
+    # valid and describes a raster nothing ever sends.
+    _w, _h, _fps = stream_mode()
+    ap.add_argument("--width", type=int, default=_w)
+    ap.add_argument("--height-px", type=int, default=_h, dest="height_px")
+    ap.add_argument("--fps", type=int, default=_fps)
     ap.add_argument("--manual-pitch", type=float, default=None,
                     help="inclinaison en degrés si tu ne veux pas lire l'IMU")
     ap.add_argument("--ref-distance", type=float, default=None,

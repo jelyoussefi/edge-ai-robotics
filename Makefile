@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check pick-goals logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check pick-goals bus-rate web-latency logs ps shell clean distclean
 default: run
 
 help:
@@ -44,6 +44,8 @@ help:
 	@echo "  make fastmapping    Intel Robotics AI Suite persistent occupancy map"
 	@echo "  make itsplanner     Intel Robotics AI Suite ITS global path planner"
 	@echo "  make suite-compare  Their floor against ours, side by side"
+	@echo "  make bus-rate       What the bus carries, per topic     [ARGS=--seconds 25]"
+	@echo "  make web-latency    Console stream latency, compositor to socket"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
 	@echo "  make ps         Container status"
 	@echo "  make shell      Shell inside a service                     [S=sim]"
@@ -141,6 +143,22 @@ map-check:
 		-v $(PWD)/scripts:/scripts:ro \
 		-v $(PWD)/common:/opt/edgebot:ro \
 		perception /scripts/map_check.py $(ARGS)
+
+bus-rate:
+	@$(call msg, Measuring what the bus carries, per topic ...)
+	@# Runs in a container to reach the broker by name. Mounted, not baked: it
+	@# is a measurement, and it must read the tree rather than an older image.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/opt/edgebot:ro \
+		perception /scripts/bus_rate.py $(ARGS)
+
+web-latency:
+	@$(call msg, Timing the console stream from the compositor to the socket ...)
+	@# From the HOST, not a container: the point is to measure what a viewer on
+	@# the LAN sees, and a container on the compose network would skip the
+	@# published port. Pass ARGS="--host <lan-ip>" to measure from elsewhere.
+	@python3 scripts/web_latency.py $(ARGS)
 
 pick-goals:
 	@$(call msg, Choosing mutually reachable goals from the map ...)
