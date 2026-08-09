@@ -127,7 +127,23 @@ services:
       PATROL_MODE: ${PATROL_MODE:-axis}
       OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
       ROBOT_HALF_WIDTH: ${ROBOT_HALF_WIDTH:-0.22}
-      GAP_CLEAR: ${GAP_CLEAR:-0.20}
+      # Degagement exige DE CHAQUE COTE pour qu'un intervalle compte comme un
+      # passage. Le seuil reel est double : need = 2 x (ROBOT_HALF_WIDTH +
+      # GAP_CLEAR), soit 0,64 m ici. Monter GAP_CLEAR RESSERRE les passages,
+      # c'est contre-intuitif : a 0,20 le seuil valait 0,84 m, tous les
+      # intervalles du salon etaient fusionnes en un mur et le robot n'a pas
+      # bouge d'un centimetre en 60 s.
+      #
+      # Mesure sur 4 x 60 s dans ce salon (voir docs/ETAPE-C-RESULTS.md §9) :
+      #   seuil   parcours   ecart lateral   degagement min   frottements
+      #   0,84 m    0,00 m        0,00 m        -0,728 m         87,4 %
+      #   0,74 m    2,44 m        0,67 m        -0,452 m          4,4 %
+      #   0,64 m    2,34 m        1,24 m        -0,286 m          3,4 %   <-
+      #   0,50 m    2,37 m        1,02 m        -0,393 m          8,6 %
+      # 0,64 m gagne sur les trois criteres qui comptent : le moins de
+      # frottements, le meilleur pire cas, et le plus grand ecart lateral,
+      # c'est-a-dire le contournement le plus franc.
+      GAP_CLEAR: ${GAP_CLEAR:-0.10}
       OBSTACLE_CLEAR: ${OBSTACLE_CLEAR:-0.45}
       OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
       DETOUR_MAX: ${DETOUR_MAX:-1.8}
@@ -209,7 +225,7 @@ services:
       ROI_MARGIN: ${ROI_MARGIN:-0.25}
       # Detected objects are cut out of the walkable floor with this margin, so
       # the robot neither walks into them nor squeezes past them.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
       # Periode de republication du sol praticable et des empreintes.
       ROI_PERIOD: ${ROI_PERIOD:-1.0}
       # Mur du fond mesure a 6,2 m. La projection au sol ne sait pas ou la
@@ -384,7 +400,7 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le reste du projet, sans quoi les
       # empreintes des deux cotes ne seraient pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       # Publie la profondeur en RELIABLE. FastMapping s'abonne avec un
       # rclcpp::QoS(10) nu, donc RELIABLE, et n'expose AUCUN parametre pour en
@@ -447,7 +463,7 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le compositeur et groundfloor, sans
       # quoi les trois jeux d'empreintes ne sont pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.20}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       GF_Z_MIN: ${GF_Z_MIN:--0.3}
       GF_X_MAX: ${GF_X_MAX:-8.0}

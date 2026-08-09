@@ -58,7 +58,12 @@ class Navigator:
     OBSTACLE_LOOK = float(os.environ.get("OBSTACLE_LOOK", "3.5"))   # m ahead
     OBSTACLE_CLEAR = float(os.environ.get("OBSTACLE_CLEAR", "0.45"))  # m to spare
     ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
-    GAP_CLEAR = float(os.environ.get("GAP_CLEAR", "0.20"))  # m each side in a gap
+    # m each side in a gap. The threshold it feeds is DOUBLED --
+    # need = 2 * (ROBOT_HALF_WIDTH + GAP_CLEAR) -- so raising this
+    # narrows what counts as a passage. Measured in a small lounge:
+    # 0.20 (0.84 m) merged every gap into one wall and the robot did
+    # not move at all. See docker-compose.yml for the four-point table.
+    GAP_CLEAR = float(os.environ.get("GAP_CLEAR", "0.10"))
     # A footprint must appear in CONFIRM_MIN of the last CONFIRM_OF updates
     # before the robot acts on it. Detections flicker, and reacting to a single
     # frame made the robot escape an imaginary obstacle every 11 seconds.

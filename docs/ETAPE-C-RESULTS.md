@@ -500,3 +500,79 @@ Pour refaire l'histogramme du §4c, il faut un nœud ROS dans le conteneur
 `adbscan` qui souscrive à `/segmentation/arena_points` et lise la colonne z avec
 `edgebot.pointcloud.read_xyz`. Le nuage non coupé reste sur
 `/segmentation/obstacle_points` pour comparer.
+
+## 9. La fusion d'empreintes dans une petite piece (salon, aout 2026)
+
+Le cout residuel du §8 a mordu pour de bon en changeant de piece. Dans un salon
+plus serre que la piece d'origine, **le robot n'a pas bouge d'un centimetre en
+60 s** : parcours 0,00 m, ecart lateral 0,00 m, immobile a 0,73 m *a
+l'interieur* d'une empreinte.
+
+Le journal du navigateur le disait a chaque mise a jour :
+
+```
+merged 3 footprints into 1: gaps narrower than 0.84 m are not gaps
+```
+
+### Le seuil est double, et c'est le piege
+
+`GAP_CLEAR` n'est pas le seuil. Le seuil est
+
+```python
+need = 2.0 * (ROBOT_HALF_WIDTH + GAP_CLEAR)
+```
+
+soit 2 x (0,22 + 0,20) = **0,84 m** avec les valeurs d'alors. **Monter
+`GAP_CLEAR` resserre les passages.** Verifie plutot que suppose : a
+`GAP_CLEAR=0,5` le journal annonce `gaps narrower than 1.44 m are not gaps`,
+l'inverse de l'effet recherche.
+
+### Quatre points, 60 s chacun, meme scene
+
+| seuil | `GAP_CLEAR` | parcours | ecart lateral | degagement median | pire | frottements | no-way-round |
+|---|---|---|---|---|---|---|---|
+| 0,84 m | 0,20 | **0,00 m** | 0,00 m | +0,214 | −0,728 | **87,4 %** | 0 |
+| 0,74 m | 0,15 | 2,44 m | 0,67 m | +0,425 | −0,452 | 4,4 % | 5 |
+| **0,64 m** | **0,10** | 2,34 m | **1,24 m** | +0,431 | **−0,286** | **3,4 %** | 6 |
+| 0,50 m | 0,03 | 2,37 m | 1,02 m | **+0,681** | −0,393 | 8,6 % | 4 |
+
+Un « frottement » est une pose du robot a moins de `ROBOT_HALF_WIDTH` (0,22 m)
+d'une empreinte publiee. Mesure par `scripts/nav_probe.py`.
+
+**Retenu : `GAP_CLEAR=0.10` (seuil 0,64 m) avec `OBSTACLE_MARGIN=0.15.**
+Il gagne sur les trois criteres qui comptent : le moins de frottements, le
+meilleur pire cas, et le plus grand ecart lateral -- c'est-a-dire le
+contournement le plus franc.
+
+**Le critere n'est pas monotone**, ce qui defait la regle « remonter jusqu'a ce
+que ca ne frotte plus » : a 0,84 m le taux de frottement est de 87 %, non pas
+parce que le robot rase les meubles mais parce qu'il est **gare a l'interieur
+d'une empreinte et n'en sort jamais**. Descendre sous 0,64 m ne fait pas mieux
+non plus. Il y a un optimum, pas une pente.
+
+### Ce que la mesure a corrige dans le diagnostic
+
+La fusion n'est pas le facteur dominant. En regardant les rectangles publies
+*avant* fusion :
+
+```
+x  2.21.. 6.65   y -2.61..-0.09    4.45 x 2.52 m
+x  5.80.. 6.65   y  0.16.. 1.68    0.85 x 1.52 m
+x  3.08.. 4.13   y  0.39.. 1.10    1.05 x 0.71 m
+```
+
+Le bloc de **4,45 x 2,52 m, soit 11 m²**, est **une seule empreinte du
+compositeur**, pas un produit de fusion : c'est la projection au sol du mobilier
+de droite. Aucun reglage de `GAP_CLEAR` ne le reduira, et c'est lui qui explique
+les 3,4 % de frottements restants -- ils ne tombent a zero a aucun reglage.
+
+Le sol praticable reste une bande : boite englobante x 1,77..3,05 m, et une
+striction a x = 2,5 m ou la largeur tombe a 0,12 m. La piece est simplement
+petite pour ce robot.
+
+**Reste ouvert, et c'est desormais la vraie question :** la projection au sol
+d'un grand objet vu de biais produit une empreinte bien plus grande que son
+emprise reelle. Les pistes non essayees restent celles du §8, plus une nouvelle :
+borner une empreinte par la profondeur mesuree de l'objet plutot que par
+l'enveloppe de sa silhouette projetee.
+

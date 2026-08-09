@@ -45,7 +45,7 @@ from edgebot.pointcloud import (footprints, floor_polygon,   # noqa: E402
 
 CALIB = os.environ.get("CAMERA_CALIBRATION", "/config/camera_calibration.json")
 SENSOR = os.environ.get("GF_SENSOR_NAME", "camera")
-MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.20"))
+MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.15"))
 # Which class in their labelled cloud is the ground. Measured rather than read
 # out of a config: over 1.5 M points the label-3 class sits at z median 0.060 m
 # with a 0.094 m spread, while every other class sits at 0.77 m or above.
