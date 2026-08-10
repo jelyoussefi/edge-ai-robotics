@@ -35,6 +35,7 @@ from OpenGL import GL
 from edgebot import topics
 from edgebot.camera import stream_mode, stream_name
 from edgebot.floor import (box_footprints, clear_of_boxes, clip_footprints,
+                           mask_footprints_xy,
                            mask_footprints, polygon_from_mask, shrink,
                            straighten)
 from edgebot.bus import Publisher, Subscriber
@@ -919,6 +920,26 @@ class FloorDetector:
         ppx, ppy = self.ppx * dw / CAM_REF_W, self.ppy * dh / CAM_REF_H
         return (uu - ppx) / fx, (vv - ppy) / fy
 
+    def deproject(self, depth_m: np.ndarray):
+        """Depth image -> (forward, lateral, up) per pixel, world metres.
+
+        The difference from project_many() is the whole of option 2:
+        project_many answers "if this pixel were ON THE FLOOR, where would it
+        be", which is right for a contact point and catastrophically wrong for
+        anything above the floor. A pixel halfway up a couch back, projected as
+        if it lay on the ground, lands metres behind the couch -- which is how
+        a 0.9 m deep couch against a wall at 6.2 m produced a footprint
+        reaching 6.6 m. This uses the depth the sensor actually measured at
+        that pixel, so an object's extent is its own.
+        """
+        dh, dw = depth_m.shape
+        xn, yn = self._rays(dw, dh)
+        cp, sp = np.cos(self.pitch), np.sin(self.pitch)
+        fwd = depth_m * (cp - yn * sp)
+        lat = -xn * depth_m
+        up = self.H - depth_m * (sp + yn * cp)
+        return fwd, lat, up
+
     def height_map(self, depth_m: np.ndarray) -> np.ndarray:
         """Height above the ground plane, in metres, for every pixel.
 
@@ -1344,6 +1365,9 @@ def _warn_if_calibration_stale() -> None:
 
 # Margin left around every detected object, in metres of real floor.
 OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
+# Bound each footprint by the object's own measured depth rather than by the
+# ground-plane projection of its silhouette. 0 restores the projection.
+FOOTPRINT_FROM_DEPTH = os.environ.get("FOOTPRINT_FROM_DEPTH", "1") != "0"
 # Far wall of this room, measured at 6.2 m. Footprints are truncated here for
 # the reason clip_footprints() gives: the ground-plane projection has no notion
 # of where the room ends, and one stray mask column stretched a published
@@ -1905,6 +1929,50 @@ def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
     return annotated
 
 
+def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
+                       detections):
+    """Ground rectangles for what perception sees. THE only implementation.
+
+    There used to be two: one shaping the floor polygon and one, computed
+    separately on every publication, feeding the sim. They drifted -- the first
+    was moved onto the object's measured depth and the second was left
+    projecting silhouettes through the ground plane, so the floor mask and the
+    navigator disagreed about where the couch was by three quarters of a metre,
+    and only the navigator's copy mattered. Anything computed twice will
+    eventually be computed two ways.
+
+    Returns (boxes, how_they_were_made) so the log can say which path ran.
+    """
+    if seg_mask is not None and time.time() - seg_mask_t < 2.0:
+        dh_, dw_ = depth_metres.shape
+        sm = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
+                        interpolation=cv2.INTER_NEAREST).astype(bool)
+        if FOOTPRINT_FROM_DEPTH:
+            # Each object bounded by ITS OWN measured depth. The ground-plane
+            # projection answers "if this pixel lay on the floor, where would
+            # it be", which runs away from the camera for anything above the
+            # floor: it turned a couch standing against a 6.2 m wall into a
+            # footprint reaching 6.6 m -- past the wall, which is how you can
+            # tell the projection and not the object was being measured.
+            f, l, _ = floor_det.deproject(depth_metres)
+            valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
+                     & np.isfinite(f) & np.isfinite(l))
+            boxes, skipped = mask_footprints_xy(sm, f, l, valid,
+                                                OBSTACLE_MARGIN)
+            if boxes:
+                return boxes, "depth silhouettes"
+            if skipped:
+                log.warning("depth footprints: %d component(s) had too little "
+                            "valid depth, falling back to the ground-plane "
+                            "projection", skipped)
+        proj = (lambda uu, vv: floor_det.project_many(uu, vv, dw_, dh_))
+        boxes = mask_footprints(sm, proj, OBSTACLE_MARGIN)
+        if boxes:
+            return boxes, "projected silhouettes"
+    return _footprints(detections, floor_det, depth_metres.shape[1],
+                       depth_metres.shape[0]), "boxes"
+
+
 def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                         detections, roi_cached, obstacle_boxes,
                         seg_mask=None, seg_mask_t=0.0):
@@ -1957,23 +2025,13 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             _proj = lambda uu, vv: det.project_many(uu, vv, dw_, dh_)
             # Same source as the footprints published to the sim, so the
             # red overlay shows exactly the floor the robot is given.
-            _boxes = []
-            if seg_mask is not None and time.time() - seg_mask_t < 2.0:
-                _sm = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
-                                 interpolation=cv2.INTER_NEAREST).astype(bool)
-                _boxes = mask_footprints(_sm, _proj, OBSTACLE_MARGIN)
-            if not _boxes:
-                _boxes = box_footprints(
-                    detections, _tw, dw_, dh_,
-                    float(os.environ.get("OBSTACLE_MARGIN", "0.12")),
-                    float(os.environ.get("OBSTACLE_CONF", "0.45")))
+            _boxes, _how = _object_footprints(
+                seg_mask, seg_mask_t, det, depth_metres, detections)
             _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
             if _boxes:
                 mask = clear_of_boxes(mask, _boxes, _proj)
                 log.info("%d obstacle(s) removed from the floor (%s), "
-                         "%.2f m margin", len(_boxes),
-                         "silhouettes" if seg_mask is not None else "boxes",
-                         OBSTACLE_MARGIN)
+                         "%.2f m margin", len(_boxes), _how, OBSTACLE_MARGIN)
             obstacle_boxes = _boxes
             # The floor the geometry alone reported: no ROI_MARGIN, no
             # silhouettes, no footprints. Nothing steers on it -- it exists so
@@ -2016,20 +2074,8 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # deep as it is long: measured at 4.6 m for a table whose
             # real contact line is 0.4 m deep. The mask's lowest pixel
             # per column follows that contact line.
-            blocked = []
-            if seg_mask is not None and time.time() - seg_mask_t < 2.0:
-                _m = cv2.resize(seg_mask.astype(np.uint8),
-                                (depth_metres.shape[1], depth_metres.shape[0]),
-                                interpolation=cv2.INTER_NEAREST).astype(bool)
-                blocked = mask_footprints(
-                    _m,
-                    lambda uu, vv: floor_det.project_many(
-                        uu, vv, depth_metres.shape[1], depth_metres.shape[0]),
-                    OBSTACLE_MARGIN)
-            if not blocked:
-                blocked = _footprints(detections, floor_det,
-                                      depth_metres.shape[1],
-                                      depth_metres.shape[0])
+            blocked, _how_pub = _object_footprints(
+                seg_mask, seg_mask_t, floor_det, depth_metres, detections)
             # Same guard as above, on the set actually published to the sim.
             # This is the one that mattered: the 11.12 m footprint went out on
             # the bus and the navigator planned around it.

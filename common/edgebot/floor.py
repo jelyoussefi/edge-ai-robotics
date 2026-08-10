@@ -267,6 +267,51 @@ def occupied_cells(mask, depth_m, rays, cell: float, margin: float,
     return grid.astype(bool), bounds
 
 
+def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
+                       min_valid: int = 40, pct: float = 2.0):
+    """Ground rectangles from each object's OWN measured depth.
+
+    Takes per-pixel world coordinates that were computed from the DEPTH the
+    sensor reported, not from the ground-plane assumption, and reduces each
+    connected component of the mask to the extent of its own points.
+
+    Why this exists: projecting a silhouette through the ground plane answers
+    "where would this pixel be if it lay on the floor". For the contact line
+    that is right; for everything above it the answer runs away from the
+    camera, without bound as the pixel rises towards the horizon. A couch
+    0.9 m deep standing against a wall measured at 6.2 m came out as a
+    footprint 4.4 m deep reaching 6.6 m -- past the wall, which is the tell.
+
+    Percentiles rather than min and max, for the same reason as the projected
+    version: a handful of stray depth pixels on a distant surface would
+    otherwise stretch the rectangle across the room.
+
+    Returns (x_min, x_max, y_min, y_max) per component, already grown by
+    `margin`, plus how many components were skipped for want of valid depth --
+    a caller that silently produced nothing would look identical to a scene
+    with no obstacles in it.
+    """
+    import cv2
+    if mask is None or not mask.any():
+        return [], 0
+    n, labels = cv2.connectedComponents(mask.astype(np.uint8))
+    out, skipped = [], 0
+    for i in range(1, n):
+        comp = labels == i
+        if int(comp.sum()) < min_px:
+            continue
+        sel = comp & valid
+        if int(sel.sum()) < min_valid:
+            skipped += 1
+            continue
+        f, l = fwd[sel], lat[sel]
+        x0, x1 = np.percentile(f, pct), np.percentile(f, 100.0 - pct)
+        y0, y1 = np.percentile(l, pct), np.percentile(l, 100.0 - pct)
+        out.append((round(float(x0) - margin, 3), round(float(x1) + margin, 3),
+                    round(float(y0) - margin, 3), round(float(y1) + margin, 3)))
+    return out, skipped
+
+
 def mask_footprints(mask, project, margin: float, min_px: int = 60,
                     max_depth: float = 12.0):
     """Ground rectangles from the segmentation masks, not from the boxes.

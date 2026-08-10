@@ -732,3 +732,55 @@ blocage reste l'empreinte de 4,38 m du canape, c'est-a-dire l'option 2 du §9 --
 borner une empreinte par la profondeur mesuree de l'objet plutot que par
 l'enveloppe de sa silhouette projetee.
 
+## 12. Option 2 : borner une empreinte par la profondeur mesuree
+
+Critere pose a l'avance : le bord lointain de l'empreinte du canape doit tomber
+**au plus au mur mesure a 6,2 m**, et son etendue doit correspondre a la
+profondeur reelle du canape, pas a 4,4 m. Reporter `x_min` et `x_max`.
+
+### Resultat
+
+| | avant (projection) | apres (profondeur) |
+|---|---|---|
+| `x_min` | 2,24 m | **2,21 m** (2,19-2,22) |
+| `x_max` | **6,62 m** | **5,80 m** (5,72-5,93) |
+| profondeur | 4,38 m | **3,60 m** |
+| au-dela du mur de 6,2 m | **45/45 (100 %)** | **0/44 (0 %)** |
+
+**Premier critere : atteint.** Le bord lointain rentre de 0,82 m et ne depasse
+plus jamais le mur.
+
+**Second critere : non atteint, et la mesure dit pourquoi.** 3,60 m n'est pas
+0,9 m. Ce n'est plus de la projection : la composante connexe du masque est
+**un seul canape en L** qui longe le mur du fond puis redescend le long du cote,
+et ses propres points mesures s'etendent de 2,30 m a 5,65 m en profondeur et de
+-2,07 a +1,12 m lateralement. Les 0,9 m sont la profondeur d'un **element** de
+canape, pas de l'objet connexe.
+
+Preuve que le masque est bien le canape et pas le mur : la hauteur mediane de
+ses points est de **0,44 m** et le maximum de **1,05 m**. Un masque qui aurait
+avale le mur monterait a 2,4 m.
+
+### Ce que la mesure a trouve en chemin : la fonction etait ecrite deux fois
+
+Le premier passage n'a rien change au bus. La fonction de calcul des empreintes
+existait **en deux exemplaires** dans `_publish_free_floor` : l'une faconne le
+polygone du sol, l'autre est recalculee a chaque publication et c'est **elle**
+qui part sur le bus vers le navigateur. Avoir modifie la premiere donnait
+`x_max = 5,88 m` en interne pendant que le bus continuait a porter 6,62 m.
+
+Les deux sont maintenant un seul `_object_footprints()`. Ce qui est calcule
+deux fois finit par etre calcule de deux facons.
+
+### Ce qui reste, et ce n'est plus la projection
+
+Les deux couloirs restent couverts **40/40**. La raison a change : l'empreinte
+est desormais la vraie etendue du canape, mais c'est un **rectangle englobant
+une forme en L**, et l'interieur du L est precisement ou se trouve le sol libre.
+
+Le prochain pas n'est donc plus de retrecir les empreintes mais d'arreter de les
+representer par des rectangles : une grille d'occupation par cellule, ou un
+polygone concave, laisserait l'interieur du L praticable. C'est la meme
+correction concave que le passage aux contours a apportee cote image, a
+appliquer cote sol.
+
