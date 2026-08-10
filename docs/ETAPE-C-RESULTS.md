@@ -634,3 +634,101 @@ elles sont strictement meilleures sur la securite.
 du §9 -- qui n'est pas commencee.** Tant qu'une silhouette produit un seul
 rectangle englobant, la piece est murée quelles que soient les marges.
 
+## 11. Le couloir n'est pas ferme par la fusion : mesures du salon
+
+Trois questions posees, trois reponses mesurees, aucune modification de
+comportement.
+
+### 1. D'ou vient 0,64 m
+
+**Valeur DERIVEE, nulle part en configuration.**
+`services/sim/navigator.py:515` :
+
+```python
+need = 2.0 * (self.ROBOT_HALF_WIDTH + self.GAP_CLEAR)   # 2 x (0,22 + 0,10)
+```
+
+`docker-compose.yml` regle `GAP_CLEAR=0.10`, pas 0,84. Le 0,84 lu venait d'un
+**commentaire que j'avais ecrit** : un tableau de mesures listant des seuils
+(0,84 / 0,74 / 0,64 / 0,50 m) place juste a cote de la variable. Le tableau est
+maintenant ici, au §9, et le bloc compose ne contient plus que le nombre reel.
+
+### 2. Le couloir arriere est OCCULTE, pas bloque
+
+Mesure a x = 3,90 m et x = 4,20 m, derriere la table :
+
+| point | points de profondeur | p05 hauteur | passent la porte de sol | dans le sol brut |
+|---|---|---|---|---|
+| (3,90 ; 0,00) | 8 456 | **+51,2 cm** | **0,0 %** | non |
+| (4,20 ; 0,00) | 5 953 | **+46,2 cm** | **0,0 %** | non |
+| (3,70 ; 0,30) | 5 234 | +54,4 cm | 0,0 % | non |
+
+Le **cinquieme percentile** est deja a 46-54 cm : le point le plus bas que le
+capteur voit dans ces cellules est le plateau de la table. Aucun rayon
+n'atteint le sol derriere elle. La camera est a 1,48 m et plonge de 14,5 deg ;
+une table de 55-58 cm a 3 m projette une ombre qui couvre le sol derriere elle.
+
+**Le couloir arriere de 1,10 m n'est pas trop etroit, il est invisible.** Il ne
+doit pas etre compte comme un echec de passage. Non mesure = non mesure.
+
+Les deux couloirs lateraux, eux, sont bien du sol reel :
+
+| point | points | hauteur mediane | passent la porte de sol |
+|---|---|---|---|
+| (3,10 ; -0,90) | 20 244 | +1,6 cm | **100 %** |
+| (3,10 ; +1,10) | 20 141 | -0,9 cm | **99,3 %** |
+
+Largeurs mesurees a x = 3,10 m, au niveau du plateau : **~0,6 m a gauche** et
+**~0,8 m a droite**, pas 0,90 m. Le metre ruban mesure au ras du sol entre les
+pieds ; le capteur voit le plateau, qui deborde, et c'est le plateau que le
+robot doit contourner.
+
+### 3. La fusion n'est PAS ce qui ferme les couloirs
+
+60 s, `OBSTACLE_MARGIN=0.12` tenu fixe :
+
+| | fusion a 0,64 m | fusion a 0,44 m (desactivee de fait) |
+|---|---|---|
+| empreintes par mise a jour | mediane **3** | mediane **3** |
+| plus grande empreinte | **4,38 m** (max 5,17) | **4,38 m** |
+| empreinte propre a la table | **59/59** | **59/59** |
+| couloir gauche couvert | 59/59 | 59/59 |
+| ... par une empreinte > 1,5 m **uniquement** | **59/59** | **59/59** |
+| couloir droit couvert | 59/59 | 59/59 |
+| ... par une empreinte > 1,5 m **uniquement** | **59/59** | **59/59** |
+
+**La table garde bien son empreinte propre, 59 fois sur 59.** Le correctif de
+contour tient. Mais les deux couloirs sont couverts, a chaque mise a jour, par
+une **seule** empreinte de plus de 1,5 m -- et **rien d'autre**. Couper la
+fusion ne change ni leur couverture ni sa cause : le canape emet toujours une
+empreinte de 4,38 m qui, a elle seule, recouvre les deux passages.
+
+Donc « l'etape de fusion est le nouveau bbox » n'est pas ce que montre la
+mesure. La fusion regroupe trois empreintes en une ; **la plus grande des trois
+suffisait deja**.
+
+Reserve sur les deux dernieres lignes du tableau de comparaison : le
+degagement passe de -1,304 m a +1,018 m et les frottements de 100 % a 0 %,
+mais `up -d sim` a fait reapparaitre le robot a l'origine (x 0,47 au lieu de
+2,76). Ces deux chiffres mesurent la position de reapparition, pas la fusion,
+et ne doivent pas etre lus comme une amelioration. Dans les deux cas le robot
+ne bouge pas : deplacement de 0,00 m et 0,02 m sur 60 s.
+
+### Proposition, non appliquee
+
+Remplacer la pre-fusion par un test de passage explicite : pour chaque
+intervalle entre deux empreintes, comparer sa largeur libre a la largeur reelle
+du robot plus un degagement, et ne fusionner que ce qui est vraiment
+infranchissable -- ou mieux, ne pas fusionner du tout et laisser le detour
+raisonner sur les empreintes telles quelles.
+
+Le G1 fait ~0,45 m aux epaules ; `ROBOT_HALF_WIDTH=0.22` donne deja 0,44 m, ce
+qui est coherent. La fusion recree exactement le probleme concave que le
+correctif de contour venait d'enlever.
+
+**Mais cela ne debloquera pas cette piece**, et c'est le point important : les
+couloirs sont a l'interieur d'une empreinte unique, pas entre deux. Le vrai
+blocage reste l'empreinte de 4,38 m du canape, c'est-a-dire l'option 2 du §9 --
+borner une empreinte par la profondeur mesuree de l'objet plutot que par
+l'enveloppe de sa silhouette projetee.
+

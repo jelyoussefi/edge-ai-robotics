@@ -127,22 +127,18 @@ services:
       PATROL_MODE: ${PATROL_MODE:-axis}
       OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
       ROBOT_HALF_WIDTH: ${ROBOT_HALF_WIDTH:-0.22}
-      # Degagement exige DE CHAQUE COTE pour qu'un intervalle compte comme un
-      # passage. Le seuil reel est double : need = 2 x (ROBOT_HALF_WIDTH +
-      # GAP_CLEAR), soit 0,64 m ici. Monter GAP_CLEAR RESSERRE les passages,
-      # c'est contre-intuitif : a 0,20 le seuil valait 0,84 m, tous les
-      # intervalles du salon etaient fusionnes en un mur et le robot n'a pas
-      # bouge d'un centimetre en 60 s.
+      # ATTENTION : le seuil de fusion effectif n'est PAS la valeur ci-dessous.
+      # Il vaut  need = 2 x (ROBOT_HALF_WIDTH + GAP_CLEAR)  = 2 x (0,22 + 0,10)
+      #        = 0,64 m  avec les valeurs par defaut actuelles.
+      # C'est une valeur DERIVEE, calculee dans services/sim/navigator.py:515,
+      # elle n'existe nulle part en configuration. Monter GAP_CLEAR RESSERRE
+      # les passages.
       #
-      # Mesure sur 4 x 60 s dans ce salon (voir docs/ETAPE-C-RESULTS.md §9) :
-      #   seuil   parcours   ecart lateral   degagement min   frottements
-      #   0,84 m    0,00 m        0,00 m        -0,728 m         87,4 %
-      #   0,74 m    2,44 m        0,67 m        -0,452 m          4,4 %
-      #   0,64 m    2,34 m        1,24 m        -0,286 m          3,4 %   <-
-      #   0,50 m    2,37 m        1,02 m        -0,393 m          8,6 %
-      # 0,64 m gagne sur les trois criteres qui comptent : le moins de
-      # frottements, le meilleur pire cas, et le plus grand ecart lateral,
-      # c'est-a-dire le contournement le plus franc.
+      # Le tableau de mesures qui se trouvait ici listait des SEUILS (0,84 /
+      # 0,74 / 0,64 / 0,50 m) juste a cote de la variable, et a ete lu comme si
+      # GAP_CLEAR valait 0,84. Il est deplace dans docs/ETAPE-C-RESULTS.md §9
+      # pour que ce bloc ne contienne plus qu'un seul nombre : celui qui est
+      # regle ici.
       GAP_CLEAR: ${GAP_CLEAR:-0.10}
       # Note sur 0,55, propose une fois : GAP_CLEAR n'est PAS la largeur
       # minimale d'un passage. need = 2 x (0,22 + GAP_CLEAR), donc 0,55 donne
