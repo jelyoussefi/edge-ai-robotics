@@ -2156,6 +2156,36 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
 OBSTACLE_REP = os.environ.get("OBSTACLE_REP", "grid").strip().lower()
 GRID_PASSABLE = float(os.environ.get("GRID_PASSABLE", "0.44"))
 
+# Rasterise every Nth floor pixel in each direction. 1 is every pixel.
+#
+# DEFAULTS TO 1 BECAUSE THE MEASUREMENT SAID SO, and the number that decided it
+# is not the timing. On this lounge the floor mask holds 284 656 pixels landing
+# on 5120 cells -- 55.6 points per cell on average, which looks like pure waste
+# until you notice how unevenly they are spread. Point density falls as 1/z^2,
+# so the near floor gets thousands of points per cell and the far floor gets
+# one or two, and a uniform pixel stride takes the far cells out entirely. It
+# never adds a cell, only removes, and it removes them from the far edge, which
+# is the exact place the walkable floor is measured:
+#
+#   stride   points   project+rasterise   cells    lost    of the full grid
+#      1     284656       8.90 ms          5120       0     --
+#      2      71225       1.52 ms          4975     145     2.8 %
+#      4      17725       0.38 ms          4045    1075    21.0 %
+#      8       4390       0.16 ms          2604    2516    49.1 %
+#
+# Against that, the prize: this runs once per ROI publish, measured at 0.99 Hz
+# over 10 minutes (592 rebuilds). 8.9 ms once a second is 0.9 % of wall time
+# and lands on one frame in 37 -- it moves p99, not fps, and not the median.
+# Trading a fifth of the observed floor for a percentile is a bad trade, so the
+# stride ships off. The knob stays because it is the cheapest lever if the
+# raster ever grows and because the table above is the argument for leaving it
+# alone; delete both together or neither.
+#
+# Objects are deliberately NOT subsampled. The asymmetry is the whole point: a
+# floor cell dropped costs the robot somewhere it could have walked, an object
+# cell dropped drives it into the furniture.
+FLOOR_STRIDE = max(1, int(os.environ.get("FLOOR_STRIDE", "1")))
+
 
 def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
     """(occupied, floor) ground grids, or (None, None) when unavailable.
@@ -2201,7 +2231,14 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
                          margin=OBSTACLE_MARGIN, passable=GRID_PASSABLE)
     flr = None
     if floor_mask is not None and floor_mask.any():
-        ys, xs = np.nonzero(floor_mask)
+        # Every FLOOR_STRIDE-th pixel in each direction, on the mask rather
+        # than on the list of hits: a spatial stride thins the near field and
+        # the far field alike, whereas slicing the nonzero() result thins whole
+        # rows and leaves stripes. Objects are NOT thinned -- see FLOOR_STRIDE.
+        s = FLOOR_STRIDE
+        ys, xs = np.nonzero(floor_mask[::s, ::s] if s > 1 else floor_mask)
+        if s > 1:
+            ys, xs = ys * s, xs * s
         ff, ll = floor_det.project_many(xs.astype(np.float64),
                                         ys.astype(np.float64), dw_, dh_)
         flr = points_to_grid(ff, ll, np.isfinite(ff) & np.isfinite(ll),

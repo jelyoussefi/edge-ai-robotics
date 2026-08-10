@@ -288,6 +288,25 @@ services:
       # morphologique local et non une fusion globale qui reconstruisait la
       # boite englobante que la decomposition existait pour eviter.
       GRID_PASSABLE: ${GRID_PASSABLE:-0.44}
+      # Rasterise un pixel de sol sur N dans chaque direction. 1 = tous.
+      # A 1 PARCE QUE LA MESURE L'A DIT. Le masque de sol de ce salon porte
+      # 284 656 pixels pour 5120 cellules, soit 55,6 points par cellule en
+      # moyenne -- ce qui ressemble a du gaspillage jusqu'a ce qu'on regarde la
+      # repartition. La densite de points decroit en 1/z^2 : le sol proche
+      # recoit des milliers de points par cellule et le sol lointain un ou
+      # deux, donc un pas uniforme en pixels supprime les cellules lointaines.
+      # Il n'en ajoute jamais, il n'en enleve que -- et il les enleve au bord
+      # lointain, exactement la ou se mesure le sol praticable :
+      #   pas 2 : 1,52 ms, 4975 cellules, 145 perdues (2,8 %)
+      #   pas 4 : 0,38 ms, 4045 cellules, 1075 perdues (21,0 %)
+      #   pas 8 : 0,16 ms, 2604 cellules, 2516 perdues (49,1 %)
+      # En face, le gain : ce calcul tourne une fois par publication de ROI,
+      # mesure a 0,99 Hz sur 10 minutes. 8,9 ms une fois par seconde, c'est
+      # 0,9 % du temps et une image sur 37 : ca deplace le p99, pas le FPS.
+      # Les objets ne sont deliberement PAS sous-echantillonnes : une cellule
+      # de sol perdue coute au robot un endroit ou il aurait pu marcher, une
+      # cellule d'objet perdue l'envoie dans le meuble.
+      FLOOR_STRIDE: ${FLOOR_STRIDE:-1}
       # Borne chaque empreinte par la profondeur MESUREE de l'objet, au lieu de
       # projeter sa silhouette sur le plan du sol. La projection repond "si ce
       # pixel etait au sol, ou serait-il", ce qui fuit vers l'infini pour tout
