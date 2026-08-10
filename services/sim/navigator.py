@@ -50,6 +50,20 @@ class Navigator:
     TURN_DONE = 0.12      # rad, how close to the new heading ends the about-face
     TURN_WZ = float(os.environ.get("TURN_WZ", "0.9"))   # rad/s asked while turning
     TURN_VX = float(os.environ.get("TURN_VX", "0.26"))  # m/s kept while turning
+    # The speed that gets a STOPPED robot walking again, which is not the speed
+    # that keeps a walking one going. Measured on this policy with
+    # scripts/startup_probe.py, ramping vx in 0.02 steps: it starts at 0.42 m/s
+    # and does not stop until 0.26, a hysteresis of 0.16 m/s. TURN_VX is the
+    # STOP side, so any floor built from it holds a moving robot and cannot
+    # restart a halted one -- (0.26, 0) is a stable fixed point, which is
+    # exactly how the patrol died at lap 18 while still logging vx 0.26 m/s.
+    # 0.45 is the measured 0.42 plus a little, in ABSOLUTE m/s rather than as a
+    # fraction of anything, so no other knob can drag it back under.
+    START_VX = float(os.environ.get("START_VX", "0.45"))
+    # A non-zero command that moves the robot less than this over
+    # STALL_WINDOW seconds is a stall, and gets said out loud.
+    STALL_MIN_MOVE = float(os.environ.get("STALL_MIN_MOVE", "0.05"))
+    STALL_WINDOW = float(os.environ.get("STALL_WINDOW", "2.0"))
     CRUISE_VX = float(os.environ.get("CRUISE_VX", "0.6"))  # m/s along the axis
     SLOW_ABOVE = 0.30     # rad of heading error below which speed is not cut
     CROSS_GAIN = 2.0      # how hard to pull back onto the axis
@@ -273,6 +287,12 @@ class Navigator:
         # update, which reads as indecision and costs distance.
         self._last_lane = 0.0
         self._runup_logged = 1.0
+        # Stall watchdog state. See _watch_stall.
+        self._stalled = False
+        self._stall_t0 = 0.0
+        self._stall_x = 0.0
+        self._stall_y = 0.0
+        self._stall_said = 0.0
         # Effective far end of the patrol. Starts at the configured STOP_AT and
         # is pulled in to the floor the sensor reports, see PATROL_CLAMP.
         self._stop_at = self.STOP_AT
@@ -292,7 +312,12 @@ class Navigator:
                 "GAP_CLEAR": self.GAP_CLEAR,
                 "OBSTACLE_REP": self.REP,
                 "OBSTACLE_SOURCE": self.SOURCE,
-                "NAV_MODE": self.MODE}
+                "NAV_MODE": self.MODE,
+                # Carried so every measurement can say which laps it covers.
+                # A 60 s window can straddle a stall, and two runs that report
+                # the same numbers over different laps are not the same run.
+                "lap": self._laps,
+                "stalled": self._stalled}
 
     def set_floor(self, roi: list, blocked: list, inst: list | None = None) -> None:
         """Take the walkable floor and the obstacle footprints from perception.
@@ -1101,6 +1126,11 @@ class Navigator:
         return capped
 
     def step(self, pose: Pose, dt: float) -> np.ndarray:
+        # Before anything decides where to go, notice whether the last decision
+        # actually moved the robot.
+        # centre, not lead: the toe swings with every step and would read
+        # as movement while the robot goes nowhere.
+        self._watch_stall(float(pose.centre[0]), float(pose.centre[1]))
         # Goal mode short-circuits the patrol entirely: there is no axis, no
         # lane and no about-face, only the plan. Everything it uses below --
         # _escape, _smooth, the yaw cap, the TURN_VX floor -- is shared.
@@ -1336,9 +1366,50 @@ class Navigator:
         return None
 
     def _smooth(self, vx_des: float, wz_des: float, dt: float) -> np.ndarray:
-        """Rate limit the command, so no heading or speed change is a step."""
+        """Rate limit the command, lift it over the start threshold if the robot
+        is stalled, and shout if it stays stalled anyway.
+
+        Every path out of this navigator funnels through here, which is why the
+        floor and the watchdog live here rather than at the three places that
+        ask for TURN_VX. Putting them at the call sites is how the last one got
+        missed.
+        """
+        if vx_des > 0.0 and self._stalled:
+            # Stopped, and being asked to move: ask for enough to actually
+            # start. See START_VX -- the floor the rest of the code uses is the
+            # speed that keeps a walking robot walking, 0.16 m/s below the one
+            # that gets a stopped one going.
+            vx_des = max(vx_des, self.START_VX)
         self._vx += float(np.clip(vx_des - self._vx, -self.VX_SLEW * dt,
                                   self.VX_SLEW * dt))
         self._wz += float(np.clip(wz_des - self._wz, -self.WZ_SLEW * dt,
                                   self.WZ_SLEW * dt))
         return np.array([self._vx, 0.0, self._wz])
+
+    def _watch_stall(self, x: float, y: float) -> None:
+        """Notice a robot that is being commanded to move and is not moving.
+
+        The failure this exists for looked like a healthy demo: the navigator
+        logged "walking back ... vx 0.26 m/s, lap 18" once a second, forever,
+        with the robot stationary. Nothing was wrong with any single line. What
+        was missing was anyone comparing the command against the displacement.
+        """
+        now = time.time()
+        if self._stall_t0 == 0.0:
+            self._stall_t0, self._stall_x, self._stall_y = now, x, y
+            return
+        if now - self._stall_t0 < self.STALL_WINDOW:
+            return
+        moved = float(np.hypot(x - self._stall_x, y - self._stall_y))
+        commanded = self._vx
+        self._stalled = commanded > 0.01 and moved < self.STALL_MIN_MOVE
+        if self._stalled and now - self._stall_said > 5.0:
+            self._stall_said = now
+            log.warning("STALLED: commanded vx %.2f m/s for %.1f s and moved "
+                        "%.3f m (under %.2f m). The policy starts at %.2f m/s "
+                        "and stops at %.2f, so a command between the two holds "
+                        "a walking robot and cannot restart a stopped one; "
+                        "lifting to START_VX %.2f.",
+                        commanded, now - self._stall_t0, moved,
+                        self.STALL_MIN_MOVE, 0.42, self.TURN_VX, self.START_VX)
+        self._stall_t0, self._stall_x, self._stall_y = now, x, y

@@ -107,7 +107,10 @@ def main() -> None:
     ap.add_argument("--label", default="")
     args = ap.parse_args()
 
-    sub = Subscriber([topics.PATROL_ROI, topics.ROBOT_STATE])
+    sub = Subscriber([topics.PATROL_ROI, topics.ROBOT_STATE,
+                      topics.SIM_TELEMETRY])
+    laps: list = []
+    stalled_seen = 0
     occ = None
     gcell = 0.05
     gbounds = (0.0, 8.0, -4.0, 4.0)
@@ -127,6 +130,13 @@ def main() -> None:
         if msg is None:
             continue
         topic, p = msg
+        if topic == topics.SIM_TELEMETRY:
+            nav = (p or {}).get("nav") or {}
+            if "lap" in nav:
+                laps.append(int(nav["lap"]))
+            if nav.get("stalled"):
+                stalled_seen += 1
+            continue
         if topic == topics.PATROL_ROI:
             if p.get("occ") and p.get("gnx"):
                 occ = unpack_grid(p["occ"], int(p["gnx"]), int(p["gny"]))
@@ -165,6 +175,12 @@ def main() -> None:
     print(f"=== {lab}: {args.seconds:.0f} s, {len(poses)} poses, "
           f"{len(counts)} ROI updates ===")
     print(f"clearance measured against: {measured_against}")
+    if laps:
+        print(f"laps covered: {min(laps)} to {max(laps)}"
+              + (f"  STALLED reported in {stalled_seen} telemetry sample(s)"
+                 if stalled_seen else ""))
+    else:
+        print("laps covered: unmeasured (no sim telemetry seen)")
 
     print("walkable floor width (lateral extent of the ROI polygon):")
     if widths:
