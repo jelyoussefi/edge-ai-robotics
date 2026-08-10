@@ -370,9 +370,9 @@ def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
     """
     import cv2
     if mask is None or not mask.any():
-        return [], 0
+        return [], 0, []
     n, labels = cv2.connectedComponents(mask.astype(np.uint8))
-    out, skipped = [], 0
+    out, skipped, inst = [], 0, []
     for i in range(1, n):
         comp = labels == i
         if int(comp.sum()) < min_px:
@@ -389,6 +389,7 @@ def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
                         round(float(x1) + margin, 3),
                         round(float(y0) - margin, 3),
                         round(float(y1) + margin, 3)))
+            inst.append(i)
             continue
         # Occupancy of THIS instance on the ground, then a few rectangles over
         # the cells it actually fills. One bounding box around an L-shaped couch
@@ -401,6 +402,7 @@ def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
                         round(float(x1) + margin, 3),
                         round(float(y0) - margin, 3),
                         round(float(y1) + margin, 3)))
+            inst.append(i)
             continue
         inb = (f >= x0) & (f <= x1) & (l >= y0) & (l <= y1)
         gi = np.clip(((f[inb] - x0) / cell).astype(np.int32) + pad, 0, nx - 1)
@@ -427,7 +429,8 @@ def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
                         round(x0 + (r1 + 1 - k) * cell, 3),
                         round(y0 + (c0 - k) * cell, 3),
                         round(y0 + (c1 + 1 - k) * cell, 3)))
-    return out, skipped
+            inst.append(i)
+    return out, skipped, inst
 
 
 def mask_footprints(mask, project, margin: float, min_px: int = 60,

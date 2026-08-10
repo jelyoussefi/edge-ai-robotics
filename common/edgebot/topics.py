@@ -30,6 +30,13 @@ KEEPOUT_ZONES = "keepout.zones"
 # another floor detection can neutralise our own definitions, which are policy
 # and not perception -- comparing a walkable-floor polygon against somebody
 # else's ground segmentation measures our margin as much as their detector.
+# `blocked_inst` is optional and parallel to `blocked`: the id of the detected
+# object each rectangle came from. A concave object is published as several
+# rectangles covering only the cells it occupies, and without the ids the
+# navigator's merge fuses them straight back into the bounding box the
+# decomposition exists to avoid -- the two arms of an L-shaped couch are
+# separated by a real gap narrower than the robot, so the merge is right to
+# close it between two OBJECTS and wrong to close it inside one.
 PATROL_ROI = "patrol.roi"
 
 # Silhouettes of everything the segmentation model found, as one packed boolean

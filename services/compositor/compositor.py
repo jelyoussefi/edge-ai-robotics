@@ -1963,11 +1963,11 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
             f, l, _ = floor_det.deproject(depth_metres)
             valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
                      & np.isfinite(f) & np.isfinite(l))
-            boxes, skipped = mask_footprints_xy(
+            boxes, skipped, inst = mask_footprints_xy(
                 sm, f, l, valid, OBSTACLE_MARGIN,
                 max_rects=FOOTPRINT_MAX_RECTS, cell=FOOTPRINT_CELL)
             if boxes:
-                return boxes, "depth silhouettes"
+                return boxes, "depth silhouettes", inst
             if skipped:
                 log.warning("depth footprints: %d component(s) had too little "
                             "valid depth, falling back to the ground-plane "
@@ -1975,9 +1975,10 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
         proj = (lambda uu, vv: floor_det.project_many(uu, vv, dw_, dh_))
         boxes = mask_footprints(sm, proj, OBSTACLE_MARGIN)
         if boxes:
-            return boxes, "projected silhouettes"
-    return _footprints(detections, floor_det, depth_metres.shape[1],
-                       depth_metres.shape[0]), "boxes"
+            return boxes, "projected silhouettes", list(range(len(boxes)))
+    fb = _footprints(detections, floor_det, depth_metres.shape[1],
+                     depth_metres.shape[0])
+    return fb, "boxes", list(range(len(fb)))
 
 
 def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
@@ -2032,7 +2033,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             _proj = lambda uu, vv: det.project_many(uu, vv, dw_, dh_)
             # Same source as the footprints published to the sim, so the
             # red overlay shows exactly the floor the robot is given.
-            _boxes, _how = _object_footprints(
+            _boxes, _how, _inst = _object_footprints(
                 seg_mask, seg_mask_t, det, depth_metres, detections)
             _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
             if _boxes:
@@ -2081,14 +2082,29 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # deep as it is long: measured at 4.6 m for a table whose
             # real contact line is 0.4 m deep. The mask's lowest pixel
             # per column follows that contact line.
-            blocked, _how_pub = _object_footprints(
+            blocked, _how_pub, _inst_pub = _object_footprints(
                 seg_mask, seg_mask_t, floor_det, depth_metres, detections)
             # Same guard as above, on the set actually published to the sim.
             # This is the one that mattered: the 11.12 m footprint went out on
             # the bus and the navigator planned around it.
-            blocked = clip_footprints(blocked, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
+            # Clipped one at a time so the instance ids stay paired with the
+            # rectangles: clip_footprints drops anything wholly beyond the wall,
+            # and a dropped box would shift every id after it.
+            _pairs = []
+            for _b, _iid in zip(blocked, _inst_pub):
+                _cb = clip_footprints([_b], FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
+                if _cb:
+                    _pairs.append((_cb[0], _iid))
+            blocked = [p_[0] for p_ in _pairs]
+            _inst_pub = [p_[1] for p_ in _pairs]
             pub.send(topics.PATROL_ROI,
                      {"roi": roi_cached, "blocked": blocked,
+                      # Which detected object each rectangle belongs to.
+                      # `blocked` stays a list of 4-tuples; the ids travel
+                      # BESIDE it so the navigator can refuse to merge the
+                      # pieces of one concave object back into its bounding
+                      # box, which is the whole point of decomposing it.
+                      "blocked_inst": _inst_pub,
                       "raw": getattr(_publish_free_floor, "raw_poly", []),
                       "stamp": time.time()})
             # The polygon carries the OUTER boundary only: an

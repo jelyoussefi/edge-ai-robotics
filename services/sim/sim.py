@@ -163,7 +163,8 @@ class Sim:
                     # Counter-clockwise, so the interior is on the left of the
                     # direction of travel and the boundary on the right.
                     roi = roi[::-1]
-                self.nav.set_floor(roi, payload.get("blocked"))
+                self.nav.set_floor(roi, payload.get("blocked"),
+                                   payload.get("blocked_inst"))
                 continue
 
             if topic == topics.SUITE_CLUSTERS:

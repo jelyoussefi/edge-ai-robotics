@@ -198,9 +198,11 @@ class Navigator:
         self._escape_yaw = None
         self._blocked = False
         self._blocked_reason = ""
+        # Per-source instance ids for the most recent update only.
+        self._inst: dict = {}
         self._last_walk_log = 0.0
 
-    def set_floor(self, roi: list, blocked: list) -> None:
+    def set_floor(self, roi: list, blocked: list, inst: list | None = None) -> None:
         """Take the walkable floor and the obstacle footprints from perception.
 
         Both arrive together and neither is sufficient alone: the polygon is an
@@ -211,7 +213,7 @@ class Navigator:
             self._roi = roi
         if blocked is not None:
             self._push("ours", [(float(b[0]), float(b[1]), float(b[2]),
-                                 float(b[3])) for b in blocked])
+                                 float(b[3])) for b in blocked], inst)
 
     def set_suite(self, clusters: list) -> None:
         """Take ADBSCAN's clusters, clipped to the arena and de-blobbed.
@@ -389,10 +391,18 @@ class Navigator:
             if reason:
                 log.info("%s", reason)
 
-    def _push(self, source: str, boxes: list) -> None:
-        """Record one update from one source and rebuild the obstacle set."""
+    def _push(self, source: str, boxes: list, inst: list | None = None) -> None:
+        """Record one update from one source and rebuild the obstacle set.
+
+        `inst` says which detected object each box belongs to. It is kept for
+        the LATEST update only and deliberately out of the confirmation
+        history: the ids are per-frame indices and would differ between frames
+        for the same object, so comparing them across updates would stop
+        anything ever confirming.
+        """
         hist = self._history[source]
         hist.append(boxes)
+        self._inst[source] = list(inst) if inst else []
         del hist[:-self.CONFIRM_OF]
         self._src_t[source] = time.time()
         self._recompute()
@@ -418,9 +428,16 @@ class Navigator:
                 continue
             if now - self._src_t[source] > self.STALE:
                 continue
-            for box in self._confirmed(source):
+            ids = self._inst.get(source) or []
+            for k, box in self._confirmed(source):
                 boxes.append(box)
-                tags.append({source})
+                tag = {source}
+                if k < len(ids) and ids[k] is not None:
+                    # Pieces of one detected object carry the same mark and are
+                    # never merged with each other, so a decomposed L-shaped
+                    # couch cannot be glued back into its bounding box.
+                    tag.add(f"{source}#{ids[k]}")
+                tags.append(tag)
         self._obstacles, self._obstacle_src = self._merge(boxes, tags)
         # The freshest contributing source. Taking the oldest would expire the
         # union as soon as the slower of the two lagged, and taking a fixed
@@ -443,7 +460,11 @@ class Navigator:
         return ("ours",)
 
     def _confirmed(self, source: str = "ours") -> list:
-        """Only the footprints seen in several consecutive updates.
+        """(index, box) for the footprints seen in several consecutive updates.
+
+        The index is into the LATEST update, so the caller can look the box's
+        instance id up in _inst -- which is how the pieces of one concave
+        object stay recognisable as one object all the way to the merge.
 
         Detections flicker: measured at 55 % of consecutive updates changing the
         obstacle count, and one escape every 11 seconds, three quarters of them
@@ -458,14 +479,14 @@ class Navigator:
         """
         hist = self._history[source]
         if len(hist) < self.CONFIRM_OF:
-            return list(hist[-1]) if hist else []
+            return list(enumerate(hist[-1])) if hist else []
         latest = hist[-1]
         out = []
-        for box in latest:
+        for k, box in enumerate(latest):
             seen = sum(1 for past in hist
                        if any(self._overlaps(box, q) for q in past))
             if seen >= self.CONFIRM_MIN:
-                out.append(box)
+                out.append((k, box))
         if len(out) < len(latest):
             log.info("ignoring %d unconfirmed %s footprint(s) of %d: seen in "
                      "fewer than %d of the last %d updates",
@@ -539,6 +560,15 @@ class Navigator:
                     # would go back to being an obstacle.
                     if max(gx, gy) <= 0.0:
                         continue
+                    # Same detected object: never merge. This is the guard the
+                    # decomposition depends on. Without it the two arms of an
+                    # L-shaped couch, whose crook is narrower than `need`, are
+                    # fused straight back into the bounding box the
+                    # decomposition exists to avoid -- and the touching test
+                    # above does not catch it, because the crook is a genuine
+                    # POSITIVE gap.
+                    if any(t.count("#") and t in marks[j] for t in marks[i]):
+                        continue
                     fused = [min(a_[0], b_[0]), max(a_[1], b_[1]),
                              min(a_[2], b_[2]), max(a_[3], b_[3])]
                     # The span guard has to survive the merge, or it does not
@@ -571,6 +601,11 @@ class Navigator:
         if len(items) < len(obs):
             log.info("merged %d footprints into %d: gaps narrower than %.2f m "
                      "are not gaps", len(obs), len(items), need)
+        if obs and items:
+            _b4 = max(max(r[1] - r[0], r[3] - r[2]) for r in obs)
+            _af = max(max(r[1] - r[0], r[3] - r[2]) for r in items)
+            log.info("merge: largest span %.2f m before -> %.2f m after "
+                     "(%d rects -> %d)", _b4, _af, len(obs), len(items))
         return [tuple(o) for o in items], marks
 
     def _escape(self, pose: Pose, dt: float):

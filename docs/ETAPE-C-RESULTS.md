@@ -860,3 +860,65 @@ degagement minimal -0,731 m. Le gel de depart **ne se leve pas**. Aucune de ces
 trois valeurs n'est amelioree par la decomposition, et je ne les presente pas
 comme telles.
 
+## 14. Les deux verifications : la fusion fusionnait encore, et le but etait dans le canape
+
+### 1. La decomposition n'atteignait pas le consommateur
+
+La regle « ne pas fusionner ce qui se touche » etait insuffisante. Les deux bras
+du L sont separes par un **intervalle positif** -- le creux -- plus etroit que
+`need`, donc la fusion les recollait legitimement. Le journal le disait :
+`merged 26 footprints into 8`, et le plus grand cote **grandissait** de 3,24 m a
+3,48 m.
+
+Fusion rendue consciente des instances : chaque rectangle porte l'identifiant de
+l'objet dont il vient, publie **a cote** de `blocked` dans `blocked_inst`, donc
+le contrat a 4 elements est intact. Les identifiants restent hors de l'historique
+de confirmation : ce sont des indices par trame, les comparer d'une trame a
+l'autre empecherait toute confirmation.
+
+| | avant | apres |
+|---|---|---|
+| rectangles apres fusion | 26 -> **8** | 26 -> **24** |
+| plus grand cote, avant -> apres fusion | 3,24 -> **3,48 m** | 3,42 -> **3,42 m** |
+
+**Les morceaux du canape survivent maintenant a la fusion.** Le verdict
+« la decomposition ne libere pas le L » du §13 portait donc sur une
+decomposition qui n'arrivait jamais au navigateur : il etait **non teste**, pas
+demontre.
+
+### 2. Le but de patrouille etait a l'interieur du canape
+
+`RETURN_TO=1.9`, `STOP_AT=6.0`, et le sol praticable mesure **1,78 a 2,08 m**.
+Le robot recevait l'ordre de marcher jusqu'a 6,0 m a travers 4 m de sol
+entierement couvert d'empreintes. Meme derive de reglage que `GAP_CLEAR` : des
+valeurs heritees d'une scene dont le sol allait plus loin.
+
+Meme scene, fusion corrigee, seul le but change :
+
+| | but a 6,0 m | but a 2,05 m, dans le sol mesure |
+|---|---|---|
+| frottements | **3469/3469 (100 %)** | **246/3507 (7,0 %)** |
+| degagement minimal | **-0,522 m** | **+0,100 m** |
+| degagement median | -0,456 m | **+0,289 m** |
+| distance parcourue | 0,01 m | 0,40 m |
+
+**Les 100 % de frottements n'etaient pas un echec de contournement, mais
+l'obeissance a un ordre d'entrer dans le canape.**
+
+### Le verdict conditionnel n'est pas acquis
+
+La regle posee etait : si les morceaux survivent a la fusion, ET que le but est
+atteignable, ET que le robot ne sait toujours pas contourner, alors la
+representation par rectangles est le blocage.
+
+Les deux premieres sont vraies. **La troisieme n'est pas testable ici** : le sol
+praticable fait 0,89 m² et 0,31 m de profondeur, donc il n'y a nulle part ou
+contourner. Le robot ne parcourt 0,40 m que parce que la bande de patrouille
+fait 0,2 m, pas parce qu'un obstacle l'en empeche.
+
+Ce qui reste vrai et non explique : les couloirs restent couverts par des
+rectangles publies (gauche 0/60, droit 7/60), et cela vient de la
+**decomposition**, pas de la fusion. C'est le seul element qui plaide encore
+pour la grille par cellule -- et il ne suffit pas a conclure tant que le robot
+n'a pas de sol pour montrer qu'il sait ou non contourner.
+
