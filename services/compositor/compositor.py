@@ -1454,8 +1454,18 @@ def _warn_if_calibration_stale() -> None:
               "'make calibrate HEIGHT=<metres>' and repaint the floor mask.",
               round(CAM_REF_W), round(CAM_REF_H), stream_name(), sw, sh)
 
-# Margin left around every detected object, in metres of real floor.
-OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
+# THE margin. Metres of real floor left around every detected object, applied
+# EXACTLY ONCE -- here, when the obstacle is rasterised into cells and when its
+# rectangle is written -- so that every consumer downstream tests at its own
+# body half-width and adds nothing. It is published on PATROL_ROI beside the
+# grid, because the only honest source for "how much margin is in these cells"
+# is the process that put it there.
+#
+# Was CLEARANCE, which was one of three margins that stacked without
+# anyone adding them up. See navigator.py: the other two were LANE_SLACK and
+# GAP_CLEAR, and the two code paths that used them demanded 0.84 m and 0.88 m
+# of corridor for the same robot in the same room.
+CLEARANCE = float(os.environ.get("CLEARANCE", "0.12"))
 # Bound each footprint by the object's own measured depth rather than by the
 # ground-plane projection of its silhouette. 0 restores the projection.
 FOOTPRINT_FROM_DEPTH = os.environ.get("FOOTPRINT_FROM_DEPTH", "1") != "0"
@@ -1483,7 +1493,7 @@ def _footprints(detections, detector, dw: int, dh: int):
     The width is projected the same way, at that same ground point.
 
     Returns a list of (x_min, x_max, y_min, y_max) in world metres, already
-    grown by OBSTACLE_MARGIN so whoever consumes it need not know the margin.
+    grown by CLEARANCE so whoever consumes it need not know the margin.
     """
     out = []
     for d in detections or []:
@@ -1512,10 +1522,10 @@ def _footprints(detections, detector, dw: int, dh: int):
         width = float(np.hypot(right[0] - left[0], right[1] - left[1]))
         half_w = max(0.10, width / 2.0)
         half_d = half_w
-        out.append([round(centre[0] - half_d - OBSTACLE_MARGIN, 3),
-                    round(centre[0] + half_d + OBSTACLE_MARGIN, 3),
-                    round(centre[1] - half_w - OBSTACLE_MARGIN, 3),
-                    round(centre[1] + half_w + OBSTACLE_MARGIN, 3)])
+        out.append([round(centre[0] - half_d - CLEARANCE, 3),
+                    round(centre[0] + half_d + CLEARANCE, 3),
+                    round(centre[1] - half_w - CLEARANCE, 3),
+                    round(centre[1] + half_w + CLEARANCE, 3)])
     return out
 
 
@@ -2133,7 +2143,7 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
                      & (up > OBJECT_Z_MIN)
                      & (f > OBSTACLE_X_MIN) & (f < FOOTPRINT_X_MAX))
             boxes, skipped, inst = mask_footprints_xy(
-                sm, f, l, valid, OBSTACLE_MARGIN,
+                sm, f, l, valid, CLEARANCE,
                 max_rects=FOOTPRINT_MAX_RECTS, cell=FOOTPRINT_CELL)
             if boxes:
                 return boxes, "depth silhouettes", inst
@@ -2142,7 +2152,7 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
                             "valid depth, falling back to the ground-plane "
                             "projection", skipped)
         proj = (lambda uu, vv: floor_det.project_many(uu, vv, dw_, dh_))
-        boxes = mask_footprints(sm, proj, OBSTACLE_MARGIN)
+        boxes = mask_footprints(sm, proj, CLEARANCE)
         if boxes:
             return boxes, "projected silhouettes", list(range(len(boxes)))
     fb = _footprints(detections, floor_det, depth_metres.shape[1],
@@ -2228,7 +2238,7 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
                  int(sm.sum()), int(sm_obj.sum()), OBJECT_Z_MIN,
                  int(on_floor.sum()))
     occ = points_to_grid(f, l, sm_obj, GRID_CELL, GRID_BOUNDS,
-                         margin=OBSTACLE_MARGIN, passable=GRID_PASSABLE)
+                         margin=CLEARANCE, passable=GRID_PASSABLE)
     flr = None
     if floor_mask is not None and floor_mask.any():
         # Every FLOOR_STRIDE-th pixel in each direction, on the mask rather
@@ -2306,11 +2316,11 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # red overlay shows exactly the floor the robot is given.
             _boxes, _how, _inst = _object_footprints(
                 seg_mask, seg_mask_t, det, depth_metres, detections)
-            _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
+            _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, CLEARANCE)
             if _boxes:
                 mask = clear_of_boxes(mask, _boxes, _proj)
                 log.info("%d obstacle(s) removed from the floor (%s), "
-                         "%.2f m margin", len(_boxes), _how, OBSTACLE_MARGIN)
+                         "%.2f m margin", len(_boxes), _how, CLEARANCE)
             obstacle_boxes = _boxes
             # The floor the geometry alone reported: no ROI_MARGIN, no
             # silhouettes, no footprints. Nothing steers on it -- it exists so
@@ -2386,7 +2396,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # and a dropped box would shift every id after it.
             _pairs = []
             for _b, _iid in zip(blocked, _inst_pub):
-                _cb = clip_footprints([_b], FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
+                _cb = clip_footprints([_b], FOOTPRINT_X_MAX, CLEARANCE)
                 if _cb:
                     _pairs.append((_cb[0], _iid))
             blocked = [p_[0] for p_ in _pairs]
@@ -2405,7 +2415,13 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                 _grid_msg = {"occ": pack_grid(_og),
                              "flr": pack_grid(_fg) if _fg is not None else b"",
                              "gnx": _nx, "gny": _ny, "gcell": GRID_CELL,
-                             "gbounds": list(GRID_BOUNDS)}
+                             "gbounds": list(GRID_BOUNDS),
+                             # How much margin is already grown into these
+                             # cells. The consumer tests at its own half-width
+                             # and adds nothing; this is what lets it convert
+                             # a grid width back into metres of real floor,
+                             # and what stops it applying a second margin.
+                             "clearance": CLEARANCE}
             pub.send(topics.PATROL_ROI,
                      {**_grid_msg, "roi": roi_cached, "blocked": blocked,
                       # Which detected object each rectangle belongs to.
@@ -2426,7 +2442,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                 log.info("free floor: %d vertices minus %d "
                          "footprint(s) with a %.2f m margin",
                          len(roi_cached), len(blocked),
-                         OBSTACLE_MARGIN)
+                         CLEARANCE)
     except Exception as exc:
         log.warning("could not build the walkable floor: %s", exc)
     return roi_cached, obstacle_boxes

@@ -121,24 +121,38 @@ services:
       SUITE_Y_MAX: ${SUITE_Y_MAX:-1.5}
       # Demi-largeur du robot aux epaules. Le G1 fait ~0,45 m, donc 0,22.
       ROBOT_HALF_WIDTH: ${ROBOT_HALF_WIDTH:-0.22}
-      # ATTENTION : le seuil de fusion effectif n'est PAS la valeur ci-dessous.
-      # Il vaut  need = 2 x (ROBOT_HALF_WIDTH + GAP_CLEAR)  = 2 x (0,22 + 0,10)
-      #        = 0,64 m  avec les valeurs par defaut actuelles.
-      # C'est une valeur DERIVEE, calculee dans services/sim/navigator.py:515,
-      # elle n'existe nulle part en configuration. Monter GAP_CLEAR RESSERRE
-      # les passages.
+      # LA marge, et la seule. Metres de sol reel laisses entre le corps du
+      # robot et tout ce qui bloque, appliques EXACTEMENT UNE FOIS, par le
+      # compositeur au moment ou il rasterise l'obstacle : chaque cellule
+      # occupee et chaque rectangle publie la portent deja. Tout consommateur
+      # teste donc a sa propre demi-largeur et n'ajoute rien.
       #
-      # Le tableau de mesures qui se trouvait ici listait des SEUILS (0,84 /
-      # 0,74 / 0,64 / 0,50 m) juste a cote de la variable, et a ete lu comme si
-      # GAP_CLEAR valait 0,84. Il est deplace dans docs/ETAPE-C-RESULTS.md §9
-      # pour que ce bloc ne contienne plus qu'un seul nombre : celui qui est
-      # regle ici.
-      GAP_CLEAR: ${GAP_CLEAR:-0.10}
-      # Note sur 0,55, propose une fois : GAP_CLEAR n'est PAS la largeur
-      # minimale d'un passage. need = 2 x (0,22 + GAP_CLEAR), donc 0,55 donne
-      # 1,54 m -- verifie dans le journal -- et fermerait tout. Pour qu'un
-      # couloir libre de L metres reste ouvert il faut GAP_CLEAR <= L/2 - 0,22.
-      OBSTACLE_CLEAR: ${OBSTACLE_CLEAR:-0.45}
+      # Elle remplace trois reglages qui s'empilaient sans que personne ne les
+      # additionne :
+      #   OBSTACLE_MARGIN 0,12  dans la grille, deux cotes           0,24
+      #   LANE_SLACK      0,08  sur la demi-largeur dans free_lane   0,16
+      #   robot                                                      0,44
+      #                                              couloir exige   0,84 m
+      # plus, un fichier plus loin, un seuil de fusion qui posait une autre
+      # question encore : need = 2 x (ROBOT_HALF_WIDTH + GAP_CLEAR) = 0,64 m
+      # mesures entre des rectangles portant deja 0,12 chacun, soit 0,88 m de
+      # sol reel. Deux chemins, deux reponses, aucune ecrite en metres.
+      #
+      # Les couloirs de part et d'autre de la table basse mesurent 0,90 m. Le
+      # robot refusait donc des passages qu'un humain traverse, avec 0,03 m de
+      # reste sur un chemin et -0,02 m sur l'autre.
+      #
+      # Maintenant : couloir = 2 x (ROBOT_HALF_WIDTH + CLEARANCE) = 0,68 m, une
+      # seule expression, journalisee en metres au demarrage du navigateur.
+      # Monter CLEARANCE ELARGIT le couloir exige, ce qui est le sens
+      # intuitif -- GAP_CLEAR allait dans l'autre sens et c'est la moitie de la
+      # raison pour laquelle il a ete mal regle deux fois.
+      #
+      # Une seule declaration pour toute la pile : le compositeur, le
+      # navigateur et les deux bridges suite lisent CE nom. OBSTACLE_MARGIN
+      # etait repete dans trois services avec, dans chacun, un commentaire
+      # demandant au lecteur suivant de les garder egaux.
+      CLEARANCE: ${CLEARANCE:-0.12}
       OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
       DETOUR_MAX: ${DETOUR_MAX:-1.8}
       # Sur quoi le robot pilote : "grid" = cellules d'occupation au sol,
@@ -163,30 +177,14 @@ services:
       # l'obeissance a un ordre impossible, pas un echec de contournement.
       # Marge en metres avant le bord du sol observe. 0 desactive.
       PATROL_CLAMP: ${PATROL_CLAMP:-0.6}
-      # Demi-largeur exigee d'un couloir, EN PLUS du robot et de rien d'autre.
-      #
-      # La grille porte DEJA OBSTACLE_MARGIN, applique cellule par cellule par
-      # celui qui l'a construite. Ajouter GAP_CLEAR et un slack par-dessus
-      # demandait 2 x (0,22 + 0,10 + 0,15) = 0,94 m la ou le couloir de 0,90 m
-      # de ce salon n'a plus que 0,90 - 2 x 0,12 = 0,66 m dans la grille. Aucune
-      # voie ne pouvait etre libre, jamais, et le robot rapportait correctement
-      # "no way round" a propos d'un passage qu'un humain traverse.
-      # navigator.py avertit deja de ce piege pour le chemin rectangle ; il a
-      # ete reproduit un fichier plus loin.
-      #
-      # Budget de cette piece : 0,66 m disponibles, 0,44 m de robot, donc 0,11 m
-      # de jeu par cote. C'est etroit et c'est la mesure, pas un choix.
-      #
-      # Mesure en piece FERMEE des deux cotes (une premiere version du banc
-      # n'avait pas de mur a gauche et ne testait donc rien) :
-      #   slack 0,05 -> 17,01 m parcourus, 19,9 % de raclage
-      #   slack 0,08 -> 15,59 m, 17,6 %
-      #   slack 0,11 -> 15,57 m, 0,0 % mais x plafonne a 2,24 m, la table n'est
-      #                 jamais depassee
-      # Deux regimes, pas de compromis trouve a cette heure. 0,08 laisse passer
-      # et reste a verifier sur la vraie scene ; le raclage du modele est un
-      # signal a surveiller, pas un resultat valide.
-      LANE_SLACK: ${LANE_SLACK:-0.08}
+      # LANE_SLACK se trouvait ici : une demi-largeur supplementaire sur
+      # chaque test de voie, 0,08 par defaut. Ce n'etait pas une marge de
+      # securite -- son propre commentaire le disait -- mais le paiement du
+      # RETARD DE POURSUITE : la voie est atteinte asymptotiquement, donc une
+      # voie choisie avec exactement la clairance necessaire est toujours
+      # abordee avec moins. Supprime avec la mesure comme arbitre : _runup_cap
+      # resout le meme probleme en FREINANT quand l'elan est trop court, au
+      # lieu d'exiger une voie plus large partout. Voir navigator.py.
       # Plancher du frein d'elan. Pas zero : un robot qui s'arrete devant un
       # obstacle dont il s'ecarte encore ne finit jamais de s'en ecarter, la
       # loi de cross-track ayant besoin d'avancer pour convertir un cap en
@@ -292,9 +290,12 @@ services:
       # clear the robot's own width and the stereo noise at the boundary is
       # what is actually needed.
       ROI_MARGIN: ${ROI_MARGIN:-0.25}
-      # Detected objects are cut out of the walkable floor with this margin, so
-      # the robot neither walks into them nor squeezes past them.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
+      # LA marge unique, argumentee dans le bloc `sim` ci-dessus, et c'est ICI
+      # qu'elle est appliquee : points_to_grid fait grossir chaque cellule
+      # occupee de cette valeur, et chaque rectangle publie la porte aussi.
+      # Elle part sur PATROL_ROI sous la cle `clearance`, pour que le
+      # consommateur n'ait pas a la deviner ni a en appliquer une seconde.
+      CLEARANCE: ${CLEARANCE:-0.12}
       # Idem cote compositor : les grilles sont construites ici et voyagent
       # sur PATROL_ROI a cote de `blocked`.
       OBSTACLE_REP: ${OBSTACLE_REP:-grid}
@@ -580,7 +581,6 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le reste du projet, sans quoi les
       # empreintes des deux cotes ne seraient pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       # Publie la profondeur en RELIABLE. FastMapping s'abonne avec un
       # rclcpp::QoS(10) nu, donc RELIABLE, et n'expose AUCUN parametre pour en
@@ -597,6 +597,11 @@ services:
       # 0,094 m d'ecart type, toutes les autres sont a 0,77 m ou plus.
       GF_GROUND_LABEL: ${GF_GROUND_LABEL:-3}
       GF_FLOOR_CELL: ${GF_FLOOR_CELL:-0.10}
+      # LA marge unique, argumentee dans le bloc `sim` ci-dessus. Une seule
+      # variable d'environnement pilote les quatre services qui la lisent,
+      # ce qui est la garantie que OBSTACLE_MARGIN repete trois fois avec un
+      # commentaire "gardez-les egaux" ne donnait pas.
+      CLEARANCE: ${CLEARANCE:-0.12}
       # Retours physiquement impossibles, ecartes avant toute construction.
       # Mesures sur le nuage : z descendait a -6,096 m et x montait a 14,378 m
       # alors que le mur du fond est a 6,2 m.
@@ -643,7 +648,6 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le compositeur et groundfloor, sans
       # quoi les trois jeux d'empreintes ne sont pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       GF_Z_MIN: ${GF_Z_MIN:--0.3}
       GF_X_MAX: ${GF_X_MAX:-8.0}
@@ -656,6 +660,11 @@ services:
       # un seul bloc avec le mur. Volontairement PLUS LARGE que l'arene de
       # scripts/suite_compare.py (x 1.5-6.5, y -2.6 a 1.5), sans quoi la coupe
       # tronquerait les clusters que la comparaison note.
+      # LA marge unique, argumentee dans le bloc `sim` ci-dessus. Une seule
+      # variable d'environnement pilote les quatre services qui la lisent,
+      # ce qui est la garantie que OBSTACLE_MARGIN repete trois fois avec un
+      # commentaire "gardez-les egaux" ne donnait pas.
+      CLEARANCE: ${CLEARANCE:-0.12}
       ARENA_X_MIN: ${ARENA_X_MIN:-1.2}
       ARENA_X_MAX: ${ARENA_X_MAX:-6.3}
       ARENA_Y_MIN: ${ARENA_Y_MIN:--2.8}

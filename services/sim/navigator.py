@@ -74,14 +74,32 @@ class Navigator:
     LANE = float(os.environ.get("LANE", "0.39"))
     EASE_IN = 0.8         # m before the limit over which speed blends into the turn
     OBSTACLE_LOOK = float(os.environ.get("OBSTACLE_LOOK", "3.5"))   # m ahead
-    OBSTACLE_CLEAR = float(os.environ.get("OBSTACLE_CLEAR", "0.45"))  # m to spare
     ROBOT_HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
-    # m each side in a gap. The threshold it feeds is DOUBLED --
-    # need = 2 * (ROBOT_HALF_WIDTH + GAP_CLEAR) -- so raising this
-    # narrows what counts as a passage. Measured in a small lounge:
-    # 0.20 (0.84 m) merged every gap into one wall and the robot did
-    # not move at all. See docker-compose.yml for the four-point table.
-    GAP_CLEAR = float(os.environ.get("GAP_CLEAR", "0.10"))
+    # The ONE margin. Metres the robot keeps between its body and anything
+    # blocking, applied EXACTLY ONCE, by whoever rasterises the obstacle --
+    # points_to_grid grows every occupied cell by this, and the published
+    # rectangles carry it too. Everything downstream therefore tests at the
+    # robot's own half-width and adds nothing, because the margin is already in
+    # the input.
+    #
+    # It replaces three knobs that stacked without anyone adding them up:
+    #   OBSTACLE_MARGIN 0.12  in the grid, both sides            0.24
+    #   LANE_SLACK      0.08  on the half-width in free_lane     0.16
+    #   robot                                                    0.44
+    #                                              corridor      0.84 m
+    # and, one file away, a merge threshold that asked a different question
+    # again: need = 2 * (ROBOT_HALF_WIDTH + GAP_CLEAR) = 0.64 m measured
+    # between rectangles that each already carried 0.12, i.e. 0.88 m of real
+    # floor. Two code paths, two answers, neither written down in metres. The
+    # corridors beside this room's coffee table measure 0.90 m, so the robot
+    # was refusing passages a person walks through with 0.03 m to spare on one
+    # path and -0.02 m on the other.
+    #
+    # Now: corridor = 2 * (ROBOT_HALF_WIDTH + CLEARANCE) = 0.68 m, one
+    # expression, logged in metres at startup. Raising CLEARANCE widens the
+    # corridor the robot demands, which is the intuitive direction -- GAP_CLEAR
+    # ran the other way and that is half of why it was wrong twice.
+    CLEARANCE = float(os.environ.get("CLEARANCE", "0.12"))
     # A footprint must appear in CONFIRM_MIN of the last CONFIRM_OF updates
     # before the robot acts on it. Detections flicker, and reacting to a single
     # frame made the robot escape an imaginary obstacle every 11 seconds.
@@ -140,35 +158,23 @@ class Navigator:
     # heading into a sideways displacement. Standing still is a decision taken
     # elsewhere, when there is no lane at all.
     RUNUP_MIN = float(os.environ.get("RUNUP_MIN", "0.25"))
-    # Extra half-width demanded of a lane, on top of the robot and GAP_CLEAR.
-    # Not a second safety margin: it pays for the tracking lag. The lane is
-    # reached asymptotically, so the robot arrives at an obstacle still short
-    # of it, and a lane chosen with exactly the clearance needed is therefore
-    # always entered with less. Measured on this lounge, at the coffee table's
-    # near corner where the run-up is shortest, over 60 s of patrol:
+    # LANE_SLACK used to sit here: an extra half-width on every lane test, 0.08
+    # by default. It was never a safety margin -- its own comment said so -- it
+    # paid for TRACKING LAG. The lane is reached asymptotically, so a lane
+    # chosen with exactly the clearance needed is always entered with less, and
+    # widening the demand hid that. Its measured table, at the coffee table's
+    # near corner over 60 s:
     #
     #   slack   travelled   scraping   worst clearance
     #   0.00     14.81 m      1.6 %        -0.101 m
-    #   0.05     15.32 m      0.7 %        -0.067 m
-    #   0.10     16.23 m      0.1 %        -0.029 m
     #   0.15     16.38 m      0.0 %        -0.022 m
-    #   0.20     16.35 m      0.0 %        -0.022 m
     #
-    # 0.15 is the knee: scraping is gone and distance stops improving, and
-    # -0.022 m is inside one 0.05 m cell, so it is the grid's resolution and
-    # not a real overlap. Above it the robot only walks wider for nothing.
-    # The grid ALREADY carries OBSTACLE_MARGIN, applied per cell by whoever
-    # built it. Adding GAP_CLEAR and a slack on top asked for a corridor of
-    # 2 x (0.22 + 0.10 + 0.15) = 0.94 m where the 0.90 m corridor of this room
-    # has only 0.90 - 2 x 0.12 = 0.66 m left in the grid. No lane could ever be
-    # clear, and the robot correctly reported "no way round" about a passage a
-    # person walks through. The rectangle detour warns about exactly this and I
-    # repeated it one file away: a second full clearance on top of a margin
-    # already applied pushes the robot a metre wide of a chair.
-    #
-    # So the corridor is the robot plus this, and nothing else. Budget for this
-    # room: 0.66 m available, 0.44 m of robot, 0.11 m of slack per side.
-    LANE_SLACK = float(os.environ.get("LANE_SLACK", "0.08"))
+    # It is removed here on a hypothesis that is falsifiable and gets falsified
+    # or not by the etape 2 measurement: _runup_cap() now solves the same
+    # problem the honest way, by BRAKING when the run-up is too short instead of
+    # demanding a wider lane everywhere. That table predates _runup_cap. If it
+    # still held, the corridor budget below is 0.16 m too generous and scraping
+    # comes back -- which nav_probe reports against the grid, in one number.
     # "patrol" paces the optical axis, the shipped demo. "goal" follows the
     # waypoints of SUITE_PATH, the planner's output, and is etape E2.
     #
@@ -220,6 +226,11 @@ class Navigator:
 
     def __init__(self) -> None:
         self._vx = self._wz = 0.0
+        # Adopted from the grid publisher when one arrives; see set_grid. The
+        # env value is only the opening bid, because the margin that matters is
+        # the one actually baked into the cells the robot steers on, and this
+        # process is not the one that baked it.
+        self.clearance = self.CLEARANCE
         self.lane = self.LANE
         self._outbound = True
         self._turning = False
@@ -296,6 +307,29 @@ class Navigator:
         # Effective far end of the patrol. Starts at the configured STOP_AT and
         # is pulled in to the floor the sensor reports, see PATROL_CLAMP.
         self._stop_at = self.STOP_AT
+        # In metres, in words, once, at startup. Three knobs used to add up to
+        # this number and no line of code or log ever wrote it down, so the
+        # only way to know what the robot demanded was to find all three and do
+        # the arithmetic -- which two code paths in this file did differently.
+        log.info("clearance budget: the robot is %.2f m wide and keeps %.2f m "
+                 "of clearance on each side, so it will only walk through a "
+                 "gap of %.2f m or more of real floor. Every corridor test "
+                 "asks for exactly this and nothing adds to it later.",
+                 2.0 * self.ROBOT_HALF_WIDTH, self.clearance,
+                 self.min_corridor)
+
+    @property
+    def min_corridor(self) -> float:
+        """The narrowest real-floor gap this robot will walk through, in metres.
+
+        Every corridor test downstream runs in GRID space, where the obstacle
+        has already been grown by `clearance` on each side, so a test at
+        half-width h passes a grid gap of 2h -- and that is 2*(h + clearance)
+        of actual floor. The two frames differ by 0.24 m at the default, which
+        is a quarter of the passages in this room, and the logs used to quote
+        the grid figure while the reader measured the floor with a tape.
+        """
+        return 2.0 * (self.ROBOT_HALF_WIDTH + self.clearance)
 
     def knobs(self) -> dict:
         """The values this navigator is actually running with.
@@ -309,7 +343,11 @@ class Navigator:
         return {"LANE": self.LANE, "DETOUR_MAX": self.DETOUR_MAX,
                 "RETURN_TO": self.RETURN_TO, "STOP_AT": self.STOP_AT,
                 "ROBOT_HALF_WIDTH": self.ROBOT_HALF_WIDTH,
-                "GAP_CLEAR": self.GAP_CLEAR,
+                # The clearance in force and the corridor it implies, both, so
+                # a probe never has to redo the arithmetic and get a different
+                # answer from the robot's.
+                "CLEARANCE": self.clearance,
+                "MIN_CORRIDOR": self.min_corridor,
                 "OBSTACLE_REP": self.REP,
                 "OBSTACLE_SOURCE": self.SOURCE,
                 "NAV_MODE": self.MODE,
@@ -349,6 +387,20 @@ class Navigator:
         self._cell = float(payload.get("gcell", GRID_CELL))
         gb = payload.get("gbounds")
         self._bounds = tuple(float(v) for v in gb) if gb else GRID_BOUNDS
+        # The clearance that is really in these cells, from the process that
+        # grew them. Every corridor test below reads the grid, so believing our
+        # own environment over the publisher's is how the two silently differ by
+        # a knob somebody set on one service and not the other -- the exact
+        # failure OBSTACLE_MARGIN carried a hand-written warning about.
+        pub = payload.get("clearance")
+        if pub is not None and abs(float(pub) - self.clearance) > 1e-6:
+            log.warning("clearance: adopting %.3f m from the grid publisher, "
+                        "was running %.3f m. The minimum corridor is now "
+                        "%.2f m of real floor, not %.2f m.",
+                        float(pub), self.clearance,
+                        2.0 * (self.ROBOT_HALF_WIDTH + float(pub)),
+                        self.min_corridor)
+            self.clearance = float(pub)
         occ = unpack_grid(bits, nx, ny)
         if occ is None:
             return
@@ -368,7 +420,7 @@ class Navigator:
                     _, ok = free_lane(
                         self._occ, self.RETURN_TO, lane, 1.0,
                         self.STOP_AT - self.RETURN_TO,
-                        self.ROBOT_HALF_WIDTH + self.LANE_SLACK, 0.0,
+                        self.ROBOT_HALF_WIDTH, 0.0,
                         cell=self._cell, bounds=self._bounds)
                     if ok:
                         reach = self.STOP_AT - self.RETURN_TO
@@ -377,8 +429,7 @@ class Navigator:
                     while r2 < self.STOP_AT - self.RETURN_TO:
                         if corridor_blocked(self._occ, self.RETURN_TO,
                                             lane, 1.0, r2 + 0.20,
-                                            self.ROBOT_HALF_WIDTH
-                                            + self.LANE_SLACK,
+                                            self.ROBOT_HALF_WIDTH,
                                             self._cell, self._bounds):
                             break
                         r2 += 0.20
@@ -445,7 +496,7 @@ class Navigator:
         look = float(np.clip(abs(target - x), 0.5, self.OBSTACLE_LOOK))
         shift, found = free_lane(
             self._occ, x, lane, d, look,
-            self.ROBOT_HALF_WIDTH + self.LANE_SLACK, self.DETOUR_MAX,
+            self.ROBOT_HALF_WIDTH, self.DETOUR_MAX,
             prefer=self._last_lane, cell=self._cell, bounds=self._bounds)
         self._last_lane = lane + shift
         if found:
@@ -459,7 +510,7 @@ class Navigator:
                 if abs(shift) > 1e-6:
                     log.info("clear lane %+.2f m from the line, %.1f m ahead, "
                              "corridor %.2f m wide", shift, look,
-                             2 * (self.ROBOT_HALF_WIDTH + self.LANE_SLACK))
+                             self.min_corridor)
             return shift
         if self._blocked_reason != "no way round":
             self._blocked_reason = "no way round"
@@ -470,20 +521,20 @@ class Navigator:
             # not name the number cannot distinguish a real wall from an
             # arithmetic mistake -- which is what it was hiding.
             widest = 0.0
-            for half in np.arange(self.ROBOT_HALF_WIDTH + self.LANE_SLACK,
+            for half in np.arange(self.ROBOT_HALF_WIDTH,
                                   0.14, -0.02):
                 _, ok2 = free_lane(self._occ, x, lane, d, look, float(half),
                                    self.DETOUR_MAX, prefer=self._last_lane,
                                    cell=self._cell, bounds=self._bounds)
                 if ok2:
-                    widest = 2 * float(half)
+                    widest = 2 * (float(half) + self.clearance)
                     break
             log.warning("no way round (#%d): no lane %.2f m wide is clear "
                         "within %.2f m of the line over the next %.1f m. "
                         "The widest lane that IS clear is %s. Holding at "
                         "%+.2f m, which reaches furthest.",
                         self._no_way_round,
-                        2 * (self.ROBOT_HALF_WIDTH + self.LANE_SLACK),
+                        self.min_corridor,
                         self.DETOUR_MAX, look,
                         "%.2f m" % widest if widest else "none at all",
                         shift)
@@ -515,7 +566,7 @@ class Navigator:
             return 1.0
         need = err / max(0.2, float(np.tan(self.CROSS_MAX))) * self.DETOUR_RUNUP
         reach = clear_reach(self._occ, x, y, d, min(need, self.OBSTACLE_LOOK),
-                            self.ROBOT_HALF_WIDTH + self.LANE_SLACK,
+                            self.ROBOT_HALF_WIDTH,
                             cell=self._cell, bounds=self._bounds)
         if reach >= need:
             return 1.0
@@ -845,7 +896,7 @@ class Navigator:
         room collapse into one disc covering everything. A bounding rectangle
         grows only in the direction of the merge.
         """
-        need = 2.0 * (self.ROBOT_HALF_WIDTH + self.GAP_CLEAR)
+        need = 2.0 * self.ROBOT_HALF_WIDTH
         items = [list(o) for o in obs]
         marks = ([set(t) for t in tags] if tags is not None
                  else [{"ours"} for _ in obs])
@@ -1312,7 +1363,7 @@ class Navigator:
         if not self._grid_ready():
             return 1.0
         sweep = max(0.3, 2.0 * self.lane)
-        room = self.ROBOT_HALF_WIDTH + self.LANE_SLACK
+        room = self.ROBOT_HALF_WIDTH
         # The sweep is sideways AND slightly along the leg, so the corridor is
         # checked over the whole arc rather than at its end point only.
         ok = {}

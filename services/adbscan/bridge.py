@@ -40,9 +40,11 @@ from edgebot import topics                                    # noqa: E402
 from edgebot.bus import Publisher                             # noqa: E402
 from edgebot.pointcloud import clip_xy                        # noqa: E402
 
-# Identical to the compositor's and the groundfloor bridge's, or the three
-# footprint sets are not comparable.
-MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
+# THE single clearance, the same one the compositor grows its cells by, or
+# the three footprint sets are not comparable. One name now, in one place
+# in docker-compose.yml: it used to be OBSTACLE_MARGIN repeated in three
+# services with a comment in each asking the next reader to keep them equal.
+MARGIN = float(os.environ.get("CLEARANCE", "0.12"))
 # Same impossible-return guards as the groundfloor bridge, applied to cluster
 # centres here rather than to points.
 Z_MIN = float(os.environ.get("GF_Z_MIN", "-0.3"))

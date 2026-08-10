@@ -37,6 +37,16 @@ KEEPOUT_ZONES = "keepout.zones"
 # decomposition exists to avoid -- the two arms of an L-shaped couch are
 # separated by a real gap narrower than the robot, so the merge is right to
 # close it between two OBJECTS and wrong to close it inside one.
+#
+# The occupancy grid rides here too, and with it `clearance`: the metres of
+# margin ALREADY grown into every occupied cell and into every rectangle of
+# `blocked`. A consumer therefore tests at its own body half-width and adds
+# nothing -- adding a second margin is what made two code paths in navigator.py
+# demand 0.84 m and 0.88 m of corridor for the same robot. It is published
+# rather than configured on both sides because the only honest answer to "how
+# much margin is in these cells" comes from whoever grew them.
+#   {..., "occ": bytes, "flr": bytes, "gnx": int, "gny": int, "gcell": float,
+#    "gbounds": [x0, x1, y0, y1], "clearance": float}
 PATROL_ROI = "patrol.roi"
 
 # Silhouettes of everything the segmentation model found, as one packed boolean
