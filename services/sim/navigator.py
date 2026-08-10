@@ -277,6 +277,23 @@ class Navigator:
         # is pulled in to the floor the sensor reports, see PATROL_CLAMP.
         self._stop_at = self.STOP_AT
 
+    def knobs(self) -> dict:
+        """The values this navigator is actually running with.
+
+        Published so a probe reports the configuration that IS steering rather
+        than the defaults of whatever container it happens to start in.
+        `make lane-probe` printed LANE=0.39 DETOUR_MAX=1.80 STOP_AT=6.00 while
+        the demo ran 0 / 2.4 / 4.0, and then drew conclusions about a patrol
+        that was not running.
+        """
+        return {"LANE": self.LANE, "DETOUR_MAX": self.DETOUR_MAX,
+                "RETURN_TO": self.RETURN_TO, "STOP_AT": self.STOP_AT,
+                "ROBOT_HALF_WIDTH": self.ROBOT_HALF_WIDTH,
+                "GAP_CLEAR": self.GAP_CLEAR,
+                "OBSTACLE_REP": self.REP,
+                "OBSTACLE_SOURCE": self.SOURCE,
+                "NAV_MODE": self.MODE}
+
     def set_floor(self, roi: list, blocked: list, inst: list | None = None) -> None:
         """Take the walkable floor and the obstacle footprints from perception.
 

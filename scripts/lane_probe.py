@@ -149,6 +149,37 @@ def top_view(occ, flr, cell: float, bounds, x_max: float = 6.5,
     return "\n".join(rows)
 
 
+KNOB_SOURCE = "from THIS container (env defaults)"
+
+
+def adopt_live_knobs(sub, timeout_s: float = 4.0) -> None:
+    """Replace the env defaults with the values the sim is running.
+
+    The sim puts its navigator's live values on SIM_TELEMETRY once a second.
+    Reading them is the difference between reporting on the patrol that IS
+    steering and reporting on the one this container happens to default to --
+    which is exactly what this probe did when it announced LANE=0.39
+    DETOUR_MAX=1.80 STOP_AT=6.00 against a demo running 0 / 2.4 / 4.0, and then
+    drew conclusions about a patrol that was not running.
+    """
+    global LANE, DETOUR_MAX, RETURN_TO, STOP_AT, HALF_WIDTH, KNOB_SOURCE
+    end = time.time() + timeout_s
+    while time.time() < end:
+        m = sub.recv(500)
+        if m is None or m[0] != topics.SIM_TELEMETRY:
+            continue
+        nav = (m[1] or {}).get("nav")
+        if not nav:
+            continue
+        LANE = float(nav.get("LANE", LANE))
+        DETOUR_MAX = float(nav.get("DETOUR_MAX", DETOUR_MAX))
+        RETURN_TO = float(nav.get("RETURN_TO", RETURN_TO))
+        STOP_AT = float(nav.get("STOP_AT", STOP_AT))
+        HALF_WIDTH = float(nav.get("ROBOT_HALF_WIDTH", HALF_WIDTH))
+        KNOB_SOURCE = "LIVE from the sim"
+        return
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=20.0,
@@ -172,6 +203,8 @@ def main() -> int:
              topics.SIM_TELEMETRY: "sim",
              topics.ROBOT_STATE: "sim pose"}
     sub = Subscriber(list(watch))
+    # Before anything is reported, take the configuration from the sim itself.
+    adopt_live_knobs(sub)
     seen = {k: 0 for k in watch}
     deadline = time.time() + args.seconds
     msg = None
@@ -241,9 +274,15 @@ def main() -> int:
     # Printed because this ran once against the defaults while the sim was
     # running with other values, and the verdict contradicted the stack with
     # nothing on screen to show why.
-    print("knobs in THIS container: LANE=%.2f DETOUR_MAX=%.2f RETURN_TO=%.2f "
+    print("knobs %s: LANE=%.2f DETOUR_MAX=%.2f RETURN_TO=%.2f "
           "STOP_AT=%.2f ROBOT_HALF_WIDTH=%.2f LANE_SLACK=%.2f"
-          % (LANE, DETOUR_MAX, RETURN_TO, STOP_AT, HALF_WIDTH, LANE_SLACK))
+          % (KNOB_SOURCE, LANE, DETOUR_MAX, RETURN_TO, STOP_AT, HALF_WIDTH,
+             LANE_SLACK))
+    if KNOB_SOURCE.startswith("from THIS"):
+        print("  WARNING: the sim published no configuration, so these are "
+              "this container's defaults and may not be what is steering. "
+              "Everything below about the patrol is then about a patrol that "
+              "is not running.")
     print("grid %dx%d, %.2f m cell, bounds %s" % (nx, ny, cell, bounds))
     oe, fe = grid_extent(occ, cell, bounds), (
         grid_extent(flr, cell, bounds) if flr is not None else None)

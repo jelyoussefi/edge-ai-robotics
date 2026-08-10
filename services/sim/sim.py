@@ -356,6 +356,10 @@ class Sim:
                 self.pub.send(
                     topics.SIM_TELEMETRY,
                     {
+                        # The navigator's live values, so a probe can report
+                        # the configuration that is steering instead of the
+                        # defaults of its own container.
+                        "nav": self.nav.knobs(),
                         "physics_hz": float(achieved_hz),
                         # Real-time factor: 1.0 means simulated time keeps up
                         # with wall-clock time. Below 1.0 the demo is slow motion.

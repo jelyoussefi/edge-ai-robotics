@@ -24,9 +24,16 @@ Reports, over a window:
   travel           lateral spread of the path, which is how "did it route
                    around the table" shows up as a number rather than a memory.
 
-Clearance is measured against the footprints the navigator was given, not
-against the furniture, because that is what it steers on. A footprint that is
-wrong is a perception problem and this cannot see it.
+Clearance is measured against the OCCUPANCY GRID when one is published, and
+against the rectangles only when it is not. That distinction is the whole
+point: with OBSTACLE_REP=grid the navigator steers on cells, so measuring the
+robot against rectangles reports the clearance of a representation nobody uses.
+This repository has already paid for that mistake once, when the footprint was
+computed twice and the floor mask and the navigator disagreed about the couch
+by three quarters of a metre while both looked fine on their own.
+
+Against the furniture is a different question again, and this cannot see it: a
+footprint or a cell that is wrong is a perception problem.
 """
 from __future__ import annotations
 
@@ -34,12 +41,42 @@ import argparse
 import math
 import os
 import statistics
+
+import numpy as np
 import time
 
 from edgebot import topics
 from edgebot.bus import Subscriber
+from edgebot.floor import unpack_grid
 
 HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
+
+
+def grid_distance(x: float, y: float, occ, cell: float, bounds) -> float | None:
+    """Distance from a point to the nearest occupied cell, negative if inside.
+
+    Brute force over the occupied cells. There are a few thousand of them and
+    this runs at the robot's publish rate on a measurement machine, so an
+    exact answer is worth more than a distance transform here.
+
+    Returns None when nothing is occupied: no obstacles is not zero clearance,
+    and reporting 0.0 would put a false scrape in the table.
+    """
+    if occ is None or not occ.any():
+        return None
+    x0, _x1, y0, _y1 = bounds
+    ix = np.nonzero(occ)
+    # Cell centres.
+    cx = x0 + (ix[0] + 0.5) * cell
+    cy = y0 + (ix[1] + 0.5) * cell
+    d = np.hypot(cx - x, cy - y).min() - 0.5 * cell
+    # Inside an occupied cell: report how deep, so the sign matches the
+    # rectangle path and a scrape is comparable between the two.
+    gi = int((x - x0) / cell)
+    gj = int((y - y0) / cell)
+    if 0 <= gi < occ.shape[0] and 0 <= gj < occ.shape[1] and occ[gi, gj]:
+        return -abs(d) if d != 0 else -0.5 * cell
+    return float(d)
 
 
 def rect_distance(x: float, y: float, r) -> float:
@@ -71,6 +108,10 @@ def main() -> None:
     args = ap.parse_args()
 
     sub = Subscriber([topics.PATROL_ROI, topics.ROBOT_STATE])
+    occ = None
+    gcell = 0.05
+    gbounds = (0.0, 8.0, -4.0, 4.0)
+    measured_against = "nothing yet"
     poses: list[tuple[float, float]] = []
     clearances: list[float] = []
     scrapes: list[tuple[float, float, float]] = []
@@ -87,6 +128,11 @@ def main() -> None:
             continue
         topic, p = msg
         if topic == topics.PATROL_ROI:
+            if p.get("occ") and p.get("gnx"):
+                occ = unpack_grid(p["occ"], int(p["gnx"]), int(p["gny"]))
+                gcell = float(p.get("gcell", gcell))
+                gbounds = tuple(p.get("gbounds", gbounds))
+                measured_against = "the occupancy grid"
             roi = [(float(a), float(b)) for a, b in (p.get("roi") or [])]
             blocked = [[float(v) for v in r] for r in (p.get("blocked") or [])]
             counts.append(len(blocked))
@@ -102,8 +148,14 @@ def main() -> None:
                 continue
             x, y = float(q[0]), float(q[1])
             poses.append((x, y))
-            if blocked:
+            d = None
+            if occ is not None:
+                d = grid_distance(x, y, occ, gcell, gbounds)
+            elif blocked:
                 d = min(rect_distance(x, y, r) for r in blocked)
+                measured_against = "the published rectangles (NO GRID ON THE "
+                measured_against += "BUS -- this is not what the navigator uses)"
+            if d is not None:
                 clearances.append(d)
                 if d < HALF_WIDTH:
                     scrapes.append((x, y, d))
@@ -112,6 +164,7 @@ def main() -> None:
     lab = args.label or "nav"
     print(f"=== {lab}: {args.seconds:.0f} s, {len(poses)} poses, "
           f"{len(counts)} ROI updates ===")
+    print(f"clearance measured against: {measured_against}")
 
     print("walkable floor width (lateral extent of the ROI polygon):")
     if widths:
