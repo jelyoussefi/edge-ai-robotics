@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run full down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner grid-probe suite-compare map-check lane-probe pick-goals bus-rate web-latency logs ps shell clean distclean
+.PHONY: default help build run full down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner grid-probe suite-compare map-check lane-probe pick-goals bus-rate web-latency record logs ps shell clean distclean
 default: run
 
 help:
@@ -36,6 +36,9 @@ help:
 	@echo "  make run        Stop anything running, build if needed, start the demo"
 	@echo "  make down       Stop the stack"
 	@echo "  make restart    Same as run"
+	@echo "  make record     Record a clip to develop without the camera"
+	@echo "                  SECONDS=60 OUT=data/salon.db3  (~8 GB per minute)"
+	@echo "                  then: SOURCE_BAG=/data/salon.db3 make run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
 	@echo "                  SHOW_OBJECTS=1 make  draws labels, boxes and masks"
 	@echo "                  CALIB_YOLO_MASK=0 for the plain height threshold"
@@ -229,8 +232,40 @@ lane-probe:
 		-e RETURN_TO=$${RETURN_TO:-1.9} \
 		-e STOP_AT=$${STOP_AT:-6.0} \
 		-e ROBOT_HALF_WIDTH=$${ROBOT_HALF_WIDTH:-0.22} \
-		-e LANE_SLACK=$${LANE_SLACK:-0.08} \
+		-e CLEARANCE=$${CLEARANCE:-0.12} \
 		perception /scripts/lane_probe.py $(ARGS)
+
+record:
+	@test -n "$(SECONDS)" || (echo "Usage: make record SECONDS=60 OUT=data/salon.db3"; exit 1)
+	@# OUT has to land under data/, the only directory mounted into the
+	@# container. Anywhere else the file is written inside the container and
+	@# vanishes with --rm, after however many minutes of recording.
+	@case "$(or $(OUT),data/scene.db3)" in data/*) ;; *) \
+		echo "OUT must start with data/ (it is the mounted directory); got $(OUT)"; \
+		exit 1 ;; esac
+	@$(call msg, Recording $(SECONDS) s to $(or $(OUT),data/scene.db3) ...)
+	@# Through the SAME container as the demo, because only `source` may open
+	@# the RealSense -- privileged, /dev mounted. A bare python3 on the host
+	@# will not find the device.
+	@#
+	@# --no-deps and no `down`: unlike `calibrate` this does not need the demo
+	@# stopped, it needs the camera FREE. If the stack is up, stop it first;
+	@# the second opener gets a busy V4L2 ioctl and the message says so.
+	@#
+	@# The mode is NOT passed on the command line. record_bag.py reads
+	@# stream_mode() over the same streams.d455.json the source does, so the
+	@# recording is of exactly what the live source would have produced. A bag
+	@# at another raster makes every distance downstream wrong and nothing can
+	@# detect it later, which is why the script errors out and deletes the
+	@# file rather than leaving a trap on disk.
+	@#
+	@# About 8 GB per minute at 720p30. The estimate and the free space are
+	@# printed before the first frame.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/opt/edgebot:ro \
+		source /scripts/record_bag.py --seconds $(SECONDS) \
+		--out /$(or $(OUT),data/scene.db3) $(ARGS)
 
 bus-rate:
 	@$(call msg, Measuring what the bus carries, per topic ...)

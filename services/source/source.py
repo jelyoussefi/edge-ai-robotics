@@ -32,6 +32,27 @@ log = logging.getLogger("source")
 
 CONFIG_PATH = os.environ.get("SOURCE_CONFIG", "/config/streams.d455.json")
 JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "80"))
+# Play a recording instead of opening the camera. Empty = the camera, which is
+# the shipped behaviour and stays untouched.
+#
+# A .db3 file, not .bag: librealsense 2.58 records into the rosbag2 sqlite3
+# container and refuses any other suffix. Same facility, different extension.
+#
+# Everything downstream is unaware: same two topics, same payload keys, same
+# shared wall-clock timestamp. The bus does not know where the frames came
+# from, which is the point -- a bag is for developing the compositor, the
+# navigator and the probes without the hardware, not a second code path.
+#
+# THE RASTER IS THE TRAP. config/camera_calibration.json describes ONE room at
+# ONE resolution, and a bag recorded at another raster makes every distance
+# downstream wrong while every picture still looks right. Nothing further down
+# can detect it, so it is detected here: see the check after pipeline.start.
+SOURCE_BAG = os.environ.get("SOURCE_BAG", "").strip()
+# Play at the recorded rate (1) or as fast as frames can be read (0). Real time
+# is the default because the whole stack is paced by frame arrival -- the
+# compositor's fps, ROI_PERIOD, OBSTACLE_STALE -- and a bag read flat out
+# measures the reader, not the demo.
+BAG_REAL_TIME = os.environ.get("BAG_REAL_TIME", "1") != "0"
 # Broadcast rates. The camera runs at its native fps; the source throttles
 # what it puts on the bus to limit transport load. RGB drives the backdrop
 # so it gets the higher rate; depth is only for distances/avoidance so it can
@@ -58,13 +79,30 @@ def main() -> None:
 
     pipeline = rs.pipeline()
     config = rs.config()
-    if spec.get("serial"):
-        config.enable_device(spec["serial"])
-    # Colour and depth at the SAME resolution and fps: the sensor delivers them
-    # synchronously, avoiding the desync that stalls colour.
-    config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, fps)
-    config.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
+    if SOURCE_BAG:
+        # No enable_device and no enable_stream: the file holds what it holds,
+        # and asking for a mode it does not contain fails the start outright
+        # rather than converting anything. The raster is read back below and
+        # checked against the calibration, which is the part that matters.
+        if not os.path.exists(SOURCE_BAG):
+            raise SystemExit(f"SOURCE_BAG={SOURCE_BAG} does not exist. "
+                             f"Record one with 'make record SECONDS=60 "
+                             f"OUT=data/<name>.db3'.")
+        config.enable_device_from_file(SOURCE_BAG, repeat_playback=True)
+        log.info("PLAYBACK from %s (%.1f GB), looping, real time %s",
+                 SOURCE_BAG, os.path.getsize(SOURCE_BAG) / 1e9,
+                 "on" if BAG_REAL_TIME else "OFF (as fast as it reads)")
+    else:
+        if spec.get("serial"):
+            config.enable_device(spec["serial"])
+        # Colour and depth at the SAME resolution and fps: the sensor delivers
+        # them synchronously, avoiding the desync that stalls colour.
+        config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
     profile = pipeline.start(config)
+    if SOURCE_BAG:
+        # Without this the playback runs flat out and the bus sees a burst.
+        profile.get_device().as_playback().set_real_time(BAG_REAL_TIME)
     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     log.info("source: requested %dx%d@%d colour + depth (scale %.4f)",
              w, h, fps, depth_scale)
@@ -86,9 +124,21 @@ def main() -> None:
     for _name, _p in (("colour", _cp), ("depth", _dp)):
         if (_p.width(), _p.height(), _p.fps()) != (w, h, fps):
             log.error("the %s stream came back as %dx%d@%d, NOT the %dx%d@%d "
-                      "asked for. The calibration describes the requested "
-                      "raster, so every distance downstream is wrong.",
-                      _name, _p.width(), _p.height(), _p.fps(), w, h, fps)
+                      "%s. The calibration describes the %dx%d raster, so "
+                      "every distance downstream is wrong until you either "
+                      "record a bag at that raster or run "
+                      "'make calibrate HEIGHT=<metres>' for this one.",
+                      _name, _p.width(), _p.height(), _p.fps(), w, h, fps,
+                      "in the recording" if SOURCE_BAG else "asked for",
+                      w, h)
+    if SOURCE_BAG:
+        # In playback the FILE decides, not stream_mode(). The payload carries
+        # w/h and every consumer scales its intrinsics by them, so publishing
+        # the requested numbers over a bag of another size would misdescribe
+        # every frame -- quietly, because the arrays would still decode. The
+        # error above has already said so if they differ; this makes the
+        # payload honest either way.
+        w, h, fps = _cp.width(), _cp.height(), _cp.fps()
     _i = _cp.get_intrinsics()
     log.info("colour intrinsics from the SDK: %dx%d fx=%.1f fy=%.1f "
              "ppx=%.1f ppy=%.1f", _i.width, _i.height, _i.fx, _i.fy,

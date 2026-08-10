@@ -257,6 +257,26 @@ services:
       STRAIGHTEN_TOL: ${STRAIGHTEN_TOL:-0.012}
       <<: [*bus-env, *camera-env]
       SOURCE_CONFIG: /config/streams.d455.json
+      # Rejouer un enregistrement au lieu d'ouvrir la camera. Vide = la camera,
+      # le comportement livre. Chemin DANS le conteneur, donc sous /data :
+      #     SOURCE_BAG=/data/salon.db3 docker compose up -d --build source
+      # Rien en aval ne le sait : memes topics, memes cles de charge utile,
+      # meme horodatage partage. Ce n'est pas un second chemin de code, c'est
+      # de quoi travailler sur le compositeur, le navigateur et les sondes sans
+      # le materiel.
+      #
+      # LE RASTER EST LE PIEGE. config/camera_calibration.json decrit UNE piece
+      # a UNE resolution. Un bag a un autre raster rend fausses toutes les
+      # distances en aval alors que l'image se compose encore et que l'overlay
+      # peint encore quelque chose. Rien plus bas ne peut le detecter, donc
+      # source.py le detecte au demarrage et l'ecrit en ERREUR.
+      # Enregistrer avec : make record SECONDS=60 OUT=data/salon.db3
+      SOURCE_BAG: ${SOURCE_BAG:-}
+      # Rejouer au rythme enregistre (1) ou aussi vite que le fichier se lit
+      # (0). Toute la pile est cadencee par l'arrivee des trames -- le FPS du
+      # compositeur, ROI_PERIOD, OBSTACLE_STALE -- donc un bag lu a fond mesure
+      # le lecteur et pas la demo.
+      BAG_REAL_TIME: ${BAG_REAL_TIME:-1}
       DISPLAY: ${DISPLAY:-:0}
       # The RealSense spatial/temporal/hole-filling filters. Set to 0 to see the
       # raw depth, which is full of holes on glossy floors.
