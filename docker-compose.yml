@@ -192,6 +192,24 @@ services:
       # loi de cross-track ayant besoin d'avancer pour convertir un cap en
       # deplacement lateral.
       RUNUP_MIN: ${RUNUP_MIN:-0.25}
+      # Plancher de vitesse en m/s ABSOLUS, applique dans _smooth, le seul
+      # entonnoir par lequel passe toute sortie du navigateur.
+      # 0,45 = le seuil de DEMARRAGE mesure (0,42, scripts/startup_probe.py)
+      # plus une marge. Ce seuil n'est pas celui d'ARRET, mesure a 0,26 : il y a
+      # 0,16 m/s d'hysteresis entre les deux, et TURN_VX=0.26 est pile du mauvais
+      # cote. Toute commande dans [0,26 ; 0,42) maintient un robot qui marche et
+      # ne peut pas relancer un robot arrete -- (0,26 ; 0) est un point fixe
+      # stable, et c'est ainsi que la patrouille s'est figee au lap 18.
+      # En m/s absolus et NON en fraction d'un autre reglage : la forme
+      # precedente valait RUNUP_MIN x CRUISE_VX = 0,25 x 0,6 = 0,15 m/s, donc
+      # c'est le reglage voisin qui l'avait tire sous le seuil.
+      START_VX: ${START_VX:-0.45}
+      # Chien de garde : commande non nulle qui deplace de moins de
+      # STALL_MIN_MOVE metres sur STALL_WINDOW secondes -> WARNING nommant la
+      # valeur commandee. Mesure sur le centre du robot et non sur l'orteil,
+      # qui oscille a chaque pas et se lirait comme un deplacement.
+      STALL_MIN_MOVE: ${STALL_MIN_MOVE:-0.05}
+      STALL_WINDOW: ${STALL_WINDOW:-2.0}
       # How much the controller ignores the gait's own sway. Longer is calmer
       # but slower to correct a real drift.
       SMOOTH_TAU: ${SMOOTH_TAU:-0.5}

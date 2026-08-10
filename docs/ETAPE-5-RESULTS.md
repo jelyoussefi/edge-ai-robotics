@@ -5,13 +5,26 @@ traitée en premier plutôt qu'en quatrième position parce que la base de
 comparaison de l'étape 2 n'était pas reproductible tant que le robot pouvait
 geler au milieu d'une mesure.
 
-Scène et configuration, inchangées pendant toute l'étape :
+Scène et configuration, **relues sur le sim vif et sur la calibration** et non
+recopiées, inchangées pendant toute l'étape :
 
 ```
-salon, D455 720p, height=1.48, tangage 14,5 deg
-LANE=0 DETOUR_MAX=2.4 RETURN_TO=1.2 STOP_AT=4.0 RUNUP_MIN=0.7 \
-  PERCEPTION_CONF=0.25 ROI_MARGIN=0.10 SHOW_FLOOR=1 SHOW_OBJECTS=1
+salon, D455 720p, hauteur 1,470 m, tangage -14,53 deg, raster 1280x720
+sim         : LANE=0 DETOUR_MAX=2.4 RETURN_TO=1.0 STOP_AT=3.1 RUNUP_MIN=0.7
+              CRUISE_VX=0.6 TURN_VX=0.26 ROBOT_HALF_WIDTH=0.22 LANE_SLACK=0.08
+              GAP_CLEAR=0.10 OBSTACLE_REP=grid OBSTACLE_SOURCE=ours
+compositeur : ROI_MARGIN=0.10 OBSTACLE_MARGIN=0.12 GRID_PASSABLE=0.44
+              SHOW_FLOOR=1 SHOW_OBJECTS=1
 ```
+
+> **Correction.** La première rédaction de ce bloc annonçait `height=1.48`,
+> `RETURN_TO=1.2` et `STOP_AT=4.0`. Aucune de ces trois valeurs n'a tourné :
+> elles venaient d'une configuration antérieure recopiée de mémoire, ce que la
+> règle « lire la configuration vive » existait justement pour empêcher.
+> Vérifié plutôt qu'affirmé : `.env` a été écrit pour la dernière fois à 18h42
+> et la calibration à 19h06, alors que l'étape 0 commence à 20h14 — donc ni
+> l'une ni l'autre n'a bougé pendant la session, et toutes les mesures de
+> l'étape 0 à aujourd'hui portent bien la même scène et les mêmes réglages.
 
 ---
 

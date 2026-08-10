@@ -27,12 +27,14 @@ compositeur : ROI_MARGIN=0.10 OBSTACLE_MARGIN=0.12 GRID_PASSABLE=0.44
 **Ne pas changer la scène ni ces valeurs entre deux mesures.** Si l'une bouge, la
 mesure suivante est une autre mesure et doit le dire.
 
-> `docs/ETAPE-5-RESULTS.md` cite `RETURN_TO=1.2 STOP_AT=4.0` dans son bloc de
-> scène alors que le sim tournait à 1,0 / 3,1 au moment de cette base. `.env`
-> n'est pas versionné, donc laquelle des deux configurations portait les
-> chiffres du défaut 5 n'est pas vérifiable après coup. C'est la raison d'être
-> de la règle « lire la configuration vive » et le dernier endroit du dépôt où
-> elle n'a pas encore été appliquée.
+> **Résolu.** Les blocs de scène de `docs/ETAPE-5-RESULTS.md` et de la première
+> ligne de base annonçaient `RETURN_TO=1.2 STOP_AT=4.0` et `height=1.47/1.48`.
+> Rien de cela n'a tourné : c'était une configuration antérieure recopiée de
+> mémoire. `.env` a été écrit pour la dernière fois à 18h42 et la calibration à
+> 19h06, alors que l'étape 0 commence à 20h14 — **ni l'une ni l'autre n'a bougé
+> pendant la session**. Toutes les mesures, de l'étape 0 à aujourd'hui, portent
+> donc la même scène et les mêmes réglages, et les blocs de scène ont été
+> corrigés. Ce qui rend l'étape 0 inutilisable est ailleurs : voir §8.
 
 ## 2. Taille du code et de la configuration
 
@@ -99,8 +101,13 @@ problème que l'étape 2 doit attaquer, et il est ici sous forme de chiffre.
 
 Voie absolue et voie atteignable coïncident maintenant, alors qu'à l'étape 0 la
 meilleure voie atteignable s'arrêtait à 4,50 m contre 6,40 m pour la meilleure
-absolue. C'est un effet de la configuration de patrouille, **pas** du travail
-FPS, et cela n'est pas porté au crédit de ce dernier.
+absolue. **Ce n'est pas une amélioration du robot, c'est la sonde qui a cessé de
+mentir.** La bande atteignable se calcule à partir de `LANE` et `DETOUR_MAX` ; à
+l'étape 0 `lane_probe` lisait ceux de son propre conteneur (`LANE=0.39`,
+`DETOUR_MAX=1.80`, soit -1,41 à +2,19 m) au lieu de ceux du sim (`LANE=0`,
+`DETOUR_MAX=2.40`, soit -2,79 à +2,01 m). Le sim n'a pas changé ; la sonde lit
+maintenant ses réglages sur le bus. Rien de ceci n'est porté au crédit du travail
+FPS.
 
 La sonde signale que la patrouille s'arrête à 3,10 m alors que la voie est
 dégagée jusqu'à 6,40 m. Le réglage laisse 3,30 m de sol libre inutilisés.
@@ -191,18 +198,24 @@ un sixième d'elle-même puis le récupère. `FLOOR_STRIDE` reste donc à 1.
 
 ## 8. La première ligne de base, pour mémoire
 
-Prise le même jour avant tout travail, à `RETURN_TO=1.2 STOP_AT=4.0` d'après son
-propre bloc de scène. Conservée parce qu'elle documente d'où l'on part, **pas
-utilisable comme référence** :
+Prise le même jour avant tout travail, sur **la même scène et les mêmes réglages**
+qu'aujourd'hui (§1). Conservée parce qu'elle documente d'où l'on part, **pas
+utilisable comme référence**, et pour trois raisons qui tiennent toutes aux
+sondes et non à la configuration :
 
 - ses 21 % de raclages étaient mesurés contre les rectangles publiés alors que
   le navigateur pilote sur la grille. Contre la grille, la même passe donne
   0,0 %. Le chiffre ne mesurait pas le robot, il mesurait la sonde.
 - sa clairance minimale de -1,212 m vient de la même erreur.
+- sa « meilleure voie atteignable » venait des réglages du conteneur de la
+  sonde et non de ceux du sim (§4).
 - elle ne porte aucun numéro de lap, donc sa fenêtre de 60 s peut avoir enjambé
-  un gel de la politique : c'est précisément ce qui arrivait alors.
-- sa configuration de patrouille n'est pas celle d'aujourd'hui, donc distance
-  parcourue, clairances et sol praticable ne se comparent pas.
+  un gel de la politique : c'est précisément ce qui arrivait alors, et c'est la
+  seule de ces quatre réserves qui reste sans remède rétroactif.
+
+Deux de ses chiffres survivent au changement de sonde et servent de contrôle
+d'invariance : l'occupation passe de 2726 à 2656 cellules et le sol libre de
+4214 à 4251. La pièce n'a pas bougé, et aucun des remèdes FPS ne l'a déplacée.
 
 | | étape 0 |
 |---|---|
