@@ -206,6 +206,12 @@ services:
       DEPTH_FILTERS: "1"
     volumes:
       - ./config:/config
+      # Necessaire au calibrage assiste : `calibrate.py --dump-frame` ecrit les
+      # trames ici et le conteneur `perception` les relit pour en tirer le
+      # masque de meubles. Sans ce montage elles etaient ecrites dans le
+      # systeme de fichiers du conteneur et disparaissaient avec `run --rm`,
+      # et l'etape suivante ne trouvait rien.
+      - ./data:/data
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /dev:/dev
       - /dev/bus/usb:/dev/bus/usb
