@@ -146,6 +146,36 @@ class _BusFrame:
         self.intrinsics = {"hfov_deg": hfov}
 
 
+def _write_mask(det, dets, shape, keep, path) -> None:
+    """Write the silhouette mask, for the calibration to subtract from the floor.
+
+    `det.mask` is the union of every silhouette this pass produced. When a class
+    filter is given the mask has to be rebuilt from the per-detection boxes,
+    because the union has already lost which pixel came from which object -- so
+    the filtered form is a box mask, coarser than the silhouette, and says so.
+    """
+    h, w = shape[:2]
+    full = getattr(det, "mask", None)
+    if not keep and full is not None:
+        m = full.astype(np.uint8) * 255
+        kind = "silhouettes"
+    else:
+        m = np.zeros((h, w), np.uint8)
+        for d in dets:
+            if keep and d.class_id not in keep:
+                continue
+            x0 = max(0, int((d.cx - d.w / 2) * w))
+            x1 = min(w, int((d.cx + d.w / 2) * w))
+            y0 = max(0, int((d.cy - d.h / 2) * h))
+            y1 = min(h, int((d.cy + d.h / 2) * h))
+            m[y0:y1, x0:x1] = 255
+        kind = "boxes (a class filter was given)"
+    if m.shape[:2] != (h, w):
+        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite(path, m)
+    print(f"  wrote {path}: {kind}, {100.0 * (m > 0).mean():.1f} % of the frame")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -156,6 +186,13 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=1, help="camera frames to grab")
     ap.add_argument("--out", default="/data/seg_test", help="output prefix")
     ap.add_argument("--conf", type=float, default=0.35)
+    ap.add_argument("--mask-out", default="", dest="mask_out",
+                    help="write the silhouette mask here as an 8-bit PNG, "
+                         "for `make calibrate CALIB_YOLO_MASK=1` to subtract "
+                         "from the floor")
+    ap.add_argument("--classes", default="",
+                    help="comma-separated COCO class ids to keep in the mask; "
+                         "empty means every detection")
     ap.add_argument("--timeout", type=float, default=15.0,
                     help="seconds to wait for frames on the bus")
     args = ap.parse_args()
@@ -187,6 +224,7 @@ def main() -> int:
                   "file instead, pass --image.")
             return 1
 
+    keep = {int(c) for c in args.classes.split(",") if c.strip()}
     found = 0
     for i, f in enumerate(frames):
         dets = det.infer(f)
@@ -196,6 +234,8 @@ def main() -> int:
         path = f"{args.out}_{i:02d}.png"
         cv2.imwrite(path, annotate(f.color, dets, getattr(det, "mask", None)))
         print(f"  wrote {path}")
+        if args.mask_out:
+            _write_mask(det, dets, f.color.shape, keep, args.mask_out)
 
     return 0 if found else 1
 

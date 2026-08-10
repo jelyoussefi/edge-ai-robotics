@@ -659,7 +659,26 @@ def _draw_optical_axis(canvas, det, dw, dh, far=8.0):
         _text(canvas, f"{f} m", b[0] + 8, b[1] + 5, 0.42, AXIS)
 
 
-def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
+def _load_furniture(path: str):
+    """The detector's silhouettes, resampled to the depth raster.
+
+    Returns None when no path was given or the file is unreadable -- the
+    calibration then behaves exactly as it always did. This is an assist and it
+    must never be the reason a calibration cannot be run.
+    """
+    if not path:
+        return None
+    m = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if m is None:
+        print(f"  masque meubles introuvable : {path} (on continue sans)")
+        return None
+    print(f"  masque meubles chargé : {path} "
+          f"({100.0 * (m > 127).mean():.1f} % de l'image)")
+    return m
+
+
+def preview_floor(calib: dict, serial, width, height_px, fps,
+                  furniture_path: str = "") -> dict:
     """Live check of the pose, with the floor tinted red.
 
     The calibration is otherwise blind: the height is typed in by hand and the
@@ -689,6 +708,8 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
 
     ui = CalibrationUI(h, tol, width, height_px)
     ui.load(MASK_OUT)
+    furniture = _load_furniture(furniture_path)
+    _yolo_reported = [False]   # print the saving once, not per frame
     ui.scale = width / float(UI_W)
     win = "Calibration"
     try:
@@ -748,6 +769,29 @@ def preview_floor(calib: dict, serial, width, height_px, fps) -> dict:
                     continue
 
             auto = det.refine(det.mask(depth, tol_h=tol), depth)
+            # YOLO assist: whatever the detector found standing in the room is
+            # not bare floor, so it comes OFF the automatic layer. It is applied
+            # to `auto` only, never on top of the manual layers -- FILL still
+            # adds back anything the model has no class for (thin stool legs,
+            # the mast) and ERASE still wins over both. The model is an assist
+            # on the automatic guess, not an authority over the operator.
+            if furniture is not None:
+                if furniture.shape[:2] != auto.shape[:2]:
+                    furniture = cv2.resize(
+                        furniture, (auto.shape[1], auto.shape[0]),
+                        interpolation=cv2.INTER_NEAREST)
+                fmask = furniture > 127
+                # What the operator would otherwise have had to erase by hand:
+                # floor-marked pixels sitting on furniture.
+                _saved = int((auto & fmask).sum())
+                if not _yolo_reported[0]:
+                    _yolo_reported[0] = True
+                    print(f"  YOLO assist : sol auto {100.0 * auto.mean():.1f} % "
+                          f"-> {100.0 * (auto & ~fmask).mean():.1f} % de l'image ; "
+                          f"{_saved} pixels retirés "
+                          f"({100.0 * _saved / max(1, int(auto.sum())):.1f} % du "
+                          f"sol auto), autant de gomme manuelle en moins")
+                auto = auto & ~fmask
             mask = (auto | ui.add) & ~ui.rem
 
 
@@ -825,7 +869,36 @@ def main() -> None:
                     help="(vérif) hauteur réelle de cet objet, en m")
     ap.add_argument("--no-preview", action="store_true",
                     help="ne pas afficher la vérification visuelle du sol")
+    ap.add_argument("--dump-frame", default="",
+                    help="écrire une image couleur ici puis sortir, pour que "
+                         "le détecteur tourne dessus dans SON image à lui")
+    ap.add_argument("--furniture-mask", default="",
+                    help="masque de meubles (PNG 8 bits) à retrancher du sol "
+                         "détecté automatiquement")
     args = ap.parse_args()
+
+    if args.dump_frame:
+        # One frame, then out. The detector needs OpenVINO and the model, which
+        # live in the perception image, and only this container may open the
+        # camera -- so the frame is handed over as a file rather than either
+        # side growing the other's dependencies.
+        _w, _h, _fps = stream_mode()
+        _cfg = rs.config()
+        if args.serial:
+            _cfg.enable_device(args.serial)
+        _cfg.enable_stream(rs.stream.color, _w, _h, rs.format.bgr8, _fps)
+        _pipe = rs.pipeline()
+        _pipe.start(_cfg)
+        try:
+            for _ in range(15):          # let auto-exposure settle
+                _fr = _pipe.wait_for_frames()
+            _img = np.asanyarray(_fr.get_color_frame().get_data())
+        finally:
+            _pipe.stop()
+        os.makedirs(os.path.dirname(args.dump_frame) or ".", exist_ok=True)
+        cv2.imwrite(args.dump_frame, _img)
+        print(f"image écrite : {args.dump_frame} ({_img.shape[1]}x{_img.shape[0]})")
+        return
 
     print("Lecture des intrinsèques (FOV) depuis le SDK ...")
     intr = read_intrinsics(args.serial, args.width, args.height_px, args.fps)
@@ -870,7 +943,8 @@ def main() -> None:
     if not args.no_preview:
         try:
             calib = preview_floor(calib, args.serial, args.width,
-                                  args.height_px, args.fps)
+                                  args.height_px, args.fps,
+                                  args.furniture_mask)
         except Exception as exc:
             print(f"Vérification visuelle indisponible ({exc}), on continue.")
 

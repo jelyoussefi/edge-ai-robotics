@@ -37,6 +37,7 @@ help:
 	@echo "  make down       Stop the stack"
 	@echo "  make restart    Same as run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
+	@echo "                  CALIB_YOLO_MASK=1 also subtracts detected furniture"
 	@echo "  make seg-test   What the segmentation model sees, as an image"
 	@echo "  make ros-base       Shared ROS Jazzy base image for the suite bricks"
 	@echo "  make groundfloor    Intel Robotics AI Suite floor segmentation"
@@ -214,8 +215,29 @@ restart: run
 calibrate: $(IMAGES_STAMP) down
 	@test -n "$(HEIGHT)" || (echo "Usage: make calibrate HEIGHT=1.50   (camera height in metres)"; exit 1)
 	@xhost +local:root > /dev/null 2>&1 || true
+ifeq ($(CALIB_YOLO_MASK),1)
+	@# Optional assist: subtract what the detector sees from the automatic floor
+	@# so red does not creep onto the furniture and have to be erased by hand.
+	@# Three steps because no single image can do all three jobs: only `source`
+	@# may open the camera, only `perception` carries OpenVINO and the model,
+	@# and the calibration UI belongs with the camera. The frame is handed over
+	@# as a file rather than either image growing the other's dependencies, and
+	@# the detector is the SAME one perception runs -- seg_test.py builds the
+	@# same Detector on the same weights, it is not a second inference path.
+	@$(call msg, Grabbing one frame for the detector ...)
+	@$(COMPOSE) run --rm --no-deps source python3 /app/calibrate.py \
+		--height $(HEIGHT) --dump-frame /data/calib-frame.png
+	@$(call msg, Running YOLO11m-seg on it ...)
+	@$(COMPOSE) run --rm --no-deps perception python3 /app/seg_test.py \
+		--image /data/calib-frame.png --out /data/calib-seg \
+		--mask-out /data/calib-furniture.png $(SEG_ARGS)
+	@$(call msg, Camera calibration - furniture already removed from the red ...)
+	@$(COMPOSE) run --rm --no-deps source python3 /app/calibrate.py \
+		--height $(HEIGHT) --furniture-mask /data/calib-furniture.png
+else
 	@$(call msg, Camera calibration - floor shown in red ...)
 	@$(COMPOSE) run --rm --no-deps source python3 /app/calibrate.py --height $(HEIGHT)
+endif
 
 logs:
 	@$(COMPOSE) logs -f $(S)

@@ -63,7 +63,7 @@ Si tu changes la hauteur caméra, adapte `PATROL_MIN_DISTANCE` :
    ```
    Ou directement, avec le numéro de série :
    ```bash
-   python3 scripts/calibrate_camera.py --height 1.50 --serial 220422301817
+   python3 /app/calibrate.py --height 1.50 --serial 220422301817
    ```
    Cela lit le FOV (SDK) et l'inclinaison (IMU), et écrit
    `config/camera_calibration.json`.
@@ -71,14 +71,14 @@ Si tu changes la hauteur caméra, adapte `PATROL_MIN_DISTANCE` :
 3. (Optionnel, pour le white paper) Vérifie l'échelle avec un objet de taille
    connue à distance connue, mesurée au laser :
    ```bash
-   python3 scripts/calibrate_camera.py --height 1.50 --ref-distance 3.0 --ref-height 1.0
+   python3 /app/calibrate.py --height 1.50 --ref-distance 3.0 --ref-height 1.0
    ```
    L'outil indique quel pourcentage de l'image l'objet devrait occuper. Compare
    à l'image réelle pour valider.
 
 4. Sans IMU (repli), saisis l'inclinaison à la main :
    ```bash
-   python3 scripts/calibrate_camera.py --height 1.50 --manual-pitch -3
+   python3 /app/calibrate.py --height 1.50 --manual-pitch -3
    ```
 
 5. Lance la démo. Le viewer charge la calibration automatiquement :
@@ -126,3 +126,74 @@ au mauvais endroit, recalibre d'abord (`make calibrate HEIGHT=...`).
 
 Les zones sans mesure de profondeur (trous, 0) sont traitées comme
 infiniment loin, donc elles ne masquent jamais le robot par erreur.
+
+## Assist YOLO : retirer les meubles du masque de sol (optionnel)
+
+`make calibrate CALIB_YOLO_MASK=1` fait tourner **le detecteur de perception**
+une fois sur la scene et retranche ses silhouettes du sol detecte
+automatiquement, pour que le rouge ne deborde pas sur les meubles.
+
+**Par defaut desactive.** Sans la variable, le chemin par seuil de hauteur est
+exactement celui d'avant.
+
+### Trois etapes, et pourquoi
+
+Aucune image ne peut faire les trois travaux : seul `source` a le droit d'ouvrir
+la camera, seul `perception` embarque OpenVINO et le modele, et l'interface de
+calibrage doit etre du cote camera. L'image est donc passee en fichier plutot
+que de faire grossir une image des dependances de l'autre.
+
+```
+source      calibrate.py --dump-frame /data/calib-frame.png
+perception  seg_test.py --image ... --mask-out /data/calib-furniture.png
+source      calibrate.py --height H --furniture-mask /data/calib-furniture.png
+```
+
+**Ce n'est pas un second chemin d'inference.** `seg_test.py` construit le meme
+`Detector` sur les memes poids que le service `perception` ; on lui a seulement
+ajoute une sortie.
+
+### Ce que ca ne change pas
+
+La hauteur et l'inclinaison viennent toujours de la saisie et de l'IMU. Le
+masque YOLO s'applique **a la couche automatique uniquement** :
+
+```python
+auto = auto & ~furniture
+mask = (auto | ui.add) & ~ui.rem
+```
+
+FILL rajoute donc toujours ce que le modele ne sait pas nommer -- pieds de
+tabouret fins, le mat -- et ERASE l'emporte toujours sur les deux. Le modele
+assiste la supposition automatique, il ne commande pas a l'operateur.
+
+### Mesure : le gain est reel mais modeste
+
+Une image de ce salon, 1280x720, `floor_h_tol` 0,08 m :
+
+| | pixels | % de l'image |
+|---|---|---|
+| sol automatique **avant** | 255 710 | 27,75 % |
+| masque meubles (canape) | 66 944 | 7,26 % |
+| sol automatique **apres** | 251 158 | 27,25 % |
+| **retire** | **4 552** | **1,78 % du sol auto** |
+
+**Seuls 6,8 % du masque meubles recouvraient du sol.** La porte de hauteur
+faisait deja l'essentiel du travail : un canape de 40 cm echoue au test
+`|hauteur| < 8 cm` bien avant que YOLO n'intervienne. Ce que l'assist retire,
+c'est la **frange** -- la jonction meuble/sol, et les pixels de meuble que le
+bruit de profondeur ramene a hauteur de sol. C'est justement la frange qu'il
+fallait gommer a la main, mais il ne faut pas en attendre un masque neuf.
+
+### La limite, mesuree
+
+L'assist tourne **une fois, sur une image**. Or la table basse n'est detectee
+que dans **25 % des trames** (classe 60, score median 0,28) : une passe unique a
+donc une chance sur quatre de l'attraper. Sur l'image mesuree ici elle n'y etait
+pas, meme en descendant `--conf` a 0,22 -- ce n'est pas un probleme de seuil,
+elle n'etait pas detectee dans cette trame-la.
+
+Pour les objets intermittents il faudrait unir les masques de plusieurs trames.
+Ce n'est pas fait : la demande etait « une fois sur la trame ». Le changement
+serait d'ecrire N images et d'unir leurs masques.
+
