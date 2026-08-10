@@ -240,6 +240,16 @@ services:
       # donc au-dela du mur -- c'est a ca qu'on voit qu'on mesurait la
       # projection et pas l'objet. Mettre 0 pour revenir a la projection.
       FOOTPRINT_FROM_DEPTH: ${FOOTPRINT_FROM_DEPTH:-1}
+      # Au plus N rectangles par objet, couvrant seulement les cellules qu'il
+      # occupe reellement. 1 revient a la boite englobante unique, qui
+      # revendique l'interieur d'une forme concave : le rectangle autour d'un
+      # canape en L possede le sol libre dans le creux du L. La couverture est
+      # toujours complete -- le dernier rectangle englobe ce qui reste -- parce
+      # qu'une carte d'obstacles qui oublie une cellule envoie le robot dans le
+      # meuble, alors qu'une qui en couvre un peu trop le fait seulement
+      # contourner du vide.
+      FOOTPRINT_MAX_RECTS: ${FOOTPRINT_MAX_RECTS:-24}
+      FOOTPRINT_CELL: ${FOOTPRINT_CELL:-0.06}
       # Periode de republication du sol praticable et des empreintes.
       ROI_PERIOD: ${ROI_PERIOD:-1.0}
       # Mur du fond mesure a 6,2 m. La projection au sol ne sait pas ou la

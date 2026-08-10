@@ -1368,6 +1368,12 @@ OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
 # Bound each footprint by the object's own measured depth rather than by the
 # ground-plane projection of its silhouette. 0 restores the projection.
 FOOTPRINT_FROM_DEPTH = os.environ.get("FOOTPRINT_FROM_DEPTH", "1") != "0"
+# At most this many axis-aligned rectangles per detected object, covering only
+# the cells it actually occupies. 1 restores the single bounding box, which
+# claims the inside of a concave shape -- an L-shaped couch's bounding box owns
+# the free floor in the crook of the L.
+FOOTPRINT_MAX_RECTS = int(os.environ.get("FOOTPRINT_MAX_RECTS", "24"))
+FOOTPRINT_CELL = float(os.environ.get("FOOTPRINT_CELL", "0.06"))
 # Far wall of this room, measured at 6.2 m. Footprints are truncated here for
 # the reason clip_footprints() gives: the ground-plane projection has no notion
 # of where the room ends, and one stray mask column stretched a published
@@ -1957,8 +1963,9 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
             f, l, _ = floor_det.deproject(depth_metres)
             valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
                      & np.isfinite(f) & np.isfinite(l))
-            boxes, skipped = mask_footprints_xy(sm, f, l, valid,
-                                                OBSTACLE_MARGIN)
+            boxes, skipped = mask_footprints_xy(
+                sm, f, l, valid, OBSTACLE_MARGIN,
+                max_rects=FOOTPRINT_MAX_RECTS, cell=FOOTPRINT_CELL)
             if boxes:
                 return boxes, "depth silhouettes"
             if skipped:

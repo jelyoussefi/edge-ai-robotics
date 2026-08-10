@@ -528,6 +528,17 @@ class Navigator:
                     # otherwise the robot cannot slip between them.
                     if max(gx, gy) >= need:
                         continue
+                    # Touching or overlapping rectangles are NOT merged. This
+                    # exists to close a gap the robot cannot pass through, and
+                    # where there is no gap there is nothing to close. It is
+                    # also what keeps the pieces of one concave object apart:
+                    # the compositor now decomposes an L-shaped couch into two
+                    # or three abutting rectangles, and merging them on a
+                    # negative gap would rebuild the bounding box the
+                    # decomposition exists to avoid -- the inside of the L
+                    # would go back to being an obstacle.
+                    if max(gx, gy) <= 0.0:
+                        continue
                     fused = [min(a_[0], b_[0]), max(a_[1], b_[1]),
                              min(a_[2], b_[2]), max(a_[3], b_[3])]
                     # The span guard has to survive the merge, or it does not

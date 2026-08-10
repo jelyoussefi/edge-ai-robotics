@@ -784,3 +784,79 @@ polygone concave, laisserait l'interieur du L praticable. C'est la meme
 correction concave que le passage aux contours a apportee cote image, a
 appliquer cote sol.
 
+## 13. Decomposition en rectangles : mesure, et pourquoi elle ne suffit pas
+
+Version bon marche demandee : garder le contrat a 4 elements et decouper
+l'occupation au sol de chaque instance en quelques rectangles couvrant
+seulement les cellules occupees.
+
+### La fusion, d'abord
+
+Les morceaux d'une meme instance se touchent, donc leur intervalle est negatif
+et `_merge` les recollait aussitot en AABB. Regle changee : **deux rectangles
+qui se touchent ou se recouvrent ne fusionnent plus**. La fusion existe pour
+fermer un passage trop etroit ; la ou il n'y a pas d'intervalle il n'y a rien a
+fermer. Cela obtient l'effet demande sans casser le contrat a 4 elements ni
+faire circuler un identifiant d'instance.
+
+### L'occupation est bien concave
+
+Grille de la composante canape, cellule 0,06 m : **51,8 % de remplissage** de sa
+boite englobante, 8,79 m² occupes pour une boite de 12,52 m². Le creux du L est
+vide, et la cellule du couloir gauche (3,10 ; -0,90) est **non occupee**. Le
+probleme n'a jamais ete l'occupation, mais la facon de la resumer.
+
+### Quatre tentatives, mesurees
+
+| | rects/maj | aire obstacles | sol praticable | couloir G libre | couloir D libre |
+|---|---|---|---|---|---|
+| AABB unique (depart) | 3 | 10,7 m² (canape seul) | 0,37 m² | 0/60 | 0/60 |
+| v1 cap 4, marge par piece | 6 | 12,10 m² | 0,51 m² | 0/60 | 7/60 |
+| v2 marge dilatee dans la forme | 6 | 12,38 m² | 0,50 m² | 0/60 | 0/60 |
+| v3 residu par composante, cap 8 | 11 | 12,20 m² | 0,61 m² | 0/60 | 0/60 |
+| **v4 cap 24** | **27** | **11,69 m²** | **0,93 m²** | 0/59 | 2/59 |
+
+Le sol praticable passe de **0,37 a 0,93 m²** et sa profondeur de 0,16 a
+0,36 m. La table garde son empreinte propre **59/59** dans tous les cas.
+Mais **aucun des couloirs ne se libere**.
+
+### Ce que chaque echec a appris
+
+1. **La marge par piece gonfle l'aire.** Grossir chaque rectangle de 0,12 m sur
+   ses quatre cotes la grossit aussi sur les faces internes de decoupe : quatre
+   morceaux couvraient 12,10 m² la ou la boite unique en couvrait 10,69. La
+   marge est desormais appliquee **une fois, a la forme**, par dilatation de
+   l'occupation avant le pavage.
+2. **Le rattrapage global est fatal.** Le budget epuise, le dernier rectangle
+   englobait tout le residu : 2,35 m² epars sur le pourtour dont la boite fait
+   **12,11 m²**, soit l'etendue entiere -- exactement ce que la decomposition
+   devait eviter. Le residu est maintenant pave **par composante connexe**.
+3. **Le budget de 4 est trop petit d'un ordre de grandeur.** Le pavage glouton
+   couvre 3,73 puis 2,07 puis 0,63 m², puis une longue traine : apres 12
+   rectangles il reste 0,57 m². Un bord dechiquete par le bruit de profondeur
+   ne se pave pas en quelques rectangles. Il en faut une vingtaine ici.
+
+### Conclusion : passer au repli
+
+La decomposition ameliore tout ce qu'elle touche de facon monotone, mais elle
+**ne libere pas les couloirs**, et la mesure dit pourquoi : couvrir exactement
+une forme bruitee demande tellement de rectangles que le budget finit toujours
+par produire une boite qui traverse le passage. Le critere pose etait « ne
+passer a l'occupation par cellule ou a un polygone concave que si la
+decomposition n'y arrive pas ». Elle n'y arrive pas.
+
+Le repli indique est donc l'occupation **par cellule** : publier la grille
+plutot que des rectangles, et faire raisonner `_escape` et `_detour` dessus.
+C'est un changement de contrat, pas un reglage, et il n'est pas entame.
+
+Reglages laisses en place : `FOOTPRINT_MAX_RECTS=24`, `FOOTPRINT_CELL=0.06`.
+Ils donnent le meilleur sol praticable mesure (0,93 m²) sans regression d'aire,
+et `FOOTPRINT_MAX_RECTS=1` revient a la boite unique.
+
+### Non atteint, et non mesure
+
+Le robot reste bloque : 1,34 m parcourus en 60 s, 100 % de poses en frottement,
+degagement minimal -0,731 m. Le gel de depart **ne se leve pas**. Aucune de ces
+trois valeurs n'est amelioree par la decomposition, et je ne les presente pas
+comme telles.
+

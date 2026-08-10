@@ -267,8 +267,85 @@ def occupied_cells(mask, depth_m, rays, cell: float, margin: float,
     return grid.astype(bool), bounds
 
 
+def _largest_rect(occ):
+    """Largest all-True axis-aligned rectangle in a boolean grid.
+
+    Histogram method, O(rows x cols). Returns (r0, r1, c0, c1) inclusive, or
+    None when the grid is empty.
+    """
+    rows, cols = occ.shape
+    heights = np.zeros(cols, np.int32)
+    best = None
+    best_area = 0
+    for r in range(rows):
+        heights = np.where(occ[r], heights + 1, 0)
+        stack = []
+        for c in range(cols + 1):
+            h = heights[c] if c < cols else 0
+            start = c
+            while stack and stack[-1][1] >= h:
+                sc, sh = stack.pop()
+                area = int(sh) * (c - sc)
+                if area > best_area and sh > 0:
+                    best_area = area
+                    best = (r - int(sh) + 1, r, sc, c - 1)
+                start = sc
+            stack.append((start, h))
+    return best
+
+
+def cover_rects(occ, max_rects: int = 4):
+    """Cover every True cell of `occ` with at most `max_rects` rectangles.
+
+    Greedy largest-first, which is what makes an L come out as its two arms:
+    the biggest all-occupied rectangle is one arm, and what remains is the
+    other. The LAST rectangle is the bounding box of whatever is still
+    uncovered, so the cover is always complete even when the budget runs out.
+
+    Completeness is not negotiable here and cheapness is: an obstacle map that
+    misses an occupied cell drives the robot into furniture, while one that
+    covers a little extra free floor only makes it walk around something that
+    was not there. When the budget is spent the error is therefore taken on the
+    conservative side.
+    """
+    work = occ.copy()
+    out = []
+    while work.any() and len(out) < max_rects - 1:
+        r = _largest_rect(work)
+        if r is None:
+            break
+        out.append(r)
+        work[r[0]:r[1] + 1, r[2]:r[3] + 1] = False
+    if work.any():
+        # The residue, per connected blob rather than as one bounding box.
+        # A single AABB over everything still uncovered is a catastrophe on a
+        # ragged shape: measured on the couch, greedy covered 3.73 + 2.07 +
+        # 0.63 m2 and left 2.35 m2 scattered around the rim, whose bounding box
+        # was 12.11 m2 -- the whole extent, exactly the box the decomposition
+        # exists to avoid. Blob by blob the same residue costs a few small
+        # rectangles instead.
+        import cv2
+        ncomp, lab = cv2.connectedComponents(work.astype(np.uint8))
+        comps = []
+        for j in range(1, ncomp):
+            rs, cs = np.nonzero(lab == j)
+            comps.append((int(rs.min()), int(rs.max()),
+                          int(cs.min()), int(cs.max()), int(rs.size)))
+        comps.sort(key=lambda t: -t[4])
+        budget = max(1, max_rects - len(out))
+        if len(comps) <= budget:
+            out += [c[:4] for c in comps]
+        else:
+            out += [c[:4] for c in comps[:budget - 1]]
+            rest = comps[budget - 1:]
+            out.append((min(c[0] for c in rest), max(c[1] for c in rest),
+                        min(c[2] for c in rest), max(c[3] for c in rest)))
+    return out
+
+
 def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
-                       min_valid: int = 40, pct: float = 2.0):
+                       min_valid: int = 40, pct: float = 2.0,
+                       max_rects: int = 1, cell: float = 0.10):
     """Ground rectangles from each object's OWN measured depth.
 
     Takes per-pixel world coordinates that were computed from the DEPTH the
@@ -307,8 +384,49 @@ def mask_footprints_xy(mask, fwd, lat, valid, margin: float, min_px: int = 60,
         f, l = fwd[sel], lat[sel]
         x0, x1 = np.percentile(f, pct), np.percentile(f, 100.0 - pct)
         y0, y1 = np.percentile(l, pct), np.percentile(l, 100.0 - pct)
-        out.append((round(float(x0) - margin, 3), round(float(x1) + margin, 3),
-                    round(float(y0) - margin, 3), round(float(y1) + margin, 3)))
+        if max_rects <= 1 or cell <= 0 or (x1 - x0) < cell or (y1 - y0) < cell:
+            out.append((round(float(x0) - margin, 3),
+                        round(float(x1) + margin, 3),
+                        round(float(y0) - margin, 3),
+                        round(float(y1) + margin, 3)))
+            continue
+        # Occupancy of THIS instance on the ground, then a few rectangles over
+        # the cells it actually fills. One bounding box around an L-shaped couch
+        # claims the inside of the L, which is exactly where the free floor is.
+        pad = int(round(margin / cell)) if cell > 0 else 0
+        nx = max(1, int(np.ceil((x1 - x0) / cell))) + 2 * pad
+        ny = max(1, int(np.ceil((y1 - y0) / cell))) + 2 * pad
+        if nx * ny > 40000:            # a runaway extent: fall back to the box
+            out.append((round(float(x0) - margin, 3),
+                        round(float(x1) + margin, 3),
+                        round(float(y0) - margin, 3),
+                        round(float(y1) + margin, 3)))
+            continue
+        inb = (f >= x0) & (f <= x1) & (l >= y0) & (l <= y1)
+        gi = np.clip(((f[inb] - x0) / cell).astype(np.int32) + pad, 0, nx - 1)
+        gj = np.clip(((l[inb] - y0) / cell).astype(np.int32) + pad, 0, ny - 1)
+        occ = np.zeros((nx, ny), bool)
+        occ[gi, gj] = True
+        # Close single-cell pinholes so a noisy surface does not fragment into
+        # a dozen slivers and burn the whole rectangle budget on speckle.
+        occ = cv2.morphologyEx(occ.astype(np.uint8), cv2.MORPH_CLOSE,
+                               np.ones((3, 3), np.uint8))
+        # The margin is applied ONCE, to the shape, by dilating the occupancy
+        # before covering it -- not to each rectangle afterwards. Growing every
+        # piece by the margin also grows it around the internal faces where the
+        # pieces were cut apart, so splitting one box into four made the total
+        # obstacle area LARGER than the single box it replaced: measured at
+        # 12.10 m2 against 10.69 m2. Dilating the shape keeps the concavity,
+        # because a dilated L is still an L.
+        k = int(round(margin / cell)) if cell > 0 else 0
+        if k > 0:
+            occ = cv2.dilate(occ, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        occ = occ.astype(bool)
+        for (r0, r1, c0, c1) in cover_rects(occ, max_rects):
+            out.append((round(x0 + (r0 - k) * cell, 3),
+                        round(x0 + (r1 + 1 - k) * cell, 3),
+                        round(y0 + (c0 - k) * cell, 3),
+                        round(y0 + (c1 + 1 - k) * cell, 3)))
     return out, skipped
 
 
