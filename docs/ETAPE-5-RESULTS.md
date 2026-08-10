@@ -172,9 +172,19 @@ Les 23,7 ms chronométrées sur une image de 54 à 57 ms laissent une trentaine 
 millisecondes qui sont le rendu, le blit, le shader, la relecture et le JPEG,
 présents depuis toujours.
 
-**Rien n'est appliqué.** Les deux remèdes sont évidents et chiffrés ; les poser
-déplacerait la ligne de base une nouvelle fois, et c'est l'objet du travail
-suivant.
+**Rien n'est appliqué** au moment où ces lignes sont écrites. Les deux remèdes
+sont l'objet du travail suivant.
+
+> **Correction, ajoutée après coup.** Deux chiffres de ce tableau étaient faux.
+> La ligne `points_to_grid`, sol mesurait un appel que le code ne fait pas : la
+> sonde rastérisait `valid & ~silhouette` sur l'image entière, alors que le
+> chemin réel passe par `nonzero` du masque de sol, `project_many` sur les
+> indices, puis une rastérisation de points 1-D. Le total honnête du chemin sol
+> est 8,90 ms en trois postes, et il est payé une fois par publication de ROI à
+> 0,99 Hz, pas par image. Et 35 points par cellule était une moyenne trompeuse :
+> c'est 55,6, réparti en milliers par cellule au près et un ou deux au loin, ce
+> qui a fait échouer le sous-échantillonnage sur son propre critère. Le tableau
+> corrigé et l'A/B/A sont dans `docs/SIMPLIFICATION-BASELINE.md` §6 et §7.
 
 ## 7. Commits
 
@@ -208,6 +218,8 @@ docker compose run --rm --no-deps --entrypoint python3 \
 
 Ordre révisé : **FPS**, puis **étape 2** (budget de marge unique), puis 6, 3, 4.
 
-La ligne de base de l'étape 0 sera à refaire une fois le FPS traité : elle porte
-encore les 14 fps et elle a été prise sans numéro de lap, donc elle n'est pas
-comparable au lap près aux mesures d'aujourd'hui.
+Le FPS est traité : `24153ec` cache la grille de rayons et fait passer le
+compositeur de 14,1 à 37,0 fps, `fc252e9` mesure le sous-échantillonnage du sol
+et le livre désactivé. La ligne de base a été refaite là-dessus, avec les laps,
+dans `docs/SIMPLIFICATION-BASELINE.md` — c'est elle qui sert de référence à
+partir de l'étape 2, et non les 14 fps de l'étape 0.
