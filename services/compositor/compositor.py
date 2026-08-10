@@ -873,6 +873,9 @@ class FloorDetector:
         self.tol_rel = tolerance_rel
         self._cache_shape = None
         self._expected = None  # cached expected-floor-depth map for the depth size
+        # Same idea for the per-pixel rays; see _rays().
+        self._rays_shape = None
+        self._rays_cache = None
 
     def _expected_floor(self, dw: int, dh: int) -> np.ndarray:
         """Per-pixel perpendicular depth Z if the pixel were on the floor.
@@ -884,18 +887,12 @@ class FloorDetector:
         """
         if self._cache_shape == (dw, dh):
             return self._expected
-        us = np.arange(dw)
-        vs = np.arange(dh)
-        uu, vv = np.meshgrid(us, vs)
-        # Intrinsics scaled to the depth resolution.
-        fx = self.fx * dw / CAM_REF_W
-        fy = self.fy * dh / CAM_REF_H
-        ppx = self.ppx * dw / CAM_REF_W
-        ppy = self.ppy * dh / CAM_REF_H
         # Ray in the camera optical frame (x right, y down, z optical axis). A
-        # point at sensor-depth Z along this ray is (x*Z, y*Z, Z) in camera frame.
-        x = (uu - ppx) / fx
-        y = (vv - ppy) / fy
+        # point at sensor-depth Z along this ray is (x*Z, y*Z, Z) in camera
+        # frame. From _rays() rather than derived a second time here: the two
+        # derivations were character-for-character identical, which is how a
+        # scaling fix gets applied to one of them and not the other.
+        x, y = self._rays(dw, dh)
         cp, sp = np.cos(self.pitch), np.sin(self.pitch)
         # Camera axes expressed in the world frame (X right, Y forward, Z up),
         # camera at height H looking forward tilted down by pitch:
@@ -915,11 +912,44 @@ class FloorDetector:
         return expected
 
     def _rays(self, dw: int, dh: int):
-        """Per-pixel camera-frame ray components (x right, y down, z forward)."""
+        """Per-pixel camera-frame ray components (x right, y down, z forward).
+
+        Cached, because it is a pure function of the intrinsics, the raster and
+        nothing else -- no depth goes into it. The intrinsics are set once in
+        __init__ and never assigned again anywhere in this file, and the
+        calibration cannot change while the process runs: a new calibration
+        means a new `make calibrate` and a restart. So the only thing that can
+        invalidate this is the raster, which is the key.
+
+        This was 12.21 ms of the 23.73 ms that scripts/grid_profile.py could
+        attribute, rebuilt from scratch on every call. It is called once per
+        FRAME by height_map() when the silhouette overlay is on, and twice more
+        per ROI publish by deproject(), on 1280x720 = 921 600 pixels each time,
+        to produce an array that had not changed since startup.
+
+        The arrays are handed out read-only. A caller that modified one in
+        place would corrupt every later frame in a way that looks like a
+        calibration drift, and this is a hot path where someone will one day be
+        tempted to write into it rather than allocate; better it raises.
+        """
+        if self._rays_shape == (dw, dh):
+            return self._rays_cache
         uu, vv = np.meshgrid(np.arange(dw), np.arange(dh))
         fx, fy = self.fx * dw / CAM_REF_W, self.fy * dh / CAM_REF_H
         ppx, ppy = self.ppx * dw / CAM_REF_W, self.ppy * dh / CAM_REF_H
-        return (uu - ppx) / fx, (vv - ppy) / fy
+        xn, yn = (uu - ppx) / fx, (vv - ppy) / fy
+        xn.setflags(write=False)
+        yn.setflags(write=False)
+        if self._rays_shape is not None:
+            # Not an error -- the depth raster legitimately changes if the
+            # source is restarted at another STREAM_RES -- but worth a line,
+            # because it also happens when something resamples depth silently
+            # and then every distance below is computed for the wrong lens.
+            log.info("ray grid rebuilt: depth raster %s -> %s",
+                     self._rays_shape, (dw, dh))
+        self._rays_shape = (dw, dh)
+        self._rays_cache = (xn, yn)
+        return self._rays_cache
 
     def deproject(self, depth_m: np.ndarray):
         """Depth image -> (forward, lateral, up) per pixel, world metres.
