@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from edgebot.floor import (GRID_BOUNDS, GRID_CELL, clear_reach,
+                           corridor_blocked, free_lane, grid_extent,
+                           nearest_free, unpack_grid)
+
 log = logging.getLogger("navigator")
 
 
@@ -95,6 +99,62 @@ class Navigator:
     # service happened to be running would be a bad default whichever way it
     # went. Nothing changes unless asked.
     SOURCE = os.environ.get("OBSTACLE_SOURCE", "ours").strip().lower()
+    # "grid" steers on ground cells, "rects" on the footprint rectangles.
+    #
+    # Cells, by default, for a reason that is measured rather than aesthetic: a
+    # rectangle around this room's L-shaped couch was 3.35 x 3.19 m = 10.7 m2
+    # for a couch occupying about 5.1 m2, and the 5.6 m2 it claimed were the
+    # coffee table and both walking corridors. Decomposing it into several
+    # rectangles improved the cover but never freed the inside of the L: the
+    # budget always ended in one box crossing the passage. A cell is occupied
+    # or it is not, so the question does not arise.
+    #
+    # Both representations are published on every message, so "rects" restores
+    # the previous behaviour exactly and the two stay comparable.
+    REP = os.environ.get("OBSTACLE_REP", "grid").strip().lower()
+    # Keep the turn-around inside the floor the sensor actually reports. The
+    # committed STOP_AT of 6.0 m dates from a scene whose floor reached
+    # further; against the current one it ordered the robot across four metres
+    # of floor that were entirely inside footprints, which measured as 100 % of
+    # poses scraping and -0.522 m of clearance. That was obedience to an
+    # impossible order, not a failure to route. 0 disables the clamp and
+    # restores the literal STOP_AT.
+    PATROL_CLAMP = float(os.environ.get("PATROL_CLAMP", "0.6"))
+    # Floor under the run-up brake. Not zero: a robot that stops entirely in
+    # front of an obstacle it is still drifting away from never finishes the
+    # drift, because the cross-track law needs forward motion to convert a
+    # heading into a sideways displacement. Standing still is a decision taken
+    # elsewhere, when there is no lane at all.
+    RUNUP_MIN = float(os.environ.get("RUNUP_MIN", "0.25"))
+    # Extra half-width demanded of a lane, on top of the robot and GAP_CLEAR.
+    # Not a second safety margin: it pays for the tracking lag. The lane is
+    # reached asymptotically, so the robot arrives at an obstacle still short
+    # of it, and a lane chosen with exactly the clearance needed is therefore
+    # always entered with less. Measured on this lounge, at the coffee table's
+    # near corner where the run-up is shortest, over 60 s of patrol:
+    #
+    #   slack   travelled   scraping   worst clearance
+    #   0.00     14.81 m      1.6 %        -0.101 m
+    #   0.05     15.32 m      0.7 %        -0.067 m
+    #   0.10     16.23 m      0.1 %        -0.029 m
+    #   0.15     16.38 m      0.0 %        -0.022 m
+    #   0.20     16.35 m      0.0 %        -0.022 m
+    #
+    # 0.15 is the knee: scraping is gone and distance stops improving, and
+    # -0.022 m is inside one 0.05 m cell, so it is the grid's resolution and
+    # not a real overlap. Above it the robot only walks wider for nothing.
+    # The grid ALREADY carries OBSTACLE_MARGIN, applied per cell by whoever
+    # built it. Adding GAP_CLEAR and a slack on top asked for a corridor of
+    # 2 x (0.22 + 0.10 + 0.15) = 0.94 m where the 0.90 m corridor of this room
+    # has only 0.90 - 2 x 0.12 = 0.66 m left in the grid. No lane could ever be
+    # clear, and the robot correctly reported "no way round" about a passage a
+    # person walks through. The rectangle detour warns about exactly this and I
+    # repeated it one file away: a second full clearance on top of a margin
+    # already applied pushes the robot a metre wide of a chair.
+    #
+    # So the corridor is the robot plus this, and nothing else. Budget for this
+    # room: 0.66 m available, 0.44 m of robot, 0.11 m of slack per side.
+    LANE_SLACK = float(os.environ.get("LANE_SLACK", "0.08"))
     # "patrol" paces the optical axis, the shipped demo. "goal" follows the
     # waypoints of SUITE_PATH, the planner's output, and is etape E2.
     #
@@ -201,6 +261,21 @@ class Navigator:
         # Per-source instance ids for the most recent update only.
         self._inst: dict = {}
         self._last_walk_log = 0.0
+        # Ground cells, when the compositor sends them. Kept beside the
+        # rectangles rather than instead of them so OBSTACLE_REP can pick.
+        self._occ = None
+        self._flr = None
+        self._occ_t = 0.0
+        self._cell = GRID_CELL
+        self._bounds = GRID_BOUNDS
+        # The lane shift currently held, so a tie between two equally good
+        # lanes goes to the one already taken instead of swapping sides every
+        # update, which reads as indecision and costs distance.
+        self._last_lane = 0.0
+        self._runup_logged = 1.0
+        # Effective far end of the patrol. Starts at the configured STOP_AT and
+        # is pulled in to the floor the sensor reports, see PATROL_CLAMP.
+        self._stop_at = self.STOP_AT
 
     def set_floor(self, roi: list, blocked: list, inst: list | None = None) -> None:
         """Take the walkable floor and the obstacle footprints from perception.
@@ -214,6 +289,201 @@ class Navigator:
         if blocked is not None:
             self._push("ours", [(float(b[0]), float(b[1]), float(b[2]),
                                  float(b[3])) for b in blocked], inst)
+
+    def set_grid(self, payload: dict) -> None:
+        """Take the ground occupancy grids that ride with the footprints.
+
+        Two grids: `occ` is where an object stands, `flr` is where the sensor
+        saw floor. Only `occ` stops the robot. Treating "no floor reported" as
+        blocked confines it to the observed band, which is how a 0.31 m deep
+        walkable floor came out of a room with 3.4 m of real floor in it.
+        """
+        bits = payload.get("occ")
+        if not bits:
+            return
+        nx, ny = int(payload.get("gnx", 0)), int(payload.get("gny", 0))
+        if nx <= 0 or ny <= 0:
+            return
+        self._cell = float(payload.get("gcell", GRID_CELL))
+        gb = payload.get("gbounds")
+        self._bounds = tuple(float(v) for v in gb) if gb else GRID_BOUNDS
+        occ = unpack_grid(bits, nx, ny)
+        if occ is None:
+            return
+        self._occ = occ
+        self._occ_t = time.time()
+        fb = payload.get("flr")
+        self._flr = unpack_grid(fb, nx, ny) if fb else None
+        if self.PATROL_CLAMP > 0:
+            # How far the robot can actually WALK, not how far floor is visible.
+            # The far edge of the floor grid is the wrong number: a strip of
+            # floor behind the couch is floor, is reported, and is unreachable,
+            # so clamping to it still sends the robot into the furniture. Ask
+            # instead where the last clear lane ends.
+            reach = 0.0
+            for s in np.arange(0.0, self.DETOUR_MAX + 1e-6, 0.10):
+                for lane in (-s, s):
+                    _, ok = free_lane(
+                        self._occ, self.RETURN_TO, lane, 1.0,
+                        self.STOP_AT - self.RETURN_TO,
+                        self.ROBOT_HALF_WIDTH + self.LANE_SLACK, 0.0,
+                        cell=self._cell, bounds=self._bounds)
+                    if ok:
+                        reach = self.STOP_AT - self.RETURN_TO
+                        break
+                    r2 = 0.0
+                    while r2 < self.STOP_AT - self.RETURN_TO:
+                        if corridor_blocked(self._occ, self.RETURN_TO,
+                                            lane, 1.0, r2 + 0.20,
+                                            self.ROBOT_HALF_WIDTH
+                                            + self.LANE_SLACK,
+                                            self._cell, self._bounds):
+                            break
+                        r2 += 0.20
+                    reach = max(reach, r2)
+                if reach >= self.STOP_AT - self.RETURN_TO:
+                    break
+            far = self.RETURN_TO + reach - self.PATROL_CLAMP
+            lim = max(self.RETURN_TO + 0.3, min(self.STOP_AT, far))
+            if abs(lim - self._stop_at) > 0.05:
+                log.info("patrol limit %.2f m: the furthest clear lane from "
+                         "%.2f m reaches %.2f m, STOP_AT is %.2f m",
+                         lim, self.RETURN_TO, self.RETURN_TO + reach,
+                         self.STOP_AT)
+            self._stop_at = lim
+
+    def _grid_ready(self) -> bool:
+        return (self.REP == "grid" and self._occ is not None
+                and time.time() - self._occ_t <= self.STALE)
+
+    def _escape_grid(self, pose: Pose, dt: float):
+        """Out of an occupied cell, sideways, by the shortest way.
+
+        Same policy as the rectangle escape and for the same measured reason:
+        leaving through the front or the back of something the leg runs through
+        is futile, because the walk resumes toward a lane still inside it.
+        """
+        x, y = pose.centre
+        dy, depth = nearest_free(self._occ, x, y, self.ROBOT_HALF_WIDTH,
+                                 cell=self._cell, bounds=self._bounds)
+        if dy is None:
+            self._inside_reason = ""
+            self._escape_yaw = None
+            return None
+        if self._escape_yaw is None:
+            # Fixed once. Derived from the current heading it rotates with the
+            # robot, which then chases its own target and never leaves.
+            self._escape_yaw = float(np.arctan2(1.0 if dy > 0 else -1.0, 0.0))
+        want = self._escape_yaw
+        err = (want - pose.yaw + np.pi) % (2 * np.pi) - np.pi
+        if self._inside_reason != "inside":
+            self._inside_reason = "inside"
+            log.warning("standing on occupied cells, %.2f m from free floor: "
+                        "backing out toward %+.0f deg", depth,
+                        np.degrees(want))
+        return self._smooth(self.TURN_VX,
+                            float(np.clip(self.HEAD_GAIN * err,
+                                          -self.TURN_WZ, self.TURN_WZ)), dt)
+
+    def _detour_grid(self, x: float, y: float, d: float, lane: float) -> float:
+        """Lateral shift to a lane of the robot's own width that is clear.
+
+        The rectangle detour asked "how far past the edge of this box must I
+        move", which has no answer on a concave object: the inside of an L is
+        clear floor with no box edge to measure from. This asks the question
+        the robot actually has, which is whether a corridor its own width
+        exists, and takes the nearest one.
+        """
+        # Only as far as this leg actually goes. A fixed 3.5 m look from x=2.0
+        # reaches 5.5 m, where the couch stands against the far wall, so every
+        # lane was blocked and the robot reported "no way round" while the
+        # floor it was about to walk on was clear. An obstacle beyond the
+        # turn-around point is not in the way.
+        target = self._stop_at if self._outbound else self.RETURN_TO
+        look = float(np.clip(abs(target - x), 0.5, self.OBSTACLE_LOOK))
+        shift, found = free_lane(
+            self._occ, x, lane, d, look,
+            self.ROBOT_HALF_WIDTH + self.LANE_SLACK, self.DETOUR_MAX,
+            prefer=self._last_lane, cell=self._cell, bounds=self._bounds)
+        self._last_lane = lane + shift
+        if found:
+            self._blocked = False
+            if self._blocked_reason:
+                self._blocked_reason = ""
+                log.info("a way round is available again")
+            reason = f"{shift:+.2f}"
+            if reason != self._detour_reason:
+                self._detour_reason = reason
+                if abs(shift) > 1e-6:
+                    log.info("clear lane %+.2f m from the line, %.1f m ahead, "
+                             "corridor %.2f m wide", shift, look,
+                             2 * (self.ROBOT_HALF_WIDTH + self.LANE_SLACK))
+            return shift
+        if self._blocked_reason != "no way round":
+            self._blocked_reason = "no way round"
+            self._no_way_round += 1
+            # Say how wide a corridor WOULD have worked, not just that this one
+            # did not. "No way round" about a passage a person walks through is
+            # nearly always the width being asked for, and a warning that does
+            # not name the number cannot distinguish a real wall from an
+            # arithmetic mistake -- which is what it was hiding.
+            widest = 0.0
+            for half in np.arange(self.ROBOT_HALF_WIDTH + self.LANE_SLACK,
+                                  0.14, -0.02):
+                _, ok2 = free_lane(self._occ, x, lane, d, look, float(half),
+                                   self.DETOUR_MAX, prefer=self._last_lane,
+                                   cell=self._cell, bounds=self._bounds)
+                if ok2:
+                    widest = 2 * float(half)
+                    break
+            log.warning("no way round (#%d): no lane %.2f m wide is clear "
+                        "within %.2f m of the line over the next %.1f m. "
+                        "The widest lane that IS clear is %s. Holding at "
+                        "%+.2f m, which reaches furthest.",
+                        self._no_way_round,
+                        2 * (self.ROBOT_HALF_WIDTH + self.LANE_SLACK),
+                        self.DETOUR_MAX, look,
+                        "%.2f m" % widest if widest else "none at all",
+                        shift)
+        self._blocked = True
+        return shift
+
+    def _runup_cap(self, x: float, y: float, d: float, lane: float) -> float:
+        """Speed factor that stops the robot clipping a corner it cannot clear.
+
+        The detour moves the LANE at once, but the robot reaches it
+        asymptotically: holding no more than CROSS_MAX off the line, closing
+        E metres of lateral error needs E / tan(CROSS_MAX) metres of run-up.
+        When the obstacle arrives before that distance does, the robot arrives
+        with the error still open and cuts the corner. Measured on a lounge
+        whose coffee table stands 0.9 m past the near end of the patrol: the
+        lane was correctly placed at -0.94 m, the robot was still at -0.44 m
+        on arrival, and 9.9 % of poses crossed the table's real outline with a
+        worst clearance of -0.213 m.
+
+        Braking rather than swerving harder, because CROSS_MAX is not a comfort
+        setting: a biped asked for more yaw than that stops tracking the line
+        at all. Slowing costs seconds and clears the furniture; the alternative
+        costs the furniture.
+
+        Returns 1.0 when there is room, down to RUNUP_MIN when there is not.
+        """
+        err = abs(y - lane)
+        if err < 0.05:
+            return 1.0
+        need = err / max(0.2, float(np.tan(self.CROSS_MAX))) * self.DETOUR_RUNUP
+        reach = clear_reach(self._occ, x, y, d, min(need, self.OBSTACLE_LOOK),
+                            self.ROBOT_HALF_WIDTH + self.LANE_SLACK,
+                            cell=self._cell, bounds=self._bounds)
+        if reach >= need:
+            return 1.0
+        cap = max(self.RUNUP_MIN, reach / max(1e-6, need))
+        if abs(cap - self._runup_logged) > 0.15:
+            self._runup_logged = cap
+            log.info("easing to %.0f %% of cruise: %.2f m of lateral error "
+                     "needs %.2f m of run-up and only %.2f m is clear",
+                     100 * cap, err, need, reach)
+        return cap
 
     def set_suite(self, clusters: list) -> None:
         """Take ADBSCAN's clusters, clipped to the arena and de-blobbed.
@@ -865,7 +1135,7 @@ class Navigator:
             if done is not None:
                 return done
 
-        limit = self.STOP_AT if self._outbound else self.RETURN_TO
+        limit = self._stop_at if self._outbound else self.RETURN_TO
         reached = x >= limit if self._outbound else x <= limit
         if reached:
             self._start_turn(x, y_raw)
@@ -879,7 +1149,8 @@ class Navigator:
         # the other lane: no recovery at all, and the largest deviation from the
         # axis is halved, from 2R to R. LANE=0 restores a single centred line.
         # Out of a footprint first, if standing in one.
-        escape = self._escape(pose, dt)
+        _grid = self._grid_ready()
+        escape = self._escape_grid(pose, dt) if _grid else self._escape(pose, dt)
         if escape is not None:
             return escape
 
@@ -888,8 +1159,24 @@ class Navigator:
         # Shift the lane sideways to clear whatever YOLO sees on the way. The
         # cross-track law below then steers to the shifted line, so avoiding is
         # the same motion as lane keeping and needs no separate mode.
-        lane += self._detour(x_c, y_raw, (d, 0.0), lane)
+        lane += (self._detour_grid(x_c, lane, d, lane) if _grid
+                 else self._detour(x_c, y_raw, (d, 0.0), lane))
         if self._blocked:
+            if _grid and x > self.RETURN_TO + 0.3:
+                # The far end of the floor the robot can actually reach, found
+                # by walking to it rather than by a number set months ago. A
+                # patrol that turns round here covers the room it has; one that
+                # stands in front of the couch waiting for a lane that does not
+                # exist covers nothing. Standing still was the right answer
+                # when the barrier was an artefact of bounding boxes -- with
+                # cells it is a real wall, and a real wall is where you turn.
+                if self._outbound and self._stop_at > x:
+                    log.info("turning at %.2f m: nothing is clear beyond it "
+                             "(STOP_AT is %.2f m)", x, self.STOP_AT)
+                    self._stop_at = x
+                self._start_turn(x, y_raw)
+                return self._smooth(self.TURN_VX,
+                                    self._turn_sign * self.TURN_WZ, dt)
             # Hold position rather than press on into something there is no way
             # round. Standing still in front of an obstacle reads as deliberate;
             # walking into it does not.
@@ -912,6 +1199,22 @@ class Navigator:
         # real misalignment, beyond SLOW_ABOVE, is worth braking for.
         over = max(0.0, abs(err) - self.SLOW_ABOVE)
         vx = self.CRUISE_VX * max(0.3, 1.0 - over / 0.9)
+        # And no faster than the detour can actually be delivered. The lane
+        # moves instantly, the robot does not; without this the corner is
+        # clipped every lap however correct the lane was.
+        if _grid:
+            vx *= self._runup_cap(x_c, y, d, lane)
+        # Never below the speed at which this policy still steps. The G1 walker
+        # has start/stop hysteresis around TURN_VX: asked for less it stops
+        # lifting its feet and stands, which is exactly what a run-up brake
+        # commanding 0.15 m/s produced -- a robot correctly deciding to slow
+        # down and then not walking at all. Braking is a control choice; not
+        # stepping is a failure, and it looks identical to being blocked.
+        #
+        # Applied to BOTH reductions above, not just the run-up: the heading
+        # term's own floor of 0.3 x CRUISE_VX is 0.18 m/s, which is under the
+        # threshold too and would bite as soon as a correction was large.
+        vx = max(self.TURN_VX, vx)
         # Ease down to turning speed over the last stretch rather than dropping
         # to it the instant the limit is crossed. The slew limiter would spread
         # that step over a quarter of a second anyway, but as a visible lurch;
@@ -935,11 +1238,51 @@ class Navigator:
         self._turning = True
         self._turn_started = time.time()
         self._target_yaw = np.pi if self._outbound else 0.0
-        self._turn_sign = 1.0
+        self._turn_sign = self._turn_side(x, y)
         self._turn_y0 = y
         self._laps += 0 if self._outbound else 1
         log.info("reached %.2f m, turning to walk %s", x,
                  "back" if self._outbound else "away again")
+
+    def _turn_side(self, x: float, y: float) -> float:
+        """Which way to sweep the about-face, +1 or -1.
+
+        A turn displaces the robot about 2R sideways, and R is what `lane` has
+        been measuring all along. Always turning the same way was right while
+        obstacles were bounding boxes, because the sweep happened in open floor
+        at the end of a run that stopped well short of anything. With cells the
+        patrol now turns as late as the floor allows, which puts the sweep
+        beside the furniture: measured on this lounge as the robot clipping the
+        coffee table's near corner on the about-face, 189 poses of 3000 with a
+        worst clearance of -0.205 m, while the straights themselves were clean.
+
+        Derived from free space and not from the heading error, which is what
+        made the old choice flip between laps: two degrees of a near-180-degree
+        error decided left or right. Free space on one side does not flicker.
+        Ties keep the previous sign, so a symmetric room still turns the same
+        way every lap.
+        """
+        if not self._grid_ready():
+            return 1.0
+        sweep = max(0.3, 2.0 * self.lane)
+        room = self.ROBOT_HALF_WIDTH + self.LANE_SLACK
+        # The sweep is sideways AND slightly along the leg, so the corridor is
+        # checked over the whole arc rather than at its end point only.
+        ok = {}
+        for sgn in (1.0, -1.0):
+            ok[sgn] = not any(
+                corridor_blocked(self._occ, x, y + sgn * f * sweep, 1.0, 0.0,
+                                 room, self._cell, self._bounds, behind=0.35)
+                for f in (0.33, 0.66, 1.0))
+        if ok[self._turn_sign]:
+            return self._turn_sign
+        other = -self._turn_sign
+        if ok[other]:
+            log.info("turning the other way at %.2f m: a %.2f m sweep to "
+                     "%+.0f is clear and the usual side is not",
+                     x, sweep, 90 * other)
+            return other
+        return self._turn_sign
 
     def _turn_step(self, x: float, y: float, yaw: float, dt: float):
         """Drive the about-face. Returns a command, or None when it is over.

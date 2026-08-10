@@ -503,3 +503,227 @@ def clip_footprints(boxes, x_max: float, margin: float = 0.0):
             continue
         out.append((x0, min(x1, limit), y0, y1))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Ground occupancy, as cells rather than rectangles.
+#
+# Every rectangle-based representation in this file shares one defect: an
+# axis-aligned box around a concave object claims the floor the object
+# surrounds. Measured on this room's L-shaped couch, the box was 3.35 x 3.19 m
+# = 10.7 m2 for a couch occupying about 5.1 m2, and the 5.6 m2 it swallowed
+# were the coffee table and both walking corridors. Decomposing the box into
+# several boxes reduces that but cannot remove it: covering a depth-ragged
+# outline exactly needs so many rectangles that the budget always ends in one
+# that crosses the passage.
+#
+# Cells have no such failure mode, because a cell is occupied or it is not.
+# The cost is a fixed grid on the bus, 3.2 kB at 5 cm over 8 x 8 m, which is
+# smaller than the silhouette mask already published every frame.
+# ---------------------------------------------------------------------------
+
+GRID_BOUNDS = (0.0, 8.0, -4.0, 4.0)   # x_min, x_max, y_min, y_max, world metres
+GRID_CELL = 0.05
+
+
+def grid_shape(cell: float = GRID_CELL, bounds=GRID_BOUNDS):
+    """(nx, ny) of the grid these bounds and this cell describe."""
+    x0, x1, y0, y1 = bounds
+    return max(1, int(round((x1 - x0) / cell))), max(1, int(round((y1 - y0) / cell)))
+
+
+def points_to_grid(fwd, lat, sel, cell: float = GRID_CELL, bounds=GRID_BOUNDS,
+                   margin: float = 0.0, passable: float = 0.0):
+    """Rasterise selected world points onto the ground, with a real margin.
+
+    `fwd` and `lat` are per-pixel world coordinates and `sel` says which pixels
+    count. Grown by `margin` metres AFTER rasterising, so the margin is a
+    distance on the floor rather than a pixel count that would mean something
+    different at every range -- dilating the image mask instead grows a far
+    obstacle far less than a near one, for no reason but perspective.
+
+    `passable` closes slots narrower than the robot. A stool's legs project to
+    two patches with real floor between them, and that floor is real, but a
+    0.35 m slot is not a passage for a 0.44 m robot. This is the ONLY thing the
+    navigator's footprint merging was ever for, done here where it is a local
+    morphological fact rather than a global fusion that rebuilt the bounding
+    box the decomposition existed to avoid.
+
+    Returns a boolean grid indexed [ix, iy].
+    """
+    import cv2
+    nx, ny = grid_shape(cell, bounds)
+    x0, _, y0, _ = bounds
+    grid = np.zeros((nx, ny), np.uint8)
+    if fwd is None or sel is None or not np.any(sel):
+        return grid.astype(bool)
+    f = np.asarray(fwd)[sel]
+    l = np.asarray(lat)[sel]
+    ok = np.isfinite(f) & np.isfinite(l)
+    if not ok.any():
+        return grid.astype(bool)
+    ix = ((f[ok] - x0) / cell).astype(np.int32)
+    iy = ((l[ok] - y0) / cell).astype(np.int32)
+    inb = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    grid[ix[inb], iy[inb]] = 1
+    if margin > 0:
+        k = 2 * int(round(margin / cell)) + 1
+        grid = cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                          (k, k)))
+    if passable > 0:
+        k = max(3, 2 * int(round(passable / cell / 2)) + 1)
+        grid = cv2.morphologyEx(grid, cv2.MORPH_CLOSE,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                          (k, k)))
+    return grid.astype(bool)
+
+
+def pack_grid(grid) -> bytes:
+    """Grid to bytes for the bus. Same packing as the silhouette mask."""
+    return np.packbits(np.asarray(grid, bool).reshape(-1)).tobytes()
+
+
+def unpack_grid(bits: bytes, nx: int, ny: int):
+    """Bytes back to a boolean grid indexed [ix, iy]."""
+    flat = np.unpackbits(np.frombuffer(bits, np.uint8))[:nx * ny]
+    if flat.size < nx * ny:                       # truncated message
+        return None
+    return flat.reshape(nx, ny).astype(bool)
+
+
+def corridor_blocked(occ, x: float, y: float, dx: float, look: float,
+                     half_width: float, cell: float = GRID_CELL,
+                     bounds=GRID_BOUNDS, behind: float = 0.15) -> bool:
+    """Whether a straight corridor of the robot's width hits an occupied cell.
+
+    `dx` is +1 or -1 along the world x axis, which is the only direction the
+    patrol travels. Cells OUTSIDE the grid, and cells the sensor never saw, are
+    not occupied and therefore do not block: unknown is not the same as blocked,
+    and treating it as blocked is what reduced the walkable floor to a 0.31 m
+    band while the height map still showed real floor out to 3.4 m.
+
+    `behind` starts the corridor slightly behind the robot so a footprint it is
+    already standing in is not missed by a test that only looks forward.
+    """
+    nx, ny = grid_shape(cell, bounds)
+    gx0, _, gy0, _ = bounds
+    a = x - behind * dx
+    b = x + look * dx
+    lo, hi = (a, b) if a <= b else (b, a)
+    i0 = int(np.floor((lo - gx0) / cell))
+    i1 = int(np.ceil((hi - gx0) / cell))
+    j0 = int(np.floor((y - half_width - gy0) / cell))
+    j1 = int(np.ceil((y + half_width - gy0) / cell))
+    # At least one cell in each direction. A zero-length corridor -- which is
+    # how "am I standing on something" is asked -- collapsed to an empty slice
+    # whenever the robot's coordinate landed on a cell boundary, and an empty
+    # slice reports clear. The robot then never escaped anything.
+    i1 = max(i1, i0 + 1)
+    j1 = max(j1, j0 + 1)
+    i0, i1 = max(0, i0), min(nx, i1)
+    j0, j1 = max(0, j0), min(ny, j1)
+    if i0 >= i1 or j0 >= j1:
+        return False
+    return bool(occ[i0:i1, j0:j1].any())
+
+
+def free_lane(occ, x: float, y: float, dx: float, look: float,
+              half_width: float, max_shift: float, prefer: float = 0.0,
+              step: float = 0.05, cell: float = GRID_CELL,
+              bounds=GRID_BOUNDS):
+    """Smallest sideways shift of the lane whose corridor ahead is clear.
+
+    Answers the question the rectangle detour could only approximate: not "how
+    far past the edge of a box must I move" but "is there a lane of my own
+    width with nothing in it". On a concave obstacle those differ completely --
+    the inside of an L has a clear lane and no box edge to measure from.
+
+    `prefer` is the ABSOLUTE lane the robot is already holding, in world y.
+    Candidates are ordered by how close they land to it, so the two legs of a
+    patrol go round an obstacle on the same side instead of each picking the
+    lane nearest its own mirror-image centre line.
+
+    Returns (shift, found). When nothing is clear within `max_shift`, returns
+    the shift that gets furthest before being blocked, with found False.
+    """
+    n = int(max_shift / step)
+    cands = [k * step for k in range(-n, n + 1)]
+    # Ordered by distance from the lane already being held, in ABSOLUTE world
+    # terms, not by the size of the shift. Ordering by shift size makes the two
+    # legs of a patrol pick opposite sides of the same obstacle -- each is the
+    # nearest lane to ITS own centre line, and those centre lines are mirror
+    # images. The robot then has to cross the full width of the room during
+    # every about-face, which is where the corner-clipping came from. Wanting
+    # the same side twice costs nothing and removes the crossing.
+    cands.sort(key=lambda s_: (round(abs(y + s_ - prefer), 6), abs(s_), -s_))
+    for s in cands:
+        if not corridor_blocked(occ, x, y + s, dx, look, half_width,
+                                cell, bounds):
+            return float(s), True
+    # Nothing clear. Report the shift that reaches furthest, which is what the
+    # robot should hold while it says so, rather than snapping back to zero.
+    best, best_reach = 0.0, -1.0
+    coarse = 4 * step          # this branch runs on a frame that is already
+    for s in cands:            # stuck; a centimetre of resolution buys nothing
+        reach = 0.0
+        while reach < look:
+            if corridor_blocked(occ, x, y + s, dx, reach + coarse, half_width,
+                                cell, bounds):
+                break
+            reach += coarse
+        if reach > best_reach:
+            best, best_reach = float(s), reach
+    return best, False
+
+
+def nearest_free(occ, x: float, y: float, half_width: float,
+                 max_reach: float = 3.0, step: float = 0.05,
+                 cell: float = GRID_CELL, bounds=GRID_BOUNDS):
+    """Shortest sideways move that puts the robot on unoccupied cells.
+
+    Sideways only, for the reason the rectangle escape gave: leaving through
+    the front or the back of an obstacle the leg runs through is futile, the
+    walk resumes toward a lane still inside it and the robot re-enters at once.
+
+    Returns (dy, depth) where dy is signed lateral metres and depth is how far
+    in the robot currently is, or (None, 0.0) when it is already clear.
+    """
+    if not corridor_blocked(occ, x, y, 1.0, 0.0, half_width, cell, bounds,
+                            behind=0.0):
+        return None, 0.0
+    n = int(max_reach / step)
+    for k in range(1, n + 1):
+        for s in (k * step, -k * step):
+            if not corridor_blocked(occ, x, y + s, 1.0, 0.0, half_width,
+                                    cell, bounds, behind=0.0):
+                return float(s), float(k * step)
+    return None, 0.0
+
+
+def grid_extent(grid, cell: float = GRID_CELL, bounds=GRID_BOUNDS):
+    """(x_min, x_max, y_min, y_max) of the True cells, or None when empty."""
+    if grid is None or not grid.any():
+        return None
+    x0, _, y0, _ = bounds
+    ix, iy = np.nonzero(grid)
+    return (float(x0 + ix.min() * cell), float(x0 + (ix.max() + 1) * cell),
+            float(y0 + iy.min() * cell), float(y0 + (iy.max() + 1) * cell))
+
+
+def clear_reach(occ, x: float, y: float, dx: float, look: float,
+                half_width: float, step: float = 0.10,
+                cell: float = GRID_CELL, bounds=GRID_BOUNDS) -> float:
+    """How far ahead the robot's CURRENT line stays clear, in metres.
+
+    Distinct from free_lane, which answers where the robot should be. This
+    answers where it actually is, and the difference between the two is the
+    lateral error the cross-track law still has to close. A corner is clipped
+    whenever that error outlives the distance to the obstacle.
+    """
+    reach = 0.0
+    while reach < look:
+        if corridor_blocked(occ, x, y, dx, reach + step, half_width,
+                            cell, bounds, behind=0.0):
+            return reach
+        reach += step
+    return look

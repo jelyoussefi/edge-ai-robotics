@@ -147,6 +147,57 @@ services:
       OBSTACLE_CLEAR: ${OBSTACLE_CLEAR:-0.45}
       OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
       DETOUR_MAX: ${DETOUR_MAX:-1.8}
+      # Sur quoi le robot pilote : "grid" = cellules d'occupation au sol,
+      # "rects" = les rectangles d'empreinte, l'ancien comportement.
+      #
+      # grid par defaut, sur mesure et non par gout. Le rectangle autour du
+      # canape en L de ce salon faisait 3,35 x 3,19 m = 10,7 m2 pour un canape
+      # occupant environ 5,1 m2 ; les 5,6 m2 avales etaient la table basse et
+      # les deux couloirs. Le decouper en plusieurs rectangles ameliore la
+      # couverture mais ne libere jamais l'interieur du L : le budget finit
+      # toujours par un rectangle qui traverse le passage. Une cellule est
+      # occupee ou elle ne l'est pas, la question ne se pose plus.
+      #
+      # Les deux representations partent sur chaque message, donc "rects"
+      # restaure exactement l'ancien comportement et les deux restent
+      # comparables sur la meme scene.
+      OBSTACLE_REP: ${OBSTACLE_REP:-grid}
+      # Ramene le demi-tour dans le sol que le capteur rapporte vraiment.
+      # STOP_AT=6.0 date d'une scene dont le sol allait plus loin : sur celle-ci
+      # il ordonnait quatre metres de marche entierement dans les empreintes,
+      # mesure a 100 % de poses en raclage et -0,522 m de clairance. C'etait de
+      # l'obeissance a un ordre impossible, pas un echec de contournement.
+      # Marge en metres avant le bord du sol observe. 0 desactive.
+      PATROL_CLAMP: ${PATROL_CLAMP:-0.6}
+      # Demi-largeur exigee d'un couloir, EN PLUS du robot et de rien d'autre.
+      #
+      # La grille porte DEJA OBSTACLE_MARGIN, applique cellule par cellule par
+      # celui qui l'a construite. Ajouter GAP_CLEAR et un slack par-dessus
+      # demandait 2 x (0,22 + 0,10 + 0,15) = 0,94 m la ou le couloir de 0,90 m
+      # de ce salon n'a plus que 0,90 - 2 x 0,12 = 0,66 m dans la grille. Aucune
+      # voie ne pouvait etre libre, jamais, et le robot rapportait correctement
+      # "no way round" a propos d'un passage qu'un humain traverse.
+      # navigator.py avertit deja de ce piege pour le chemin rectangle ; il a
+      # ete reproduit un fichier plus loin.
+      #
+      # Budget de cette piece : 0,66 m disponibles, 0,44 m de robot, donc 0,11 m
+      # de jeu par cote. C'est etroit et c'est la mesure, pas un choix.
+      #
+      # Mesure en piece FERMEE des deux cotes (une premiere version du banc
+      # n'avait pas de mur a gauche et ne testait donc rien) :
+      #   slack 0,05 -> 17,01 m parcourus, 19,9 % de raclage
+      #   slack 0,08 -> 15,59 m, 17,6 %
+      #   slack 0,11 -> 15,57 m, 0,0 % mais x plafonne a 2,24 m, la table n'est
+      #                 jamais depassee
+      # Deux regimes, pas de compromis trouve a cette heure. 0,08 laisse passer
+      # et reste a verifier sur la vraie scene ; le raclage du modele est un
+      # signal a surveiller, pas un resultat valide.
+      LANE_SLACK: ${LANE_SLACK:-0.08}
+      # Plancher du frein d'elan. Pas zero : un robot qui s'arrete devant un
+      # obstacle dont il s'ecarte encore ne finit jamais de s'en ecarter, la
+      # loi de cross-track ayant besoin d'avancer pour convertir un cap en
+      # deplacement lateral.
+      RUNUP_MIN: ${RUNUP_MIN:-0.25}
       # How much the controller ignores the gait's own sway. Longer is calmer
       # but slower to correct a real drift.
       SMOOTH_TAU: ${SMOOTH_TAU:-0.5}
@@ -232,6 +283,17 @@ services:
       # Detected objects are cut out of the walkable floor with this margin, so
       # the robot neither walks into them nor squeezes past them.
       OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
+      # Idem cote compositor : les grilles sont construites ici et voyagent
+      # sur PATROL_ROI a cote de `blocked`.
+      OBSTACLE_REP: ${OBSTACLE_REP:-grid}
+      # Ferme les fentes plus etroites que le robot. Une seule raison d'exister
+      # et elle est locale : les pieds d'un tabouret se projettent en deux
+      # taches avec du vrai sol entre elles, mais 0,35 m n'est pas un passage
+      # pour un robot de 0,44 m. C'est le seul role legitime que la fusion des
+      # empreintes du navigator remplissait, fait ici ou c'est un fait
+      # morphologique local et non une fusion globale qui reconstruisait la
+      # boite englobante que la decomposition existait pour eviter.
+      GRID_PASSABLE: ${GRID_PASSABLE:-0.44}
       # Borne chaque empreinte par la profondeur MESUREE de l'objet, au lieu de
       # projeter sa silhouette sur le plan du sol. La projection repond "si ce
       # pixel etait au sol, ou serait-il", ce qui fuit vers l'infini pour tout

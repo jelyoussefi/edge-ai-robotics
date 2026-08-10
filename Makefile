@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner suite-compare map-check pick-goals bus-rate web-latency logs ps shell clean distclean
+.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner grid-probe suite-compare map-check pick-goals bus-rate web-latency logs ps shell clean distclean
 default: run
 
 help:
@@ -120,6 +120,26 @@ groundfloor:
 	@# Own profile, so the demo runs without it and this can be added or
 	@# removed without touching the rest of the stack.
 	@$(COMPOSE) --profile suite up --build groundfloor
+
+grid-probe:
+	@$(call msg, Grid navigation against the rectangle one, off the hardware ...)
+	@# No camera, no policy, no renderer: a synthetic room built to this
+	@# lounge's measurements and 60 s of patrol under both representations.
+	@# It measures the DECISION -- whether a lane exists and whether the line
+	@# taken crosses an obstacle's real outline -- which is the part that was
+	@# broken. The distances are a unicycle model and are not the ones the
+	@# real robot walks.
+	@# common/ and services/sim/ mounted too, not just the script. Without
+	@# them the container imports edgebot and navigator from the IMAGE, which
+	@# is whatever was baked at the last build, and the probe measures code
+	@# that is not the code in the repository. Same trap as the footprint
+	@# computed twice, in another place.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/common:ro \
+		-v $(PWD)/services/sim:/navsrc:ro \
+		-e PYTHONPATH=/common:/navsrc \
+		sim /scripts/grid_probe.py $(ARGS)
 
 suite-compare:
 	@$(call msg, Comparing the two floor pipelines ...)

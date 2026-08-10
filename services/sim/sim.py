@@ -165,6 +165,10 @@ class Sim:
                     roi = roi[::-1]
                 self.nav.set_floor(roi, payload.get("blocked"),
                                    payload.get("blocked_inst"))
+                # Cells travel on the same message as the rectangles, so the
+                # two can never describe different instants. The navigator
+                # decides which it steers on.
+                self.nav.set_grid(payload)
                 continue
 
             if topic == topics.SUITE_CLUSTERS:

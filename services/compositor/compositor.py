@@ -34,10 +34,11 @@ import numpy as np
 from OpenGL import GL
 from edgebot import topics
 from edgebot.camera import stream_mode, stream_name
-from edgebot.floor import (box_footprints, clear_of_boxes, clip_footprints,
-                           mask_footprints_xy,
-                           mask_footprints, polygon_from_mask, shrink,
-                           straighten)
+from edgebot.floor import (GRID_BOUNDS, GRID_CELL, box_footprints,
+                           clear_of_boxes, clip_footprints, grid_extent,
+                           grid_shape, mask_footprints_xy,
+                           mask_footprints, pack_grid, points_to_grid,
+                           polygon_from_mask, shrink, straighten)
 from edgebot.bus import Publisher, Subscriber
 
 
@@ -1981,6 +1982,48 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
     return fb, "boxes", list(range(len(fb)))
 
 
+# Cells rather than rectangles. See the block comment in edgebot/floor.py: a
+# box around a concave object claims the floor it surrounds, and no number of
+# boxes removes that on a depth-ragged outline.
+OBSTACLE_REP = os.environ.get("OBSTACLE_REP", "grid").strip().lower()
+GRID_PASSABLE = float(os.environ.get("GRID_PASSABLE", "0.44"))
+
+
+def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
+    """(occupied, floor) ground grids, or (None, None) when unavailable.
+
+    Two grids and not one, because unknown and blocked are different things.
+    The occupied grid says where an object stands; the floor grid says where
+    the sensor actually saw floor. A navigator that treats everything outside
+    the floor grid as blocked cannot leave the observed band, which is how the
+    walkable floor came out 0.31 m deep while the height map showed real floor
+    to 3.4 m. Only the occupied grid stops the robot.
+    """
+    if seg_mask is None or time.time() - seg_mask_t >= 2.0:
+        return None, None
+    dh_, dw_ = depth_metres.shape
+    sm = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
+                    interpolation=cv2.INTER_NEAREST).astype(bool)
+    # Objects by their OWN measured depth, floor by the ground plane. The plane
+    # is only true for pixels that lie on it: used on an object it answers
+    # "where would this pixel be if it were floor", which runs away from the
+    # camera without bound as the pixel rises towards the horizon.
+    f, l, _ = floor_det.deproject(depth_metres)
+    valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
+             & np.isfinite(f) & np.isfinite(l))
+    occ = points_to_grid(f, l, sm & valid, GRID_CELL, GRID_BOUNDS,
+                         margin=OBSTACLE_MARGIN, passable=GRID_PASSABLE)
+    flr = None
+    if floor_mask is not None and floor_mask.any():
+        ys, xs = np.nonzero(floor_mask)
+        ff, ll = floor_det.project_many(xs.astype(np.float64),
+                                        ys.astype(np.float64), dw_, dh_)
+        flr = points_to_grid(ff, ll, np.isfinite(ff) & np.isfinite(ll),
+                             GRID_CELL, GRID_BOUNDS)
+        flr &= ~occ
+    return occ, flr
+
+
 def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                         detections, roi_cached, obstacle_boxes,
                         seg_mask=None, seg_mask_t=0.0):
@@ -2048,6 +2091,29 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # rather than perception (where the floor IS). Costs one extra
             # findContours, and only when the polygon is rebuilt.
             _publish_free_floor.raw_poly = polygon_from_mask(_raw_mask, _tw) or []
+            # Cells, built from the same masks the polygon comes from. Cached
+            # on the function beside raw_poly: the floor is only rebuilt when
+            # the scene changes, and recomputing them on every publication is
+            # exactly how the two footprint implementations drifted apart.
+            try:
+                _occ, _flr = _ground_grids(seg_mask, seg_mask_t, det,
+                                           depth_metres, _raw_mask)
+                _publish_free_floor.occ_grid = _occ
+                _publish_free_floor.flr_grid = _flr
+                if _occ is not None:
+                    _oe = grid_extent(_occ)
+                    _fe = grid_extent(_flr) if _flr is not None else None
+                    log.info("ground grid: %d occupied cell(s) over %s, "
+                             "%d floor cell(s) over %s, %.2f m cell",
+                             int(_occ.sum()),
+                             "%.1f-%.1f x %.1f-%.1f m" % _oe if _oe else "none",
+                             int(_flr.sum()) if _flr is not None else 0,
+                             "%.1f-%.1f x %.1f-%.1f m" % _fe if _fe else "none",
+                             GRID_CELL)
+            except Exception as _exc:            # never lose the polygon path
+                log.warning("ground grid unavailable: %s", _exc)
+                _publish_free_floor.occ_grid = None
+                _publish_free_floor.flr_grid = None
             poly = polygon_from_mask(mask, _tw)
             if poly:
                 _m = float(os.environ.get("ROI_MARGIN", "0.25"))
@@ -2097,8 +2163,23 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                     _pairs.append((_cb[0], _iid))
             blocked = [p_[0] for p_ in _pairs]
             _inst_pub = [p_[1] for p_ in _pairs]
+            # The grids ride ALONGSIDE the rectangles rather than replacing
+            # them. Everything else on this topic -- the suite bridges, the
+            # comparison scripts, the overlay -- reads `blocked`, and a
+            # navigator that changes representation must still be comparable
+            # against the one that did not. OBSTACLE_REP picks which the
+            # navigator steers on; both are always published.
+            _og = getattr(_publish_free_floor, "occ_grid", None)
+            _fg = getattr(_publish_free_floor, "flr_grid", None)
+            _grid_msg = {}
+            if _og is not None:
+                _nx, _ny = grid_shape()
+                _grid_msg = {"occ": pack_grid(_og),
+                             "flr": pack_grid(_fg) if _fg is not None else b"",
+                             "gnx": _nx, "gny": _ny, "gcell": GRID_CELL,
+                             "gbounds": list(GRID_BOUNDS)}
             pub.send(topics.PATROL_ROI,
-                     {"roi": roi_cached, "blocked": blocked,
+                     {**_grid_msg, "roi": roi_cached, "blocked": blocked,
                       # Which detected object each rectangle belongs to.
                       # `blocked` stays a list of 4-tuples; the ids travel
                       # BESIDE it so the navigator can refuse to merge the
@@ -2127,6 +2208,8 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
 # every second. An attribute on the function rather than a global: it belongs to
 # this one caller and nothing else should reach it.
 _publish_free_floor.last_blocked = None
+_publish_free_floor.occ_grid = None
+_publish_free_floor.flr_grid = None
 
 
 def _write_diagnostics(frames, gpu, out, data, model, scn, cam, mjr,
