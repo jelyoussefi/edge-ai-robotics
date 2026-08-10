@@ -18,6 +18,7 @@ Exit status is 1 when nothing is detected, so it can be used as a smoke test.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -146,34 +147,78 @@ class _BusFrame:
         self.intrinsics = {"hfov_deg": hfov}
 
 
-def _write_mask(det, dets, shape, keep, path) -> None:
-    """Write the silhouette mask, for the calibration to subtract from the floor.
+class MaskAccumulator:
+    """Union of the detector's silhouettes over several frames.
 
-    `det.mask` is the union of every silhouette this pass produced. When a class
-    filter is given the mask has to be rebuilt from the per-detection boxes,
-    because the union has already lost which pixel came from which object -- so
-    the filtered form is a box mask, coarser than the silhouette, and says so.
+    CONTOURS ONLY. The bounding box is never used, and that is the whole point:
+    measured on this scene the couch box is 546x294 px while its silhouette is
+    6.7 % of the frame -- mask/box = 38.5 %, so the rectangle is 61.5 % empty
+    and it swallows the coffee table almost entirely (99.3 % of the table's box
+    in x, 100 % in y). The two silhouettes do not touch. Subtracting boxes would
+    therefore remove the table's floor as well as the couch's, and remove a
+    great deal of real floor besides.
+
+    Accumulated over frames because the camera is fixed and weak detections
+    flicker: the dining table is present in roughly a quarter of frames, so one
+    pass is a coin toss. The union of N passes is not.
     """
-    h, w = shape[:2]
-    full = getattr(det, "mask", None)
-    if not keep and full is not None:
-        m = full.astype(np.uint8) * 255
-        kind = "silhouettes"
-    else:
-        m = np.zeros((h, w), np.uint8)
-        for d in dets:
+
+    def __init__(self, shape) -> None:
+        self.h, self.w = shape[:2]
+        self.union = np.zeros((self.h, self.w), bool)
+        self.per_class: dict[int, np.ndarray] = {}
+        self.scores: dict[int, list] = {}
+        self.frames = 0
+
+    def add(self, det, dets, keep) -> None:
+        self.frames += 1
+        masks = getattr(det, "det_masks", None) or []
+        for k, d in enumerate(dets):
             if keep and d.class_id not in keep:
                 continue
-            x0 = max(0, int((d.cx - d.w / 2) * w))
-            x1 = min(w, int((d.cx + d.w / 2) * w))
-            y0 = max(0, int((d.cy - d.h / 2) * h))
-            y1 = min(h, int((d.cy + d.h / 2) * h))
-            m[y0:y1, x0:x1] = 255
-        kind = "boxes (a class filter was given)"
-    if m.shape[:2] != (h, w):
-        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-    cv2.imwrite(path, m)
-    print(f"  wrote {path}: {kind}, {100.0 * (m > 0).mean():.1f} % of the frame")
+            m = masks[k] if k < len(masks) else None
+            if m is None:                     # no prototype for this detection
+                continue
+            if m.shape != (self.h, self.w):
+                m = cv2.resize(m.astype(np.uint8), (self.w, self.h),
+                               interpolation=cv2.INTER_NEAREST).astype(bool)
+            self.union |= m
+            prev = self.per_class.get(d.class_id)
+            self.per_class[d.class_id] = m if prev is None else (prev | m)
+            self.scores.setdefault(d.class_id, []).append(float(d.score))
+
+    def write(self, path, classes_prefix="", manifest_path="") -> None:
+        cv2.imwrite(path, self.union.astype(np.uint8) * 255)
+        print(f"  wrote {path}: contours over {self.frames} frame(s), "
+              f"{100.0 * self.union.mean():.2f} % of the frame")
+        rows = []
+        for cid in sorted(self.per_class):
+            m = self.per_class[cid]
+            sc = sorted(self.scores[cid])
+            name = COCO[cid] if 0 <= cid < len(COCO) else str(cid)
+            rows.append({"class_id": int(cid), "name": name,
+                         "detections": len(sc), "frames": self.frames,
+                         "score_min": round(sc[0], 3),
+                         "score_med": round(sc[len(sc) // 2], 3),
+                         "score_max": round(sc[-1], 3),
+                         "mask_px": int(m.sum()),
+                         "mask_pct": round(100.0 * m.mean(), 3)})
+            # detections, not frames: several books can appear in one frame,
+            # so this count can legitimately exceed the frame count.
+            print(f"    {name:14s} id {cid:2d}  {len(sc):3d} det over "
+                  f"{self.frames} frames  "
+                  f"score {sc[0]:.2f}/{sc[len(sc) // 2]:.2f}/{sc[-1]:.2f} "
+                  f"(min/med/max)  mask {100.0 * m.mean():5.2f} % of frame")
+            if classes_prefix:
+                cv2.imwrite(f"{classes_prefix}-{cid:02d}.png",
+                            m.astype(np.uint8) * 255)
+        if manifest_path:
+            with open(manifest_path, "w") as fh:
+                json.dump({"frames": self.frames,
+                           "union_px": int(self.union.sum()),
+                           "union_pct": round(100.0 * self.union.mean(), 3),
+                           "classes": rows}, fh, indent=1)
+            print(f"  wrote {manifest_path}")
 
 
 def main() -> int:
@@ -187,9 +232,19 @@ def main() -> int:
     ap.add_argument("--out", default="/data/seg_test", help="output prefix")
     ap.add_argument("--conf", type=float, default=0.35)
     ap.add_argument("--mask-out", default="", dest="mask_out",
-                    help="write the silhouette mask here as an 8-bit PNG, "
-                         "for `make calibrate CALIB_YOLO_MASK=1` to subtract "
-                         "from the floor")
+                    help="write the union of the silhouette CONTOURS here as an "
+                         "8-bit PNG, for `make calibrate` to subtract from the "
+                         "floor. Never a bounding box.")
+    ap.add_argument("--mask-classes-out", default="", dest="mask_classes_out",
+                    help="prefix for one PNG per class, used to attribute floor "
+                         "pixels to a particular object")
+    ap.add_argument("--manifest", default="",
+                    help="write the per-class report as JSON here")
+    ap.add_argument("--images", default="",
+                    help="glob of frames to accumulate over, e.g. "
+                         "/data/calib-frame-*.png. The camera is fixed, so the "
+                         "union of several passes catches flickering objects "
+                         "that a single frame misses.")
     ap.add_argument("--classes", default="",
                     help="comma-separated COCO class ids to keep in the mask; "
                          "empty means every detection")
@@ -202,12 +257,23 @@ def main() -> int:
     if not os.path.exists(args.model):
         print(f"  {args.model} is missing. Fetch it with: make build")
         return 1
-    det = Detector(args.model, args.device, conf=args.conf)
+    det = Detector(args.model, args.device, conf=args.conf,
+                   keep_masks=bool(args.mask_out))
     if getattr(det, "proto_port", None) is None:
         print("  this model has no mask prototypes: it is a detector, not -seg")
 
     frames = []
-    if args.image:
+    if args.images:
+        import glob as _glob
+        for path in sorted(_glob.glob(args.images)):
+            img = cv2.imread(path)
+            if img is not None:
+                frames.append(_BusFrame(img, None, 0.001))
+        if not frames:
+            print(f"  no frames matched {args.images}")
+            return 1
+        print(f"  {len(frames)} frame(s) matched {args.images}")
+    elif args.image:
         img = cv2.imread(args.image)
         if img is None:
             print(f"  cannot read {args.image}")
@@ -225,17 +291,21 @@ def main() -> int:
             return 1
 
     keep = {int(c) for c in args.classes.split(",") if c.strip()}
+    acc = MaskAccumulator(frames[0].color.shape) if args.mask_out else None
     found = 0
     for i, f in enumerate(frames):
         dets = det.infer(f)
         found += len(dets)
+        if acc is not None:
+            acc.add(det, dets, keep)
         print(f"frame {i + 1}/{len(frames)}:")
         report(dets, getattr(det, "mask", None), f.color.shape)
         path = f"{args.out}_{i:02d}.png"
         cv2.imwrite(path, annotate(f.color, dets, getattr(det, "mask", None)))
         print(f"  wrote {path}")
-        if args.mask_out:
-            _write_mask(det, dets, f.color.shape, keep, args.mask_out)
+
+    if acc is not None:
+        acc.write(args.mask_out, args.mask_classes_out, args.manifest)
 
     return 0 if found else 1
 

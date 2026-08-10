@@ -127,73 +127,108 @@ au mauvais endroit, recalibre d'abord (`make calibrate HEIGHT=...`).
 Les zones sans mesure de profondeur (trous, 0) sont traitées comme
 infiniment loin, donc elles ne masquent jamais le robot par erreur.
 
-## Assist YOLO : retirer les meubles du masque de sol (optionnel)
+## Le masque de sol : hauteur ET pas-un-objet
 
-`make calibrate CALIB_YOLO_MASK=1` fait tourner **le detecteur de perception**
-une fois sur la scene et retranche ses silhouettes du sol detecte
-automatiquement, pour que le rouge ne deborde pas sur les meubles.
+`make calibrate` combine desormais **deux** methodes au lieu d'en choisir une.
+Un pixel est **sol** quand il passe le seuil de hauteur **ET** qu'il n'est
+dans aucune silhouette detectee par YOLO11m-seg.
 
-**Par defaut desactive.** Sans la variable, le chemin par seuil de hauteur est
-exactement celui d'avant.
+C'est la logique d'intersection de l'etape C, appliquee au calibrage :
+**geometrie ∩ semantique**. Chacune rattrape la faiblesse de l'autre.
 
-### Trois etapes, et pourquoi
+- La **hauteur propose** le sol et attrape ce qui n'a pas de classe COCO :
+  pieds de tabouret fins, le mat.
+- **YOLO retranche** ce qu'il reconnait, par sa **forme reelle**. Il ne peut
+  qu'**enlever** du sol, jamais en ajouter : il n'a pas de classe « sol ».
 
-Aucune image ne peut faire les trois travaux : seul `source` a le droit d'ouvrir
-la camera, seul `perception` embarque OpenVINO et le modele, et l'interface de
-calibrage doit etre du cote camera. L'image est donc passee en fichier plutot
-que de faire grossir une image des dependances de l'autre.
+`CALIB_YOLO_MASK=0` revient au seuil de hauteur seul. Le mode combine est le
+defaut parce qu'il mesure mieux, plus bas.
 
-```
-source      calibrate.py --dump-frame /data/calib-frame.png
-perception  seg_test.py --image ... --mask-out /data/calib-furniture.png
-source      calibrate.py --height H --furniture-mask /data/calib-furniture.png
-```
+### Contours, jamais les boites
 
-**Ce n'est pas un second chemin d'inference.** `seg_test.py` construit le meme
-`Detector` sur les memes poids que le service `perception` ; on lui a seulement
-ajoute une sortie.
+Mesure sur cette scene : boite du canape 546x294 px, silhouette 7,47 % de
+l'image, soit **mask/box ≈ 38 %** -- le rectangle est aux deux tiers vide et il
+avale la table basse presque entierement. Les deux **contours**, eux, ne se
+touchent pas. Retrancher des boites enleverait donc le sol de la table en meme
+temps que celui du canape, et beaucoup de sol reel avec.
 
-### Ce que ca ne change pas
+Le fallback « boites » qu'une premiere version utilisait quand un filtre de
+classes etait donne a ete supprime : `seg_test.py` filtre maintenant les
+**silhouettes par detection**, via `Detector(keep_masks=True)`, un drapeau
+additif qui ne change rien au service temps reel.
 
-La hauteur et l'inclinaison viennent toujours de la saisie et de l'IMU. Le
-masque YOLO s'applique **a la couche automatique uniquement** :
+### Seuil de confiance propre au calibrage
 
-```python
-auto = auto & ~furniture
-mask = (auto | ui.add) & ~ui.rem
-```
+`CALIB_YOLO_CONF`, defaut **0,10**, bien en dessous du seuil d'execution.
+L'asymetrie le justifie : ici un faux positif ne fait qu'enlever du sol, et se
+repare d'un FILL manuel, tandis qu'un faux negatif laisse un meuble declare
+praticable. Mesure : la table basse sort a **0,11 / 0,15 / 0,20**
+(min/med/max) -- elle serait perdue au seuil d'execution.
 
-FILL rajoute donc toujours ce que le modele ne sait pas nommer -- pieds de
-tabouret fins, le mat -- et ERASE l'emporte toujours sur les deux. Le modele
-assiste la supposition automatique, il ne commande pas a l'operateur.
+### Union sur plusieurs trames
 
-### Mesure : le gain est reel mais modeste
+`CALIB_YOLO_FRAMES`, defaut **15**. La camera est fixe, les detections faibles
+clignotent. Une passe unique avait une chance sur quatre d'attraper la table ;
+sur 15 trames unies elle est vue **15 fois sur 15**.
 
-Une image de ce salon, 1280x720, `floor_h_tol` 0,08 m :
+### Mesure
+
+Une scene de salon, 1280x720, `floor_h_tol` 0,08 m, 15 trames, conf 0,10 :
 
 | | pixels | % de l'image |
 |---|---|---|
-| sol automatique **avant** | 255 710 | 27,75 % |
-| masque meubles (canape) | 66 944 | 7,26 % |
-| sol automatique **apres** | 251 158 | 27,25 % |
-| **retire** | **4 552** | **1,78 % du sol auto** |
+| sol **avant** (hauteur seule) | 186 748 | **20,26 %** |
+| union YOLO (contours) | 105 152 | 11,41 % |
+| sol **apres** (hauteur ∩ pas-objet) | 179 121 | **19,44 %** |
+| **retire par YOLO** | **7 627** | **4,08 % du sol hauteur-seule** |
 
-**Seuls 6,8 % du masque meubles recouvraient du sol.** La porte de hauteur
-faisait deja l'essentiel du travail : un canape de 40 cm echoue au test
-`|hauteur| < 8 cm` bien avant que YOLO n'intervienne. Ce que l'assist retire,
-c'est la **frange** -- la jonction meuble/sol, et les pixels de meuble que le
-bruit de profondeur ramene a hauteur de sol. C'est justement la frange qu'il
-fallait gommer a la main, mais il ne faut pas en attendre un masque neuf.
+Ce que le seuil de hauteur **seul** declarait sol a l'interieur de chaque objet :
 
-### La limite, mesuree
+| classe | px sol | part de sa silhouette | conf. med | vue |
+|---|---|---|---|---|
+| **dining_table** | **7 018** | **25,4 %** | 0,147 | 15/15 trames |
+| couch | 707 | 1,0 % | 0,917 | 15/15 |
+| chair | 226 | 10,7 % | 0,115 | 3/15 |
+| laptop | 0 | 0,0 % | 0,101 | 1/15 |
+| book | 0 | 0,0 % | 0,130 | 36 det. |
 
-L'assist tourne **une fois, sur une image**. Or la table basse n'est detectee
-que dans **25 % des trames** (classe 60, score median 0,28) : une passe unique a
-donc une chance sur quatre de l'attraper. Sur l'image mesuree ici elle n'y etait
-pas, meme en descendant `--conf` a 0,22 -- ce n'est pas un probleme de seuil,
-elle n'etait pas detectee dans cette trame-la.
+**Un quart de la table basse etait declare sol praticable.** Le canape, lui,
+n'en avait que 1 % : 40 cm de haut echouent au test `|hauteur| < 8 cm` tout
+seuls. L'apport est donc concentre sur l'objet **bas** -- la table represente
+7 018 des 7 627 pixels retires, soit 92 % du gain -- ce qui est exactement
+l'argument : le seuil de hauteur se trompe sur les objets bas, la semantique
+non.
 
-Pour les objets intermittents il faudrait unir les masques de plusieurs trames.
-Ce n'est pas fait : la demande etait « une fois sur la trame ». Le changement
-serait d'ecrire N images et d'unir leurs masques.
+![avant / masque / apres](images/calib-yolo-floor.png)
 
+A gauche le rouge deborde sur le plateau de la table ; a droite il n'y est plus.
+
+FILL et ERASE manuels restent disponibles pour le residu, et le masque
+s'applique a la couche **automatique** seulement :
+
+```python
+auto = auto & ~furniture          # semantique
+mask = (auto | ui.add) & ~ui.rem  # l'operateur a le dernier mot
+```
+
+### Ceci est le masque de CALIBRAGE
+
+Distinct du correctif contour-vs-boite du compositeur en temps reel. Les deux
+chemins restent separes : celui-ci tourne une fois, hors ligne, sur une camera
+immobile, et peut se permettre 15 trames et un seuil de 0,10 ; l'autre tourne
+a 30 Hz.
+
+### Trois etapes, et pourquoi
+
+Aucune image ne peut faire les trois travaux : seul `source` a le droit
+d'ouvrir la camera, seul `perception` embarque OpenVINO et le modele, et
+l'interface de calibrage doit etre du cote camera.
+
+```
+source      calibrate.py --dump-frame /data/calib-frame.png --dump-count 15
+perception  seg_test.py --images '/data/calib-frame-*.png' --mask-out ...
+source      calibrate.py --height H --furniture-mask /data/calib-furniture.png
+```
+
+**Ce n'est pas un second chemin d'inference** : `seg_test.py` construit le meme
+`Detector` sur les memes poids que le service `perception`.

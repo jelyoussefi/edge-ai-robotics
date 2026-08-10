@@ -870,8 +870,13 @@ def main() -> None:
     ap.add_argument("--no-preview", action="store_true",
                     help="ne pas afficher la vérification visuelle du sol")
     ap.add_argument("--dump-frame", default="",
-                    help="écrire une image couleur ici puis sortir, pour que "
-                         "le détecteur tourne dessus dans SON image à lui")
+                    help="écrire des images couleur ici puis sortir, pour que "
+                         "le détecteur tourne dessus dans SON image à lui. "
+                         "Le nom reçoit un suffixe -NN par trame.")
+    ap.add_argument("--dump-count", type=int, default=1,
+                    help="nombre de trames à écrire. La caméra est fixe, donc "
+                         "l'union de plusieurs passes rattrape les détections "
+                         "faibles qui clignotent")
     ap.add_argument("--furniture-mask", default="",
                     help="masque de meubles (PNG 8 bits) à retrancher du sol "
                          "détecté automatiquement")
@@ -889,15 +894,19 @@ def main() -> None:
         _cfg.enable_stream(rs.stream.color, _w, _h, rs.format.bgr8, _fps)
         _pipe = rs.pipeline()
         _pipe.start(_cfg)
+        _base, _ext = os.path.splitext(args.dump_frame)
+        os.makedirs(os.path.dirname(args.dump_frame) or ".", exist_ok=True)
         try:
             for _ in range(15):          # let auto-exposure settle
+                _pipe.wait_for_frames()
+            for _k in range(max(1, args.dump_count)):
                 _fr = _pipe.wait_for_frames()
-            _img = np.asanyarray(_fr.get_color_frame().get_data())
+                _img = np.asanyarray(_fr.get_color_frame().get_data())
+                cv2.imwrite(f"{_base}-{_k:02d}{_ext}", _img)
         finally:
             _pipe.stop()
-        os.makedirs(os.path.dirname(args.dump_frame) or ".", exist_ok=True)
-        cv2.imwrite(args.dump_frame, _img)
-        print(f"image écrite : {args.dump_frame} ({_img.shape[1]}x{_img.shape[0]})")
+        print(f"{max(1, args.dump_count)} image(s) écrite(s) : "
+              f"{_base}-NN{_ext} ({_img.shape[1]}x{_img.shape[0]})")
         return
 
     print("Lecture des intrinsèques (FOV) depuis le SDK ...")

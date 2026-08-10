@@ -60,7 +60,8 @@ class Obstacle:
 class Detector:
     """One detector. Runs YOLO on the color image, samples depth per box."""
 
-    def __init__(self, model_path: str, device: str, conf: float = 0.4, nms: float = 0.45) -> None:
+    def __init__(self, model_path: str, device: str, conf: float = 0.4,
+                 nms: float = 0.45, keep_masks: bool = False) -> None:
         self.conf = conf
         self.nms = nms
 
@@ -93,6 +94,12 @@ class Detector:
                      "instead of boxes", self.nm)
         _, _, self.net_h, self.net_w = self.input_port.shape
         self.device = device
+        # Per-detection silhouettes, off by default. The runtime only needs the
+        # union and a list of boolean images per frame would be pure cost; the
+        # calibration assist needs them to attribute floor pixels to the couch
+        # rather than to the table. Nothing changes when this is False.
+        self.keep_masks = keep_masks
+        self.det_masks: list | None = None
         log.info("%s compiled for %s, input %dx%d", model_path, device, self.net_w, self.net_h)
 
     def _letterbox(self, frame: np.ndarray) -> tuple[np.ndarray, float, int, int]:
@@ -165,8 +172,12 @@ class Detector:
         inner = big[max(0, iy1):max(iy1 + 1, iy2), max(0, ix1):max(ix1 + 1, ix2)]
         if inner.size == 0:
             return
-        self.mask |= cv2.resize(inner, (fw, fh),
-                                interpolation=cv2.INTER_NEAREST).astype(bool)
+        painted = cv2.resize(inner, (fw, fh),
+                             interpolation=cv2.INTER_NEAREST).astype(bool)
+        self.mask |= painted
+        if self.keep_masks and self.det_masks is not None:
+            self.det_masks.append(painted)
+        return painted
 
     def infer(self, frame) -> list[Obstacle]:
         """frame carries colour and optional depth. Uses frame.color for detection and
@@ -228,6 +239,7 @@ class Detector:
         # than a list of them.
         self.mask = (np.zeros((frame_h, frame_w), bool)
                      if protos is not None else None)
+        self.det_masks = [] if self.keep_masks else None
 
         results: list[Obstacle] = []
         for i in np.asarray(idx).reshape(-1):
@@ -238,9 +250,14 @@ class Detector:
             cx_norm = ((x1 + x2) / 2) / frame_w
             bearing = (cx_norm - 0.5) * hfov  # + right, - left
 
+            _painted = None
             if protos is not None and x2 > x1 and y2 > y1:
-                self._add_mask(protos, coeffs[i], (x1, y1, x2, y2),
-                               scale, pad_x, pad_y, frame_w, frame_h)
+                _painted = self._add_mask(protos, coeffs[i], (x1, y1, x2, y2),
+                                          scale, pad_x, pad_y, frame_w, frame_h)
+            if self.keep_masks and self.det_masks is not None and _painted is None:
+                # Index alignment with `results` matters more than compactness:
+                # the caller pairs mask[k] with obstacle[k].
+                self.det_masks.append(None)
 
             if frame.has_depth:
                 rng = self._sample_depth(frame.depth, frame.depth_scale, x1, y1, x2, y2)
