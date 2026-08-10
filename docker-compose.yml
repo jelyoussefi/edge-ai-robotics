@@ -144,6 +144,10 @@ services:
       # frottements, le meilleur pire cas, et le plus grand ecart lateral,
       # c'est-a-dire le contournement le plus franc.
       GAP_CLEAR: ${GAP_CLEAR:-0.10}
+      # Note sur 0,55, propose une fois : GAP_CLEAR n'est PAS la largeur
+      # minimale d'un passage. need = 2 x (0,22 + GAP_CLEAR), donc 0,55 donne
+      # 1,54 m -- verifie dans le journal -- et fermerait tout. Pour qu'un
+      # couloir libre de L metres reste ouvert il faut GAP_CLEAR <= L/2 - 0,22.
       OBSTACLE_CLEAR: ${OBSTACLE_CLEAR:-0.45}
       OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
       DETOUR_MAX: ${DETOUR_MAX:-1.8}
@@ -225,7 +229,7 @@ services:
       ROI_MARGIN: ${ROI_MARGIN:-0.25}
       # Detected objects are cut out of the walkable floor with this margin, so
       # the robot neither walks into them nor squeezes past them.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
       # Periode de republication du sol praticable et des empreintes.
       ROI_PERIOD: ${ROI_PERIOD:-1.0}
       # Mur du fond mesure a 6,2 m. La projection au sol ne sait pas ou la
@@ -412,7 +416,7 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le reste du projet, sans quoi les
       # empreintes des deux cotes ne seraient pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       # Publie la profondeur en RELIABLE. FastMapping s'abonne avec un
       # rclcpp::QoS(10) nu, donc RELIABLE, et n'expose AUCUN parametre pour en
@@ -475,7 +479,7 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
       # Doit valoir la meme chose que pour le compositeur et groundfloor, sans
       # quoi les trois jeux d'empreintes ne sont pas comparables.
-      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.15}
+      OBSTACLE_MARGIN: ${OBSTACLE_MARGIN:-0.12}
       GF_SENSOR_NAME: ${GF_SENSOR_NAME:-camera}
       GF_Z_MIN: ${GF_Z_MIN:--0.3}
       GF_X_MAX: ${GF_X_MAX:-8.0}

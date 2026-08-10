@@ -42,7 +42,7 @@ from edgebot.pointcloud import clip_xy                        # noqa: E402
 
 # Identical to the compositor's and the groundfloor bridge's, or the three
 # footprint sets are not comparable.
-MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.15"))
+MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
 # Same impossible-return guards as the groundfloor bridge, applied to cluster
 # centres here rather than to points.
 Z_MIN = float(os.environ.get("GF_Z_MIN", "-0.3"))

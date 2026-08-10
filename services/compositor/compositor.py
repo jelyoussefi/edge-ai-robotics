@@ -1343,7 +1343,7 @@ def _warn_if_calibration_stale() -> None:
               round(CAM_REF_W), round(CAM_REF_H), stream_name(), sw, sh)
 
 # Margin left around every detected object, in metres of real floor.
-OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.15"))
+OBSTACLE_MARGIN = float(os.environ.get("OBSTACLE_MARGIN", "0.12"))
 # Far wall of this room, measured at 6.2 m. Footprints are truncated here for
 # the reason clip_footprints() gives: the ground-plane projection has no notion
 # of where the room ends, and one stray mask column stretched a published
@@ -1965,7 +1965,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             if not _boxes:
                 _boxes = box_footprints(
                     detections, _tw, dw_, dh_,
-                    float(os.environ.get("OBSTACLE_MARGIN", "0.15")),
+                    float(os.environ.get("OBSTACLE_MARGIN", "0.12")),
                     float(os.environ.get("OBSTACLE_CONF", "0.45")))
             _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, OBSTACLE_MARGIN)
             if _boxes:

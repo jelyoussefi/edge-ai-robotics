@@ -576,3 +576,61 @@ emprise reelle. Les pistes non essayees restent celles du §8, plus une nouvelle
 borner une empreinte par la profondeur mesuree de l'objet plutot que par
 l'enveloppe de sa silhouette projetee.
 
+## 10. Le couloir de 0,9 m : ce n'est pas une question de marges
+
+Mesure physique rapportee : 0,9 m de passage de chaque cote de la table basse.
+Reglage demande : `OBSTACLE_MARGIN=0.12`, `GAP_CLEAR=0.55`.
+
+### Deux corrections avant la mesure
+
+`GAP_CLEAR=0.55` **fermerait tout** : `need = 2 x (0,22 + 0,55) = 1,54 m`,
+verifie dans le journal. Pour qu'un couloir libre de L metres reste ouvert il
+faut `GAP_CLEAR <= L/2 - 0,22`. Et `OBSTACLE_MARGIN` valait deja 0,15 depuis le
+§9, pas 0,20.
+
+Le couloir mesure par la profondeur ne fait pas 0,9 m non plus. A x = 3,07 m le
+plateau de la table (55 cm de haut) s'etend de y = -0,53 a y = +0,82, soit
+**1,35 m de large**, et laisse **~0,45 m** libres cote -y et **~0,6 m** cote +y.
+Le metre ruban mesure probablement au ras du sol entre les pieds ; la
+profondeur voit le plateau, qui deborde. C'est le plateau qui compte : le robot
+ne passe pas sous 55 cm.
+
+### Le couloir est reel, et il est a l'interieur d'une seule empreinte
+
+Au point (3,07 ; -0,90), en plein milieu du couloir cote -y :
+
+| | |
+|---|---|
+| hauteur mediane au-dessus du sol | **-1,8 cm** |
+| points passant la porte de sol | **95,9 %** |
+| dans le polygone du sol brut | **oui** |
+| dans le polygone praticable | **non** |
+| couvert par une empreinte | **oui** : `x 2,23..6,05  y -2,27..1,18` |
+
+**Une seule empreinte de 3,8 x 3,4 m couvre la table, les deux couloirs et le
+canape.** `GAP_CLEAR` est un seuil de FUSION entre rectangles distincts : ici il
+n'y a pas deux rectangles separes par un intervalle, il y en a un seul. Aucun
+reglage de `GAP_CLEAR` n'ouvre un couloir situe *a l'interieur* d'un rectangle,
+et baisser `OBSTACLE_MARGIN` ne fait que reculer son bord exterieur de 3 cm.
+
+### Ce que le reglage a quand meme apporte
+
+`OBSTACLE_MARGIN=0.12` avec `GAP_CLEAR=0.10`, 60 s :
+
+| | §9 (marge 0,15) | ici (marge 0,12) |
+|---|---|---|
+| frottements | 3,4 % | **0 %** |
+| degagement minimal | -0,286 m | **+0,268 m** |
+| degagement median | +0,431 m | +1,242 m |
+| parcours | 2,34 m | 0,99 m |
+| boite du sol praticable | x 1,77..3,05 | x 1,77..1,99 |
+
+La securite est acquise : zero frottement, 0,268 m au plus pres, au-dessus des
+0,20 m demandes. **Le contournement, non** : le robot ne s'approche jamais de la
+table, le sol praticable s'arretant a x = 1,99 m. Marges retenues quand meme,
+elles sont strictement meilleures sur la securite.
+
+**Le blocage reste l'empreinte unique surdimensionnee, c'est-a-dire l'option 2
+du §9 -- qui n'est pas commencee.** Tant qu'une silhouette produit un seul
+rectangle englobant, la piece est murée quelles que soient les marges.
+
