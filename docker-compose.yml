@@ -78,8 +78,6 @@ services:
       # Starting value only: the sim measures how far each turn actually sweeps
       # and converges the lane onto it within a lap or two.
       LANE: ${LANE:-0.39}
-      # How close a corner has to be before the robot turns onto the next edge.
-      CORNER_R: ${CORNER_R:-0.5}
       # Une empreinte doit apparaitre dans les CONFIRM_MIN dernieres mises a
       # jour sur CONFIRM_OF avant que le robot n'y reagisse. Les detections
       # clignotent, et reagir a une seule trame le faisait fuir un obstacle
@@ -121,11 +119,7 @@ services:
       SUITE_X_MAX: ${SUITE_X_MAX:-6.5}
       SUITE_Y_MIN: ${SUITE_Y_MIN:--2.6}
       SUITE_Y_MAX: ${SUITE_Y_MAX:-1.5}
-      # Step 5: go around what YOLO sees. The lane is shifted sideways rather
-      # than the robot stopping, so avoiding is the same motion as lane keeping.
-      # "axis" paces the optical axis; "perimeter" follows the floor's boundary.
-      PATROL_MODE: ${PATROL_MODE:-axis}
-      OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
+      # Demi-largeur du robot aux epaules. Le G1 fait ~0,45 m, donc 0,22.
       ROBOT_HALF_WIDTH: ${ROBOT_HALF_WIDTH:-0.22}
       # ATTENTION : le seuil de fusion effectif n'est PAS la valeur ci-dessous.
       # Il vaut  need = 2 x (ROBOT_HALF_WIDTH + GAP_CLEAR)  = 2 x (0,22 + 0,10)
@@ -318,7 +312,6 @@ services:
       # piece s'arrete : une colonne de masque egaree a produit une empreinte
       # publiee jusqu'a 11,12 m. Meme garde que GF_X_MAX cote pont.
       FOOTPRINT_X_MAX: ${FOOTPRINT_X_MAX:-6.5}
-      OBSTACLE_CONF: ${OBSTACLE_CONF:-0.45}
       # Straighten the floor boundary: stereo depth is noisy where the floor
       # meets a wall, so the raw edge wobbles although the real one is a line.
       # STRAIGHTEN=0 keeps the raw boundary; STRAIGHTEN_TOL raises or lowers how
