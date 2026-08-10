@@ -43,6 +43,13 @@ PATROL_ROI = "patrol.roi"
 # image. Sent as bits rather than a list of per-object masks: the consumer only
 # needs to know which pixels are occupied, and packbits makes a 160x120 mask
 # 2400 bytes, small enough to publish every frame.
+# `inst_png` and `inst_meta` ride alongside, when the model is a -seg one:
+# a PNG-encoded uint8 label image at the same w/h where 0 is nothing and k is
+# the k-th instance, plus [{"class_id": int, "score": float}] indexed by k-1.
+# Optional, and every consumer of `bits` is unaffected by their absence. They
+# exist because the union alone cannot say where one object ends and the next
+# begins, which is the question a coffee table in front of a couch asks.
+# Measured on this lounge: 1.1 kB for two instances at 320x240.
 OBSTACLE_MASK = "perception.mask"
 
 # groundfloor -> anyone. Obstacle footprints computed by Intel's

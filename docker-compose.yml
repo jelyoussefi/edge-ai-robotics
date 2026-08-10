@@ -344,6 +344,47 @@ services:
       # docs/ETAPE-B-RESULTS.md.
       DIAG_FRAMES: ${DIAG_FRAMES:-0}
       SHOW_FLOOR: ${SHOW_FLOOR:-0}
+      # SHOW_OBJECTS=1 demarre la superposition 's' : silhouettes de
+      # segmentation, boites, nom de classe et score. Repond a "pourquoi il n'a
+      # pas evite ca" en montrant ce que le modele a etiquete, et surtout ce
+      # qu'il n'a pas etiquete. 's' bascule toujours a la volee.
+      SHOW_OBJECTS: ${SHOW_OBJECTS:-0}
+      # Score en dessous duquel une detection n'est pas dessinee. Zero par
+      # defaut : le detecteur applique deja son propre seuil `confidence` de
+      # config/streams.d455.json, et un second seuil ici ne ferait que cacher a
+      # l'ecran des detections bel et bien publiees. L'ancienne valeur en dur de
+      # 0,45 masquait exactement les etiquettes faibles qui renseignent, une
+      # table basse a 0,13 par exemple.
+      SHOW_OBJECTS_CONF: ${SHOW_OBJECTS_CONF:-0}
+      # Contours du masque plutot que rectangles. Une boite autour du canape en
+      # L couvre la table basse et les deux couloirs qu'il entoure, mesure a
+      # 3,35 x 3,19 m revendiques pour environ 5,1 m2 de meuble. Tout l'aval
+      # travaille deja sur la silhouette : empreintes au sol, grille
+      # d'occupation et masque de sol en viennent tous. Mettre a 1 pour revoir
+      # le rectangle, utile seulement pour deboguer le repli sans masque.
+      SHOW_OBJECT_BOXES: ${SHOW_OBJECT_BOXES:-0}
+      # Hauteur minimale au-dessus du plan du sol calibre pour qu'un pixel du
+      # masque compte comme objet. Le bus porte UNE silhouette d'union, reduite,
+      # donc la frontiere entre deux objets voisins dans l'image est quantifiee
+      # et les cellules a cheval lisent la profondeur de ce qui est derriere,
+      # c'est-a-dire le sol entre les deux meubles. Elles etaient rasterisees en
+      # sol occupe : un couloir reel de 0,9 m entre la table basse et le canape
+      # etait comble ainsi. La profondeur separe deja les objets, chaque pixel
+      # etant place par sa PROPRE distance mesuree ; il manquait seulement de
+      # refuser les pixels qui mesurent a hauteur de sol. Meme 0,08 m que le
+      # critere de sol, pour qu'un pixel ne puisse pas etre sol pour un test et
+      # objet pour l'autre.
+      OBJECT_Z_MIN: ${OBJECT_Z_MIN:-0.08}
+      # Distance minimale a laquelle un obstacle peut etre rasterise. La bande
+      # utile de la D455 sur ce montage commence vers 1,5 m, le bruit stereo
+      # croit comme le carre de la portee. Une cellule revendiquee a 1,2 m est
+      # du bruit ou une fausse detection posee sur le carrelage nu, et elle
+      # tombe pile dans le chemin du robot. Mesure ici : grille annoncee a
+      # 1,2-7,8 m dans une piece dont le mur du fond est a 6,2 m. La borne
+      # LOINTAINE est FOOTPRINT_X_MAX, que les rectangles portaient deja par
+      # clip_footprints alors que la grille, sur laquelle le navigateur pilote
+      # vraiment, n'avait aucun garde-fou.
+      OBSTACLE_X_MIN: ${OBSTACLE_X_MIN:-1.4}
       # Hauteur minimale, au-dessus du plan du sol calibre, qu'un point vu par
       # la camera doit avoir pour pouvoir masquer le robot. Le sol ne peut pas
       # masquer un robot qui marche dessus : au contact les deux profondeurs se
@@ -444,6 +485,17 @@ services:
     environment:
       <<: *bus-env
       PERCEPTION_CONFIG: /config/streams.d455.json
+      # Seuil de detection. Vide = celui de config/streams.d455.json, a 0,10.
+      # C'est le seul reglage qui decide si un obstacle faiblement reconnu
+      # existe ou non : la table basse nappee de cette scene mesure 0,13, donc
+      # 0,25 l'effacait. Monter cette valeur si la scene devient bruyante.
+      PERCEPTION_CONF: ${PERCEPTION_CONF:-}
+      # Resolution de la silhouette publiee. A 160x120 une cellule vaut 8 px en
+      # 720p, donc la frontiere entre deux objets voisins DANS L'IMAGE est
+      # quantifiee et les cellules a cheval sont allumees. 320x240 se compresse
+      # a 9600 octets et divise l'erreur par deux.
+      MASK_W: ${MASK_W:-320}
+      MASK_H: ${MASK_H:-240}
     devices:
       - /dev/dri:/dev/dri
       - /dev/accel:/dev/accel

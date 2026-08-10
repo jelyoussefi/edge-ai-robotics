@@ -239,6 +239,17 @@ class Detector:
         # than a list of them.
         self.mask = (np.zeros((frame_h, frame_w), bool)
                      if protos is not None else None)
+        # Instance labels beside the union: 0 is nothing, k is the k-th mask
+        # painted. The union alone cannot say where one object ends and the
+        # next begins, which is exactly the question a coffee table standing in
+        # front of a couch asks. uint8 caps this at 255 instances, far above
+        # anything this detector returns after NMS.
+        self.inst_map = (np.zeros((frame_h, frame_w), np.uint8)
+                         if protos is not None else None)
+        # (class_id, score) for label k, at index k-1. Filled in PAINTING
+        # order, which is not the order of `results`: those are sorted by range
+        # before being returned, so pairing by position would mislabel them.
+        self.inst_meta: list[tuple[int, float]] = []
         self.det_masks = [] if self.keep_masks else None
 
         results: list[Obstacle] = []
@@ -254,6 +265,15 @@ class Detector:
             if protos is not None and x2 > x1 and y2 > y1:
                 _painted = self._add_mask(protos, coeffs[i], (x1, y1, x2, y2),
                                           scale, pad_x, pad_y, frame_w, frame_h)
+                if _painted is not None and self.inst_map is not None:
+                    # Later masks overwrite earlier ones where they overlap.
+                    # An arbitrary rule, but a deterministic one, and overlap
+                    # is a handful of pixels on a silhouette boundary.
+                    _k = len(self.inst_meta) + 1
+                    if _k <= 255:
+                        self.inst_map[_painted] = _k
+                        self.inst_meta.append((int(class_ids[i]),
+                                               float(scores[i])))
             if self.keep_masks and self.det_masks is not None and _painted is None:
                 # Index alignment with `results` matters more than compactness:
                 # the caller pairs mask[k] with obstacle[k].

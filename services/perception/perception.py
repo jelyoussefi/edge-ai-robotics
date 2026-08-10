@@ -24,7 +24,14 @@ from edgebot import topics
 # Resolution the obstacle silhouettes are published at. A quarter of the camera
 # frame is plenty: the mask only decides which floor cells are occupied, and the
 # world grid it feeds is coarser still.
-MASK_W, MASK_H = 160, 120
+# Resolution of the union silhouette put on the bus. 160x120 was chosen to keep
+# the message tiny, and it cost accuracy where it matters most: one cell is 8 px
+# at 720p, so the boundary between two objects that touch in the IMAGE is
+# quantised by 8 px and the straddling cells are set. Deprojected, those cells
+# land on the floor between the two objects. 320x240 packs to 9600 bytes, still
+# nothing beside a JPEG frame, and halves the error.
+MASK_W = int(os.environ.get("MASK_W", "320"))
+MASK_H = int(os.environ.get("MASK_H", "240"))
 
 from edgebot.bus import Publisher, Subscriber
 
@@ -51,10 +58,21 @@ def main() -> None:
 
     with open(CONFIG_PATH) as fh:
         spec = json.load(fh)[0]
+    # The threshold lives in the stream config, but a demo needs to move it
+    # without editing a committed file and it is the single knob that decides
+    # whether a weakly recognised obstacle exists at all: a nappe-covered
+    # coffee table measured 0.13 on this scene, so 0.25 erased it and 0.10
+    # keeps it. PERCEPTION_CONF wins when it is set.
+    _conf = float(spec.get("confidence", 0.4))
+    _env_conf = os.environ.get("PERCEPTION_CONF", "").strip()
+    if _env_conf:
+        _conf = float(_env_conf)
     detector = Detector(
         spec["model"], spec.get("device", "CPU"),
-        conf=float(spec.get("confidence", 0.4)),
+        conf=_conf,
     )
+    log.info("detection threshold %.2f (%s)", _conf,
+             "PERCEPTION_CONF" if _env_conf else CONFIG_PATH)
 
     pub = Publisher()
     sub = Subscriber([topics.CAMERA_RGB])
@@ -103,9 +121,23 @@ def main() -> None:
         if mask is not None:
             small = cv2.resize(mask.astype(np.uint8), (MASK_W, MASK_H),
                                interpolation=cv2.INTER_NEAREST)
-            pub.send(topics.OBSTACLE_MASK, {
-                "w": MASK_W, "h": MASK_H, "t": frame_t,
-                "bits": np.packbits(small.astype(bool)).tobytes()})
+            body = {"w": MASK_W, "h": MASK_H, "t": frame_t,
+                    "bits": np.packbits(small.astype(bool)).tobytes()}
+            # Instance labels alongside the union, PNG-encoded. Added as extra
+            # keys rather than replacing `bits`: every existing consumer reads
+            # the boolean union and must keep working untouched. A label map is
+            # almost all zeros, so PNG takes it down to a few kB.
+            inst = getattr(detector, "inst_map", None)
+            if inst is not None and inst.any():
+                inst_small = cv2.resize(inst, (MASK_W, MASK_H),
+                                        interpolation=cv2.INTER_NEAREST)
+                ok, buf = cv2.imencode(".png", inst_small)
+                if ok:
+                    body["inst_png"] = buf.tobytes()
+                    body["inst_meta"] = [
+                        {"class_id": c, "score": sc}
+                        for c, sc in getattr(detector, "inst_meta", [])]
+            pub.send(topics.OBSTACLE_MASK, body)
 
         count += 1
         now = time.perf_counter()

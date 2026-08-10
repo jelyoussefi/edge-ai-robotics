@@ -1184,6 +1184,66 @@ SHOW_FLOOR_AT_START = os.environ.get("SHOW_FLOOR", "0") not in ("", "0")
 # Initial state of the 'p' cloud display: 0 off, 1 over the video, 2 cloud
 # alone. Same purpose as SHOW_FLOOR -- a capture with no keyboard.
 SHOW_CLOUD_AT_START = int(os.environ.get("SHOW_CLOUD", "0") or 0)
+# SHOW_OBJECTS=1 starts the 's' overlay on: silhouettes, boxes, class names and
+# scores. Same purpose as SHOW_FLOOR, and the one a demo needs -- "why did it
+# not avoid that" is answered by seeing what the model did and did not label.
+SHOW_OBJECTS_AT_START = os.environ.get("SHOW_OBJECTS", "0") not in ("", "0")
+# Score below which a detection is not drawn. Zero by default, deliberately:
+# the detector already applies its own `confidence` from streams.d455.json, so
+# a second threshold here only hides published detections from the person
+# looking at the screen. The overlay used to drop everything under 0.45, which
+# silently hid exactly the weak labels worth knowing about -- a dining table at
+# 0.13 is the interesting case, not noise to suppress.
+SHOW_OBJECTS_CONF = float(os.environ.get("SHOW_OBJECTS_CONF", "0") or 0)
+# Outlines, not rectangles. A box around an L-shaped couch covers the coffee
+# table and both corridors it surrounds -- 3.35 x 3.19 m of claimed floor for
+# about 5.1 m2 of furniture -- so a screen that draws the box shows an obstacle
+# the system is not actually using. Everything downstream already works on the
+# silhouette: the ground footprints, the occupancy grid and the floor mask all
+# come from the mask, and the box path only runs when no mask arrives at all.
+# SHOW_OBJECT_BOXES=1 brings the rectangle back for the rare case where the
+# fallback is what is being debugged.
+SHOW_OBJECT_BOXES = os.environ.get("SHOW_OBJECT_BOXES", "0") not in ("", "0")
+# Minimum height above the calibrated floor plane for a masked pixel to count
+# as an object. The bus carries ONE union silhouette, downscaled, so the
+# boundary between two objects that are adjacent in the IMAGE is quantised and
+# the cells straddling it are set. Those cells read the depth of what is
+# actually behind them, the floor between the two pieces of furniture, and get
+# rasterised as occupied ground: a real 0.9 m corridor between a coffee table
+# and a couch was filled in this way. Depth already separates the objects --
+# each pixel is placed by its OWN measured range -- so the only thing missing
+# was refusing the pixels that measure as floor. Same 0.08 m as the floor
+# criterion, so a pixel cannot be floor for one test and object for the other.
+OBJECT_Z_MIN = float(os.environ.get("OBJECT_Z_MIN", "0.08"))
+# Nearest range an obstacle may be rasterised at. The D455's usable floor band
+# on this mount starts at about 1.5 m -- stereo noise grows with the square of
+# range and the near field is below the baseline's useful overlap -- so a cell
+# claimed at 1.2 m is noise or a false detection sitting on bare floor, and it
+# lands directly in the robot's path. Measured here: a ground grid reported
+# 1.2-7.8 m in a room whose far wall is at 6.2 m.
+OBSTACLE_X_MIN = float(os.environ.get("OBSTACLE_X_MIN", "1.4"))
+# One colour per detected instance. The union silhouette drew a coffee table
+# and the couch behind it as a single cyan blob, which reads on screen as one
+# merged object and hides the real question, whether the two are separated.
+# BGR, chosen to stay apart on a warm living-room background.
+INSTANCE_COLOURS = [
+    (255, 200, 0),    # cyan-ish
+    (0, 220, 255),    # amber
+    (120, 255, 120),  # green
+    (255, 120, 255),  # magenta
+    (60, 160, 255),   # orange
+    (255, 255, 120),  # pale cyan
+    (150, 120, 255),  # pink
+    (0, 255, 200),    # lime
+]
+# COCO ids the detector keeps, see OBSTACLE_CLASSES in perception/detector.py.
+# Names rather than numbers on screen: "60:0.13" tells nobody that YOLO half
+# saw the coffee table. Unknown ids fall back to the number.
+OBSTACLE_CLASS_NAMES = {
+    0: "person", 24: "backpack", 26: "handbag", 28: "suitcase",
+    39: "bottle", 41: "cup", 56: "chair", 57: "couch", 59: "bed",
+    60: "dining table", 63: "laptop", 73: "book",
+}
 # How much of the occupancy grid is worth drawing. The grid is 20 m square and
 # the room is 7; a floor-plane projection piles everything beyond the far wall
 # onto the horizon, so an unbounded draw was a solid magenta band across the
@@ -1768,10 +1828,22 @@ class _Overlays:
         self.overlay_t = 0.0
 
 
+def _draw_label(out, text, x: int, y: int, colour) -> None:
+    """Text on a dark plate. Plain yellow on a bright tiled floor was
+    unreadable in every capture taken so far."""
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+    x = int(np.clip(x, 0, max(0, out.shape[1] - tw - 8)))
+    ty = int(max(th + 4, y - 4))
+    cv2.rectangle(out, (x, ty - th - 4), (x + tw + 6, ty + 2), (0, 0, 0), -1)
+    cv2.putText(out, text, (x + 3, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                colour, 1, cv2.LINE_AA)
+
+
 def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
                    floor_paint_cpu, obstacle_boxes, roi_cached, detections,
                    seg_mask, seg_mask_t, cam_height, cam_pitch_deg,
-                   fx, fy, ppx, ppy, suite_floor=None,
+                   fx, fy, ppx, ppy, seg_inst=None, seg_inst_meta=(),
+                   suite_floor=None,
                    suite_floor_t=0.0, suite_clusters=None,
                    suite_clusters_t=0.0) -> bool:
     """Draw whatever the operator has switched on. Returns True if it drew.
@@ -1822,26 +1894,87 @@ def _draw_overlays(out, ov, show_floor, show_seg, floor_det, depth_metres,
         ov.overlay_mask = None
     if show_seg:
         if seg_mask is not None and time.time() - seg_mask_t < 2.0:
-            _sm = cv2.resize(seg_mask.astype(np.uint8),
-                             (out.shape[1], out.shape[0]),
-                             interpolation=cv2.INTER_NEAREST).astype(bool)
-            out[_sm] = (0.5 * out[_sm].astype(np.float32)
-                        + 0.5 * np.array([255, 200, 0], np.float32)
-                        ).astype(np.uint8)
-            annotated = True
-        for _d in detections or []:
-            if float(_d.get("score", 0)) < 0.45:
-                continue
-            _cx, _cy = float(_d["cx"]), float(_d["cy"])
-            _w2, _h2 = float(_d["w"]) / 2, float(_d["h"]) / 2
-            _p1 = (int((_cx - _w2) * out.shape[1]),
-                   int((_cy - _h2) * out.shape[0]))
-            _p2 = (int((_cx + _w2) * out.shape[1]),
-                   int((_cy + _h2) * out.shape[0]))
-            cv2.rectangle(out, _p1, _p2, (255, 200, 0), 2)
-            cv2.putText(out, f"{_d.get('class_id', -1)}:{_d.get('score', 0):.2f}",
-                        (_p1[0], max(12, _p1[1] - 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 0), 1,
+            # Drawn AFTER the height gate, so the screen shows the silhouette
+            # the grid was built from rather than the raw one. The difference
+            # is exactly the floor between two adjacent objects.
+            if depth_metres is not None and floor_det is not None:
+                _dh2, _dw2 = depth_metres.shape
+                _sd = cv2.resize(seg_mask.astype(np.uint8), (_dw2, _dh2),
+                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+                _sd &= (depth_metres > 0.3)
+                _sd &= floor_det.height_map(depth_metres) > OBJECT_Z_MIN
+                _sm = cv2.resize(_sd.astype(np.uint8),
+                                 (out.shape[1], out.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+            else:
+                _sm = cv2.resize(seg_mask.astype(np.uint8),
+                                 (out.shape[1], out.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+            # Per-instance labels when perception sends them, one colour each.
+            _lab = None
+            if seg_inst is not None and seg_inst.shape == seg_mask.shape:
+                _lab = cv2.resize(seg_inst, (out.shape[1], out.shape[0]),
+                                  interpolation=cv2.INTER_NEAREST)
+                _lab = np.where(_sm, _lab, 0)
+            if _lab is not None and _lab.any():
+                for _k in np.unique(_lab):
+                    if _k == 0:
+                        continue
+                    _sel = _lab == _k
+                    _col = INSTANCE_COLOURS[(int(_k) - 1)
+                                            % len(INSTANCE_COLOURS)]
+                    out[_sel] = (0.5 * out[_sel].astype(np.float32)
+                                 + 0.5 * np.array(_col, np.float32)
+                                 ).astype(np.uint8)
+                    _cnts, _ = cv2.findContours(_sel.astype(np.uint8),
+                                                cv2.RETR_CCOMP,
+                                                cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(out, _cnts, -1, _col, 2, cv2.LINE_AA)
+                    # Label at the instance's own top edge, not at a box
+                    # corner: the box of a concave object sits metres from the
+                    # thing it names.
+                    _ys, _xs = np.nonzero(_sel)
+                    _meta = (seg_inst_meta[int(_k) - 1]
+                             if int(_k) - 1 < len(seg_inst_meta) else {})
+                    _txt = "%s %.2f" % (
+                        OBSTACLE_CLASS_NAMES.get(int(_meta.get("class_id", -1)),
+                                                 str(_meta.get("class_id", "?"))),
+                        float(_meta.get("score", 0.0)))
+                    _draw_label(out, _txt, int(_xs.min()), int(_ys.min()), _col)
+                annotated = True
+            else:
+                out[_sm] = (0.5 * out[_sm].astype(np.float32)
+                            + 0.5 * np.array([255, 200, 0], np.float32)
+                            ).astype(np.uint8)
+                # The silhouette's own outline. This is the shape the
+                # footprints and the grid are built from.
+                _cnts, _ = cv2.findContours(_sm.astype(np.uint8),
+                                            cv2.RETR_CCOMP,
+                                            cv2.CHAIN_APPROX_SIMPLE)
+                cv2.drawContours(out, _cnts, -1, (255, 200, 0), 2, cv2.LINE_AA)
+                for _d in detections or []:
+                    if float(_d.get("score", 0)) < SHOW_OBJECTS_CONF:
+                        continue
+                    _cx, _cy = float(_d["cx"]), float(_d["cy"])
+                    _w2, _h2 = float(_d["w"]) / 2, float(_d["h"]) / 2
+                    _p1 = (int((_cx - _w2) * out.shape[1]),
+                           int((_cy - _h2) * out.shape[0]))
+                    _p2 = (int((_cx + _w2) * out.shape[1]),
+                           int((_cy + _h2) * out.shape[0]))
+                    if SHOW_OBJECT_BOXES:
+                        cv2.rectangle(out, _p1, _p2, (120, 120, 120), 1)
+                    _cid = int(_d.get("class_id", -1))
+                    _draw_label(out, "%s %.2f" % (
+                        OBSTACLE_CLASS_NAMES.get(_cid, str(_cid)),
+                        float(_d.get("score", 0))),
+                        _p1[0], _p1[1], (255, 200, 0))
+                annotated = True
+        if not detections:
+            # Say it on screen. An empty overlay looks identical to an overlay
+            # that is switched off, and the difference is the whole answer when
+            # the question is why an obstacle was ignored.
+            cv2.putText(out, "no detections", (12, out.shape[0] - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2,
                         cv2.LINE_AA)
             annotated = True
     if show_floor and roi_cached:
@@ -1961,9 +2094,14 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
             # floor: it turned a couch standing against a 6.2 m wall into a
             # footprint reaching 6.6 m -- past the wall, which is how you can
             # tell the projection and not the object was being measured.
-            f, l, _ = floor_det.deproject(depth_metres)
+            f, l, up = floor_det.deproject(depth_metres)
             valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
-                     & np.isfinite(f) & np.isfinite(l))
+                     & np.isfinite(f) & np.isfinite(l)
+                     # Same gates as the grid, for the same reasons: a masked
+                     # pixel at floor height is floor, and one outside the
+                     # reliable depth band is noise.
+                     & (up > OBJECT_Z_MIN)
+                     & (f > OBSTACLE_X_MIN) & (f < FOOTPRINT_X_MAX))
             boxes, skipped, inst = mask_footprints_xy(
                 sm, f, l, valid, OBSTACLE_MARGIN,
                 max_rects=FOOTPRINT_MAX_RECTS, cell=FOOTPRINT_CELL)
@@ -2008,10 +2146,28 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
     # is only true for pixels that lie on it: used on an object it answers
     # "where would this pixel be if it were floor", which runs away from the
     # camera without bound as the pixel rises towards the horizon.
-    f, l, _ = floor_det.deproject(depth_metres)
+    f, l, up = floor_det.deproject(depth_metres)
     valid = ((depth_metres > 0.3) & (depth_metres < 12.0)
              & np.isfinite(f) & np.isfinite(l))
-    occ = points_to_grid(f, l, sm & valid, GRID_CELL, GRID_BOUNDS,
+    # A masked pixel that measures at floor height IS floor. See OBJECT_Z_MIN.
+    on_floor = sm & valid & (up <= OBJECT_Z_MIN)
+    # And the same far-wall guard the rectangles have carried all along. It was
+    # applied to `blocked` by clip_footprints and to nothing else, so the grid
+    # -- which is what the navigator actually steers on since OBSTACLE_REP
+    # defaults to cells -- kept rasterising points past the wall and inside the
+    # near field. The guard existed on one of the two paths only.
+    in_band = (f > OBSTACLE_X_MIN) & (f < FOOTPRINT_X_MAX)
+    sm_obj = sm & valid & (up > OBJECT_Z_MIN) & in_band
+    _out_of_band = int((sm & valid & (up > OBJECT_Z_MIN) & ~in_band).sum())
+    if _out_of_band:
+        log.info("%d object px outside %.1f-%.1f m dropped from the grid",
+                 _out_of_band, OBSTACLE_X_MIN, FOOTPRINT_X_MAX)
+    if sm.any():
+        log.info("silhouette: %d px, %d above %.2f m kept as object, "
+                 "%d at floor height returned to the floor",
+                 int(sm.sum()), int(sm_obj.sum()), OBJECT_Z_MIN,
+                 int(on_floor.sum()))
+    occ = points_to_grid(f, l, sm_obj, GRID_CELL, GRID_BOUNDS,
                          margin=OBSTACLE_MARGIN, passable=GRID_PASSABLE)
     flr = None
     if floor_mask is not None and floor_mask.any():
@@ -2068,6 +2224,11 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             if seg_mask is not None and time.time() - seg_mask_t < 2.0:
                 _sil = cv2.resize(seg_mask.astype(np.uint8), (dw_, dh_),
                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+                # Only where the mask actually stands above the plane. The
+                # quantised edge of the union silhouette otherwise carves real
+                # floor out of the floor, which is the same error as marking it
+                # occupied, made one step earlier.
+                _sil &= det.height_map(depth_metres) > OBJECT_Z_MIN
                 mask[_sil] = False
             # Subtract what the detector sees, with a margin. The
             # floor under a stool is floor, but it is not somewhere
@@ -2654,7 +2815,9 @@ def main() -> None:
     ov = _Overlays()      # cache for the 'f' overlay, see _draw_overlays
     seg_mask = None       # latest silhouettes from perception, for the 's' key
     seg_mask_t = 0.0
-    show_seg = False      # 's' toggles the segmentation overlay
+    seg_inst = None       # per-instance labels, when perception sends them
+    seg_inst_meta: list = []
+    show_seg = SHOW_OBJECTS_AT_START   # 's' toggles it at any time
     roi_next_t = 0.0      # next republication of the walkable floor
     probe_next_t = 0.0    # next ground-contact depth probe (DEPTH_PROBE)
     roi_cached = None     # computed once: the camera does not move
@@ -2742,6 +2905,17 @@ def main() -> None:
                     _bits = np.frombuffer(payload["bits"], dtype=np.uint8)
                     seg_mask = np.unpackbits(_bits)[:_w * _h].reshape(_h, _w).astype(bool)
                     seg_mask_t = time.time()
+                    # Optional, and everything below degrades to the single
+                    # colour when it is absent.
+                    seg_inst = None
+                    seg_inst_meta = []
+                    if payload.get("inst_png"):
+                        _im = cv2.imdecode(
+                            np.frombuffer(payload["inst_png"], np.uint8),
+                            cv2.IMREAD_UNCHANGED)
+                        if _im is not None:
+                            seg_inst = _im if _im.ndim == 2 else _im[:, :, 0]
+                        seg_inst_meta = list(payload.get("inst_meta") or [])
                 except Exception as exc:
                     log.warning("could not read the obstacle mask: %s", exc)
                 continue
@@ -3041,8 +3215,11 @@ def main() -> None:
                 out, ov, show_floor and cloud_mode != 2, show_seg, floor_det,
                 depth_metres, floor_paint_cpu, obstacle_boxes, roi_cached,
                 detections, seg_mask, seg_mask_t, cam_height, _cam_pitch_deg,
-                fx, fy, ppx, ppy, suite_floor, suite_floor_t,
-                suite_clusters, suite_clusters_t) or _annotated
+                fx, fy, ppx, ppy,
+                seg_inst=seg_inst, seg_inst_meta=seg_inst_meta,
+                suite_floor=suite_floor, suite_floor_t=suite_floor_t,
+                suite_clusters=suite_clusters,
+                suite_clusters_t=suite_clusters_t) or _annotated
         except Exception as exc:
             log.error("GPU compositing failed: %s", exc)
             raise

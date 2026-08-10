@@ -28,7 +28,7 @@ DOCKERFILES := $(shell find services -name Dockerfile 2>/dev/null)
 SRC_FILES   := $(shell find services common -type f -name '*.py' 2>/dev/null)
 REQ_FILES   := $(shell find services -type f -name 'requirements.txt' 2>/dev/null)
 
-.PHONY: default help build run down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner grid-probe suite-compare map-check pick-goals bus-rate web-latency logs ps shell clean distclean
+.PHONY: default help build run full down restart calibrate seg-test ros-base groundfloor adbscan fastmapping itsplanner grid-probe suite-compare map-check lane-probe pick-goals bus-rate web-latency logs ps shell clean distclean
 default: run
 
 help:
@@ -37,6 +37,7 @@ help:
 	@echo "  make down       Stop the stack"
 	@echo "  make restart    Same as run"
 	@echo "  make calibrate  Camera pose, with the floor shown in red   HEIGHT=1.50"
+	@echo "                  SHOW_OBJECTS=1 make  draws labels, boxes and masks"
 	@echo "                  CALIB_YOLO_MASK=0 for the plain height threshold"
 	@echo "                  CALIB_YOLO_CONF=0.10 CALIB_YOLO_FRAMES=15 tune the assist"
 	@echo "  make seg-test   What the segmentation model sees, as an image"
@@ -45,7 +46,10 @@ help:
 	@echo "  make adbscan        Intel Robotics AI Suite ADBSCAN clustering"
 	@echo "  make fastmapping    Intel Robotics AI Suite persistent occupancy map"
 	@echo "  make itsplanner     Intel Robotics AI Suite ITS global path planner"
+	@echo "  make full           The demo AND all four suite bricks, union source"
 	@echo "  make suite-compare  Their floor against ours, side by side"
+	@echo "  make lane-probe     Where the robot can walk in this room, as a map"
+	@echo "                      Needs the demo already running in another terminal"
 	@echo "  make bus-rate       What the bus carries, per topic     [ARGS=--seconds 25]"
 	@echo "  make web-latency    Console stream latency, compositor to socket"
 	@echo "  make logs       Follow the logs                            [S=compositor]"
@@ -121,6 +125,42 @@ groundfloor:
 	@# removed without touching the rest of the stack.
 	@$(COMPOSE) --profile suite up --build groundfloor
 
+full: $(ROSBASE_STAMP)
+	@$(call msg, Starting the demo AND the Robotics AI Suite bricks ...)
+	@# Everything at once: the core services plus groundfloor, adbscan,
+	@# fastmapping and itsplanner. `make` alone starts the default profile
+	@# only, and the four suite bricks sit behind the `suite` profile, so a
+	@# plain `make` leaves them out entirely -- which is why OBSTACLE_SOURCE
+	@# stayed on `ours` no matter what was set.
+	@#
+	@# GF_DEPTH_RELIABLE=1 is not optional and not a preference. FastMapping
+	@# subscribes with a bare rclcpp::QoS(10), i.e. RELIABLE, and exposes no
+	@# parameter to change it; against a best-effort depth publisher DDS never
+	@# matches and it receives nothing, SILENTLY. Forced here so the full
+	@# pipeline cannot be started in the one configuration that fails without
+	@# an error message.
+	@#
+	@# OBSTACLE_SOURCE defaults to `union` here and not to `ours`: starting
+	@# the bricks and then not steering on them is the failure mode this
+	@# target exists to prevent. Override on the command line to compare.
+	@xhost +local:root > /dev/null 2>&1 || true
+	@GF_DEPTH_RELIABLE=1 OBSTACLE_SOURCE=$${OBSTACLE_SOURCE:-union} \
+	 $(COMPOSE) --profile suite up -d --build
+	@echo ""
+	@$(call msg, Bricks: groundfloor -> adbscan + fastmapping -> itsplanner)
+	@echo "  suite topics take ~20 s to appear. Watch for:"
+	@echo "    groundfloor  'ground' and 'obstacle' point counts"
+	@echo "    adbscan      SUITE_CLUSTERS rectangles"
+	@echo "    fastmapping  SUITE_MAP"
+	@echo "    itsplanner   SUITE_PATH (needs a map first)"
+	@echo "  If a brick logs nothing at all, suspect QoS before anything else."
+	@echo ""
+	@trap '$(COMPOSE) --profile suite down --remove-orphans >/dev/null 2>&1; \
+	       printf "\n  demo stopped\n"; exit 0' INT TERM; \
+	 $(COMPOSE) --profile suite logs -f sim compositor groundfloor adbscan \
+	   fastmapping itsplanner || true; \
+	 $(COMPOSE) --profile suite down --remove-orphans >/dev/null 2>&1 || true
+
 grid-probe:
 	@$(call msg, Grid navigation against the rectangle one, off the hardware ...)
 	@# No camera, no policy, no renderer: a synthetic room built to this
@@ -165,6 +205,32 @@ map-check:
 		-v $(PWD)/scripts:/scripts:ro \
 		-v $(PWD)/common:/opt/edgebot:ro \
 		perception /scripts/map_check.py $(ARGS)
+
+lane-probe:
+	@$(call msg, Measuring where the robot can actually walk in this room ...)
+	@# Same arrangement as map-check: in a container to reach the bus by
+	@# name, script and common/ mounted rather than baked, because it is a
+	@# measurement and it must read the tree.
+	@# Reads the SAME occupancy grid the navigator steers on and asks the
+	@# SAME question free_lane asks, at the same corridor width, so a lane it
+	@# reports clear is a lane the navigator will accept.
+	@# The navigator knobs are forwarded EXPLICITLY. This runs in the
+	@# perception service, whose environment block declares none of them, and
+	@# `docker compose run` passes the compose environment, not the shell's.
+	@# Without this the probe silently measured against DETOUR_MAX=1.8 while
+	@# the sim was running with 2.4, and its verdict contradicted the stack.
+	@# Same defaults as navigator.py, so a bare `make lane-probe` still
+	@# describes the shipped configuration.
+	@$(COMPOSE) run --rm --no-deps --entrypoint python3 \
+		-v $(PWD)/scripts:/scripts:ro \
+		-v $(PWD)/common:/opt/edgebot:ro \
+		-e LANE=$${LANE:-0.39} \
+		-e DETOUR_MAX=$${DETOUR_MAX:-1.8} \
+		-e RETURN_TO=$${RETURN_TO:-1.9} \
+		-e STOP_AT=$${STOP_AT:-6.0} \
+		-e ROBOT_HALF_WIDTH=$${ROBOT_HALF_WIDTH:-0.22} \
+		-e LANE_SLACK=$${LANE_SLACK:-0.08} \
+		perception /scripts/lane_probe.py $(ARGS)
 
 bus-rate:
 	@$(call msg, Measuring what the bus carries, per topic ...)
