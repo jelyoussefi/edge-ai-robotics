@@ -344,6 +344,38 @@ La régression du §7.3ter de l'étape 2 **n'est pas corrigée par ce changement
 ne devait pas l'être : sa cause est l'axe de patrouille dans la table, pas la
 grille. Les 19,5 % restent, et restent une entrée de l'étape 4.
 
+### 15bis. Les 19,5 % contre 12,7 % : ce n'est pas la cellule, et ce n'est pas
+### expliqué
+
+J'avais attribué la variation à la cause du défaut. C'est faux : la même cause
+donnait 12,7 %. Deux explications possibles — la grille plus fine change la
+géométrie du contournement, ou les deux passes ne sont pas comparables — et un
+A/B à scène figée tranche.
+
+Repassé à `GRID_CELL=0,05` sur la scène du moment, puis relu :
+
+| passe | cellule | laps | corps dans le mobilier |
+|---|---|---|---|
+| 7.3ter initiale | 0,05 m | 5–6 | **41,5 %** |
+| diagnostic 7.3ter | 0,05 m | 1–4 | **12,7 %** |
+| base 0,02 m | 0,02 m | 5–7 | **19,5 %** |
+| **A/B, maintenant** | **0,05 m** | 78–80 | **19,2 %** |
+
+**À scène et configuration égales, 0,05 m donne 19,2 % et 0,02 m donne 19,5 % :
+0,3 point d'écart. La cellule n'y est pour rien.**
+
+Ce que l'A/B révèle est plus embarrassant : **à cellule égale de 0,05 m, la même
+scène a produit 12,7 %, 19,2 % et 41,5 %.** La dispersion d'une passe à l'autre
+de cette métrique dépasse toutes les différences que je lui ai fait porter dans
+les documents précédents.
+
+**Donc : non établi.** La variation 12,7 → 19,5 n'est pas la cellule, et je ne
+sais pas ce qu'elle est. Ce que la mesure établit, c'est que le taux de
+chevauchement sur une fenêtre de 60 s **n'est pas une métrique stable** : il
+faudrait plusieurs fenêtres et une plage de laps large pour en tirer une
+comparaison, comme cela se fait déjà pour le FPS. Les comparaisons de ce taux
+faites jusqu'ici, y compris les miennes, sont à lire avec cette réserve.
+
 ## 16. Ce qui n'est pas fait
 
 Les 0,10 m d'écart résiduel côté droit ne sont pas expliqués. Les filtres en
