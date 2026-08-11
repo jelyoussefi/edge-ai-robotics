@@ -129,6 +129,7 @@ def main() -> None:
     poses: list[tuple[float, float]] = []
     clearances: list[float] = []
     scrapes: list[tuple[float, float, float]] = []
+    contacts: list[tuple[float, float, float]] = []
     widths: dict[float, list[float]] = {}
     counts: list[int] = []
     spans: list[float] = []
@@ -199,6 +200,15 @@ def main() -> None:
                 # out separately and drifted.
                 if d < query_half(HALF_WIDTH, CLEARANCE, CLEARANCE_MODE):
                     scrapes.append((x, y, d))
+                # A SECOND, harder threshold. Eating into the clearance and
+                # actually overlapping the furniture are different events and
+                # only one of them is a collision: at CLEARANCE 0.12 the first
+                # starts 0.12 m before the second. Reporting one number made a
+                # pass through a 0.90 m corridor read as 41.9 % scraping when
+                # the body never touched anything -- true, alarming, and the
+                # wrong alarm.
+                if d < HALF_WIDTH:
+                    contacts.append((x, y, d))
     sub.close()
 
     lab = args.label or "nav"
@@ -246,6 +256,10 @@ def main() -> None:
         print(f"scrapes (closer than {_qh:.2f} m): "
               f"{len(scrapes)} of {len(clearances)} poses "
               f"({100.0 * len(scrapes) / len(clearances):.1f} %)")
+        print(f"body overlap (closer than ROBOT_HALF_WIDTH="
+              f"{HALF_WIDTH:.2f} m, i.e. the robot IS in the furniture): "
+              f"{len(contacts)} of {len(clearances)} poses "
+              f"({100.0 * len(contacts) / len(clearances):.1f} %)")
         if scrapes:
             worst = min(scrapes, key=lambda s: s[2])
             print(f"   worst at ({worst[0]:.2f}, {worst[1]:.2f}) "

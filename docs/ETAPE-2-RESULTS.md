@@ -329,6 +329,89 @@ Le travail de franchissement — `STOP_AT` au-delà du couloir, vérification de
 géométrie : il mesurerait la capacité du suivi rectiligne à faire ce qu'il ne
 peut pas faire.
 
+### 7.3bis Scène D : un passage qui doit passer, un qui doit être refusé
+
+Table à **2,90 m** de la caméra. **1,20 m** réels côté droit et derrière,
+**0,70 m** réels côté TV. Le budget se démontre alors dans les deux sens plutôt
+que d'être seulement franchi.
+
+Repère : `+y` est la **gauche**, donc le côté droit vu de la caméra est y négatif.
+
+| | côté droit | côté TV | budget |
+|---|---|---|---|
+| position | x 2,80–4,40, centre y −0,88 | x 4,20–4,50, centre y +1,45 | |
+| **mètre** | **1,20 m** | **0,70 m** | |
+| grille, travée la plus large | 1,05 m | 0,60 m | |
+| grille, travée la plus étroite | 0,90 m | 0,55 m | |
+| **grille, largeur commune** | **0,80 m** (0,50–0,90) | **0,50 m** (0,00–0,75) | **0,68 m** |
+| **trames où le budget passe** | **11 / 15** | **2 / 15** | |
+| verdict | **franchissable** | **refusé** | |
+
+Sur 15 trames chacun, pas une.
+
+#### Laquelle des deux causes refuse le côté TV
+
+Le manque grille-mètre vaut 0,10 à 0,20 m des deux côtés, encadrant les 0,15 m
+de sur-projection du §7.1. Appliqué au côté TV :
+
+| | largeur | verdict |
+|---|---|---|
+| grille telle quelle | 0,50 m | refusé de **0,18 m** |
+| grille + 0,15 m de sur-projection rendus | 0,65 m | refusé de **0,03 m** |
+| mètre | 0,70 m | **accepté de 0,02 m** |
+
+**C'est la sur-projection qui refuse ce passage, pas le budget.** Sans elle,
+0,70 m contre 0,68 m demandés : accepté. Le budget seul ne l'aurait pas écarté.
+
+Deux réserves qui vont contre cette conclusion et qu'il faut lire avec elle.
+L'acceptation ne tiendrait qu'à **2 cm**, et la largeur commune mesurée varie de
+0,00 à 0,75 m d'une trame à l'autre : même avec une grille parfaite la décision
+serait instable et non franche. Et **2 trames sur 15 franchissent déjà le budget
+aujourd'hui**, donc le refus n'est pas net non plus.
+
+Le côté TV est atteignable — bande de détour −2,79 à +2,01 m contre un trou à
++1,15..+1,80 — donc son refus porte bien sur la largeur et non sur
+l'accessibilité. Vérifié avant de conclure, comme la voie de droite à −0,88 m,
+qui est dans la bande avec 2,0 m de marge : **`DETOUR_MAX` n'est en cause dans
+aucun des deux cas.**
+
+### 7.3ter Le franchissement : une régression, pas un critère manqué
+
+La passe de 60 s avec `STOP_AT=4.4` n'a pas seulement échoué à démontrer le
+critère, elle a fait entrer le robot dans le mobilier — ce qu'aucune passe
+précédente n'avait fait.
+
+| | toutes les passes précédentes | **cette passe** |
+|---|---|---|
+| raclages (marge entamée, 0,34 m) | **0,0 %** | **54,2 %** (1867 / 3442) |
+| corps dans le meuble (0,22 m) | **0,0 %** | **41,5 %** (1427 / 3442) |
+| clairance minimale | +0,410 à +0,633 m | **−0,024 m** |
+| étendue latérale | 1,2 à 1,5 m | **2,80 m** |
+| laps | 3 à 4 par minute | 5 à 6, `STALLED` ×10 |
+
+Le robot est allé à **y = +2,13 m** au lieu de tenir la voie de droite à
+−0,88 m. Le critère « emprunte la droite » n'est donc pas atteint, mais ce n'est
+pas la lecture utile : **c'est une régression à diagnostiquer.**
+
+Ce qui est déjà écarté : `DETOUR_MAX` (ci-dessus), `no way round` compté à 0,
+`escape` à 0, le navigateur trouvant bien des voies (`clear lane -0.35 m`) et la
+limite de patrouille oscillant normalement entre 3,20 et 3,80 m.
+
+Piste principale, non encore vérifiée : **la boîte du ROI est tombée à
+x 1,62..2,28 m pendant que le robot marchait jusqu'à 4,10 m.** Le polygone et la
+grille ne décrivent plus la même pièce. Cela ressemble au clignotement de
+l'étape 3 — `polygon_from_mask` ne conserve que la plus grande composante
+connexe — survenant ici pendant que le robot est loin.
+
+Les 10 `STALLED` sont probablement une conséquence : un robot figé ne racle pas
+54 % du temps.
+
+**Correction d'outil.** `nav_probe` ne rapportait qu'un seuil et mélangeait deux
+événements distincts : entamer la marge de sécurité et poser le corps dans le
+meuble, séparés de `CLEARANCE` soit 0,12 m. Une traversée d'un couloir de 0,90 m
+ressortait à 41,9 % de « raclage » alors que le corps ne touchait rien : vrai,
+alarmant, et la mauvaise alarme. Les deux sont désormais rapportés séparément.
+
 ### 7.4 État des critères
 
 - [x] une seule grandeur exposée, `CLEARANCE`
@@ -340,10 +423,14 @@ peut pas faire.
 - [x] raclages 0,0 % et clairance minimale +0,574 m sur la scène courante
 - [x] la largeur au mètre, rapprochée de la grille : 0,90 m contre 0,75 m,
       **0,15 m de sur-projection**, dans la bande annoncée, non corrigée ici
-- [ ] **le couloir réel franchi** — **0,45 m de largeur commune contre 0,68 m
-      demandés, sur 15 trames sur 15**. Le couloir est droit et trop étroit pour
-      un robot de 0,44 m plus sa marge. Ni un réglage ni l'étape 4 n'y changent
-      quoi que ce soit : il faut élargir le passage.
+- [x] **le budget démontré dans les deux sens** sur la scène D : côté droit
+      0,80 m commun, franchi 11 fois sur 15 ; côté TV 0,50 m commun, refusé
+      13 fois sur 15 — et refusé **par la sur-projection**, pas par le budget
+      (§7.3bis)
+- [ ] **le couloir réel franchi par le robot** — non : la passe de
+      franchissement est une **régression** (54,2 % de marge entamée, 41,5 % de
+      corps dans le meuble, contre 0,0 % partout ailleurs). À diagnostiquer,
+      §7.3ter, et non à lire comme un critère manqué.
 
 ### 7.5 Un double comptage trouvé dans la sonde
 
