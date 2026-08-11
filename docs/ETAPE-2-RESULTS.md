@@ -1,5 +1,13 @@
 # Étape 2 : un seul budget de marge
 
+> **CADUC depuis le 2026-08-11 : toutes les mesures de grille de ce document
+> ont ete prises a `GRID_CELL=0,05 m`.** La cellule vaut 0,02 m depuis
+> `docs/SURPROJECTION-RESULTS.md` partie III. Les comptes de cellules sont
+> multiplies par ~7 et les largeurs de travee changent : la bande d'identite
+> de scene passe de 3251-3716 a 18 092-22 468, et le cote TV lit 0,70 m au
+> lieu de 0,50. Les VERDICTS tiennent, les CHIFFRES ne se comparent pas.
+
+
 **État : ÉTAPE CLOSE.** Budget de marge démontré dans les deux sens ; le
 franchissement par le patrouilleur est hors de portée sur cette géométrie et
 relève de l'étape 4. Détail en §7.4.

@@ -254,3 +254,97 @@ navigateur, les deux ponts suite et toutes les sondes, et invalide toutes les
 mesures de grille des documents précédents. Cela mérite son propre passage, avec
 une nouvelle ligne de base.
 
+
+---
+
+# Partie III : 0,02 m appliqué
+
+## 12. Ce qui change
+
+`GRID_CELL` est un **réglage** et vaut **0,02 m**, avec une garde qui refuse de
+tourner si la cellule est plus fine que le nuage.
+
+```
+ground cell 0.020 m against a 0.0083 m point spacing
+(104312 points over 2898 cells of 0.05 m): 2.4x the spacing
+```
+
+La garde ne prévient pas, elle **arrête le processus**. Une grille plus fine que
+son nuage ne se dégrade pas doucement : elle rapporte du sol libre qui n'existe
+pas, et du sol libre qui n'existe pas est ce dans quoi un robot marche. C'est le
+piège qui m'a fait publier +0,220 m en partie I, et il se reproduira sur une
+scène plus clairsemée, à un `STREAM_RES` plus bas ou à plus grande distance —
+tous amincissent le nuage sans toucher à ce réglage.
+
+## 13. Confirmation par le comportement, scène D
+
+| | 0,05 m | **0,02 m** | mètre |
+|---|---|---|---|
+| **côté TV**, largeur commune | 0,50 m | **0,70 m** | **0,70 m** |
+| côté TV, budget franchi | **2 / 15** | **8 / 15** | |
+| **côté droit**, largeur commune | 0,80 m | 0,78 m | |
+| côté droit, travée la plus large | 1,05 m | **1,10 m** | **1,20 m** |
+| côté droit, budget franchi | 11 / 15 | 11 / 15 | |
+
+**Le côté TV lit maintenant 0,70 m, exactement la mesure au mètre**, et passe de
+refusé à franchi dans 8 trames sur 15.
+
+Les deux prédictions de `ETAPE-2-RESULTS` §7.3bis se vérifient, y compris la
+réserve : « accepté de 0,02 m » — médiane 0,70 contre 0,68 demandés — et « la
+décision serait instable et non franche » — 8 sur 15, pas 15 sur 15.
+
+Le côté droit gagne 0,05 m sur sa travée la plus large et reste à 1,10 contre
+1,20 au mètre. Il reste donc **0,10 m** non expliqués par la cellule, à porter au
+compte des filtres (0,05 m mesuré en partie I) et du reste.
+
+## 14. Les noyaux, rechiffrés et non supposés
+
+| cellule | `CLEARANCE` 0,12 demandé | `GRID_PASSABLE` 0,44 demandé |
+|---|---|---|
+| 0,05 m | noyau 5 → **0,100 m (−16,7 %)** | noyau 9 → 0,450 m (+2,3 %) |
+| **0,02 m** | noyau 13 → **0,120 m (0,0 %)** | noyau 23 → 0,460 m (+4,5 %) |
+| 0,01 m | noyau 25 → 0,120 m (0,0 %) | noyau 45 → 0,450 m (+2,3 %) |
+
+L'erreur de −16,7 % trouvée à l'étape 2 **disparaît** à 0,02 m : 0,12 demandé,
+0,12 livré. Elle ne concernait que le mode `dilate`, qui n'est pas celui livré,
+mais elle cessera de piéger qui l'essaie. `GRID_PASSABLE` passe de +2,3 % à
++4,5 %, soit 0,46 m pour 0,44 demandés — négligeable, et non nul, donc écrit.
+
+**Le coût de la fermeture est le seul qui explose**, parce que le noyau grandit
+avec la grille :
+
+| cellule | grille | noyau | fermeture |
+|---|---|---|---|
+| 0,05 m | 160x160 | 9x9 | **0,07 ms** |
+| **0,02 m** | 400x400 | 23x23 | **2,47 ms** |
+| 0,01 m | 800x800 | 45x45 | **15,79 ms** |
+
+Un facteur 35 pour un facteur 2,5 sur la cellule. À 0,99 Hz cela reste 0,25 % du
+temps, et c'est la raison pour laquelle 0,01 m n'est pas le défaut.
+
+## 15. Nouvelle ligne de base, et ce qu'elle invalide
+
+**Toutes les mesures de grille des documents antérieurs sont caduques.** Elles
+ont été prises à 0,05 m et ne se comparent pas à celles-ci : le compte de
+cellules est multiplié par ~7, et les largeurs de travée changent de sens.
+
+| | 0,05 m (scène D) | **0,02 m (scène D)** |
+|---|---|---|
+| **cellules occupées** | 3251–3716 | **18 092–22 468**, médiane 20 095 |
+| laps couverts | 5 à 6 | **5 à 7**, `STALLED` ×4 |
+| raclages (marge entamée) | 54,2 % puis 23,6 % | **25,0 %** |
+| corps dans le mobilier | 41,5 % puis 12,7 % | **19,5 %** |
+| clairance minimale | −0,024 m | **−0,010 m** |
+| voie tenue | −0,62 m | −0,59 m |
+| ROI effondré | 88 % | **76 %** |
+
+Bande d'identité de scène à 0,02 m : **18 092 à 22 468 cellules occupées**.
+
+La régression du §7.3ter de l'étape 2 **n'est pas corrigée par ce changement** et
+ne devait pas l'être : sa cause est l'axe de patrouille dans la table, pas la
+grille. Les 19,5 % restent, et restent une entrée de l'étape 4.
+
+## 16. Ce qui n'est pas fait
+
+Les 0,10 m d'écart résiduel côté droit ne sont pas expliqués. Les filtres en
+valent 0,05 m d'après la partie I ; le reste ne l'est pas.

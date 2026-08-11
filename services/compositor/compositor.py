@@ -35,7 +35,8 @@ from OpenGL import GL
 from edgebot import topics
 from edgebot.camera import stream_mode, stream_name
 from edgebot.floor import (GRID_BOUNDS, GRID_CELL, box_footprints,
-                           clear_of_boxes, clearance_mode, clip_footprints,
+                           check_cell_density, clear_of_boxes, clearance_mode,
+                           clip_footprints,
                            in_band,
                            grid_extent,
                            grid_shape, mask_footprints_xy,
@@ -2262,6 +2263,19 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
     # the consumer's job and this layer stays a plain map of obstacles.
     occ = points_to_grid(f, l, sm_obj, GRID_CELL, GRID_BOUNDS,
                          margin=GRID_MARGIN, passable=GRID_PASSABLE)
+    # Once, on the first grid built from real depth: is the cell finer than the
+    # cloud that has to fill it? See check_cell_density -- this is the failure
+    # that reports free floor between individual points, and it announces
+    # itself nowhere. Checked at a fixed 0.05 m reference so the estimate does
+    # not depend on the cell being judged.
+    if not _ground_grids.checked:
+        _ground_grids.checked = True
+        _ref = points_to_grid(f, l, sm_obj, 0.05, GRID_BOUNDS)
+        _sp = check_cell_density(int(sm_obj.sum()), int(_ref.sum()), GRID_CELL)
+        log.info("ground cell %.3f m against a %.4f m point spacing "
+                 "(%d points over %d cells of 0.05 m): %.1fx the spacing",
+                 GRID_CELL, _sp, int(sm_obj.sum()), int(_ref.sum()),
+                 GRID_CELL / max(1e-9, _sp))
     flr = None
     if floor_mask is not None and floor_mask.any():
         # Every FLOOR_STRIDE-th pixel in each direction, on the mask rather
@@ -2478,6 +2492,7 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
 # Remembers the footprints last logged, so an unchanged scene is not announced
 # every second. An attribute on the function rather than a global: it belongs to
 # this one caller and nothing else should reach it.
+_ground_grids.checked = False
 _publish_free_floor.last_blocked = None
 _publish_free_floor.occ_grid = None
 _publish_free_floor.flr_grid = None

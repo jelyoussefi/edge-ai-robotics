@@ -1,5 +1,11 @@
 # Étape FPS : un `meshgrid` mémoïsé, et un sous-échantillonnage refusé
 
+> **Note : les profils de ce document sont mesures a `GRID_CELL=0,05 m`.**
+> La cellule vaut 0,02 m depuis le 2026-08-11 ; `points_to_grid` passe de
+> 1,45 a 1,98 ms et la fermeture de 0,07 a 2,47 ms. Le classement des postes
+> est inchange, les millisecondes non.
+
+
 Le plan de simplification désignait quatre suspects pour la chute de 40-50 fps à
 14 fps : `points_to_grid`, la fermeture morphologique sur 160x160, `findContours`
 et `shrink`. Les quatre sont innocents — ils totalisent 0,43 ms. Le coupable

@@ -189,6 +189,18 @@ services:
       # restaure exactement l'ancien comportement et les deux restent
       # comparables sur la meme scene.
       OBSTACLE_REP: ${OBSTACLE_REP:-grid}
+      # Cellule de la grille au sol, en metres. Reglage et non constante
+      # depuis docs/SURPROJECTION-RESULTS.md : a 0,05 m la rasterisation
+      # annoncait un passage 0,060 m plus etroit qu il ne l est (mediane sur
+      # 706 travees), avec une queue non bornee -- p99 +0,430 m, pire +0,500.
+      # Une travee reelle de 0,15 m DISPARAIT a 0,05 m ; a 0,02 m il lui faut
+      # descendre sous 0,06 m. Cout chiffre avant le changement :
+      # points_to_grid 1,45 -> 1,98 ms, bus 3,1 -> 19,5 ko, fermeture
+      # GRID_PASSABLE 0,07 -> 2,47 ms, le tout a 0,99 Hz.
+      # Le compositeur REFUSE de tourner si la cellule est plus fine que
+      # l espacement mesure du nuage : c est le piege qui a fait publier un
+      # chiffre faux, et il ne s annonce pas tout seul.
+      GRID_CELL: ${GRID_CELL:-0.02}
       # Ramene le demi-tour dans le sol que le capteur rapporte vraiment.
       # STOP_AT=6.0 date d'une scene dont le sol allait plus loin : sur celle-ci
       # il ordonnait quatre metres de marche entierement dans les empreintes,
@@ -362,6 +374,18 @@ services:
       # Idem cote compositor : les grilles sont construites ici et voyagent
       # sur PATROL_ROI a cote de `blocked`.
       OBSTACLE_REP: ${OBSTACLE_REP:-grid}
+      # Cellule de la grille au sol, en metres. Reglage et non constante
+      # depuis docs/SURPROJECTION-RESULTS.md : a 0,05 m la rasterisation
+      # annoncait un passage 0,060 m plus etroit qu il ne l est (mediane sur
+      # 706 travees), avec une queue non bornee -- p99 +0,430 m, pire +0,500.
+      # Une travee reelle de 0,15 m DISPARAIT a 0,05 m ; a 0,02 m il lui faut
+      # descendre sous 0,06 m. Cout chiffre avant le changement :
+      # points_to_grid 1,45 -> 1,98 ms, bus 3,1 -> 19,5 ko, fermeture
+      # GRID_PASSABLE 0,07 -> 2,47 ms, le tout a 0,99 Hz.
+      # Le compositeur REFUSE de tourner si la cellule est plus fine que
+      # l espacement mesure du nuage : c est le piege qui a fait publier un
+      # chiffre faux, et il ne s annonce pas tout seul.
+      GRID_CELL: ${GRID_CELL:-0.02}
       # Ferme les fentes plus etroites que le robot. Une seule raison d'exister
       # et elle est locale : les pieds d'un tabouret se projettent en deux
       # taches avec du vrai sol entre elles, mais 0,35 m n'est pas un passage

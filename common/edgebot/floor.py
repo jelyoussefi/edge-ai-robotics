@@ -557,7 +557,67 @@ def clip_footprints(boxes, x_max: float, margin: float = 0.0,
 # ---------------------------------------------------------------------------
 
 GRID_BOUNDS = (0.0, 8.0, -4.0, 4.0)   # x_min, x_max, y_min, y_max, world metres
-GRID_CELL = 0.05
+
+# Ground cell, in metres. A SETTING now, and 0.02 rather than the 0.05 it was.
+#
+# Measured in docs/SURPROJECTION-RESULTS.md: at 0.05 m the rasterisation reports
+# a passage 0.060 m narrower than it is, median over 706 matched gaps -- and the
+# tail is not bounded, p99 +0.430 m, worst +0.500 m. The theoretical "one cell
+# each side" describes a boundary moving; it does not describe a narrow gap,
+# which is not narrowed but DELETED as soon as its two edges land in adjacent
+# cells. A real 0.15 m gap disappears at 0.05 m. At 0.02 m it has to fall below
+# 0.06 m to disappear.
+#
+# The cost was priced before the change, not after: points_to_grid 1.45 -> 1.98
+# ms, the bus 3.1 -> 19.5 kB, both paid at the ROI publish rate of 0.99 Hz. The
+# one figure that scales badly is the GRID_PASSABLE closing, whose kernel grows
+# with the grid: 0.07 -> 2.47 ms, and 15.79 ms at 0.01 m. Still 0.25 % of wall
+# time here, and the reason 0.01 m is not the default.
+GRID_CELL = float(os.environ.get("GRID_CELL", "0.02"))
+
+
+def point_spacing(n_points: int, occupied_cells: int,
+                  ref_cell: float = 0.05) -> float:
+    """Mean spacing between points on the ground, in metres.
+
+    sqrt(area / count), with the area taken from a COARSE reference cell so the
+    estimate does not depend on the cell being validated. Measured on this
+    lounge: 104 753 points over 2881 cells of 0.05 m is 7.2 m2 and ~14 400
+    points per m2, so 8.3 mm.
+    """
+    if n_points <= 0 or occupied_cells <= 0:
+        return float("inf")
+    return float(np.sqrt(occupied_cells * ref_cell * ref_cell / n_points))
+
+
+def check_cell_density(n_points: int, occupied_cells: int, cell: float,
+                       ref_cell: float = 0.05) -> float:
+    """Refuse a grid finer than the cloud that fills it. Returns the spacing.
+
+    THIS IS THE TRAP THAT COST A WRONG NUMBER IN A DELIVERED DOCUMENT. Part I of
+    docs/SURPROJECTION-RESULTS.md priced the quantisation at +0.220 m against a
+    0.005 m reference grid, and that grid was finer than the 8 mm point
+    spacing: the object sieved itself, every interval between two points became
+    a free cell, and the "free width" it reported was sampling noise. Nothing
+    said so. The table showed it -- the jump was entirely in the rows below the
+    spacing -- and it still had to be found by measuring the density afterwards.
+    It will happen again on a sparser scene, at a lower STREAM_RES, or at a
+    greater range, all of which thin the cloud without touching this setting.
+
+    So the check runs on real data, at the moment the first grid is built, and
+    it stops the process rather than warning: a grid finer than its cloud does
+    not degrade gracefully, it reports free floor that is not there, and free
+    floor that is not there is what a robot walks into.
+    """
+    sp = point_spacing(n_points, occupied_cells, ref_cell)
+    if cell < sp:
+        raise SystemExit(
+            f"GRID_CELL={cell:.3f} m is finer than the {sp:.4f} m spacing of "
+            f"the point cloud that fills it ({n_points} points over "
+            f"{occupied_cells} cells of {ref_cell} m). The grid would sieve "
+            f"itself and report free floor between individual points. Raise "
+            f"GRID_CELL to at least {sp:.3f} m, or increase the point density.")
+    return sp
 
 
 def grid_shape(cell: float = GRID_CELL, bounds=GRID_BOUNDS):

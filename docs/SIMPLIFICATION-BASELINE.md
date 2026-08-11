@@ -1,5 +1,11 @@
 # Ligne de base avant simplification
 
+> **CADUC pour tout ce qui touche la grille : mesures prises a
+> `GRID_CELL=0,05 m`,** qui vaut 0,02 m depuis le 2026-08-11. Les sections
+> FPS et taille de code restent valables ; occupation, sol libre et largeurs
+> de voie ne se comparent plus. Voir `docs/SURPROJECTION-RESULTS.md` III.
+
+
 Refaite le 2026-08-10 après le travail FPS, parce que la première mouture n'était
 comparable à rien : elle portait 14 fps, un taux de raclage entièrement
 artefactuel, et aucun numéro de lap. Les chiffres d'origine sont conservés en §8
