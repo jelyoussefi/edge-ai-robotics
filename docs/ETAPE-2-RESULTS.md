@@ -1,7 +1,10 @@
 # Étape 2 : un seul budget de marge
 
-**État : architecture close et mesurée, ligne de base prise, critère du couloir
-ÉTABLI COMME HORS DE PORTÉE DU SUIVI RECTILIGNE.** Le couloir mesure 0,40 à
+**État : ÉTAPE CLOSE.** Budget de marge démontré dans les deux sens ; le
+franchissement par le patrouilleur est hors de portée sur cette géométrie et
+relève de l'étape 4. Détail en §7.4.
+
+**Note historique :** Le couloir mesure 0,40 à
 0,90 m par tranche mais son axe dérive de 0,27 m, ce qui ne laisse que **0,35 m
 de largeur commune** contre 0,68 m demandés. Ce n'est pas un problème de budget —
 `CLEARANCE=0` ne suffirait pas non plus — c'est que `free_lane` ne teste que des
@@ -499,33 +502,103 @@ le relève à 0,45 : **le plancher écrête le frein d'élan**, de 3 cm/s. Réel
 corriger — `START_VX` devrait plafonner le frein plutôt que l'inverse — mais ce
 n'est pas la cause.
 
-#### Les trois issues
+#### `LANE = −0,88` testé, et il ne peut pas marcher
 
-- **`LANE = −0,88`** : patrouiller le long du couloir au lieu de le traverser.
-  Testable en une passe.
-- **`RETURN_TO` reculé** pour dégager les 2,4 m d'élan, au prix de la longueur
-  de patrouille.
-- **Étape 4**, un planificateur qui n'a pas à rejoindre une voie en ligne droite.
+La correction évidente — patrouiller **le long** du couloir au lieu de le
+traverser — échoue pour trois raisons indépendantes, dont deux se lisent dans le
+code et la troisième se mesure.
 
-### 7.4 État des critères
+**1. `LANE` est symétrique par construction.** `navigator.py:1315` :
+`lane = -self.lane * d`. La jambe aller est à −LANE, la jambe retour à +LANE.
+`LANE=−0,88` donne donc **+0,88 à l'aller** et −0,88 au retour : la moitié de la
+patrouille passe dans la table. `LANE` ne sait pas exprimer « une voie
+décalée », seulement « une paire de voies ±LANE ».
+
+**2. Le balayage du demi-tour s'effondre.** `sweep = max(0.3, 2.0 * self.lane)`
+ligne 1424 : avec une voie négative, `2 x (−0,88) = −1,76` et le `max` retient
+**0,3 m**. Le test du sens de demi-tour sonde alors un arc six fois plus petit
+que celui qui sera réellement balayé.
+
+**3. Une voie négative s'efface d'elle-même.** La convergence vaut
+`self.lane = 0.8 x self.lane + 0.2 x (swept / 2)` avec `swept = abs(...)`, donc
+toujours positif. Mesuré sur quatre demi-tours :
+
+```
+swept 0.78 m  ->  lane now -0.63 m
+swept 0.53 m  ->  lane now -0.45 m
+swept 0.68 m  ->  lane now -0.29 m
+swept 0.66 m  ->  lane now -0.17 m
+```
+
+**−0,88 érodé à −0,17 en quatre demi-tours**, et la suite part vers +rayon.
+
+Résultat de la passe de 60 s : **19,7 % de corps dans le mobilier**, contre
+12,7 % au diagnostic. C'est pire.
+
+`LANE` n'est donc pas une mauvaise valeur ici, c'est le **mauvais paramètre**.
+
+### 7.4 Clôture de l'étape 2
+
+**Le budget de marge est démontré. Le franchissement par le patrouilleur est
+hors de portée sur cette géométrie, et ce n'est pas le même sujet.**
+
+Le critère demandait de démontrer qu'un budget de marge unique laisse passer un
+couloir réel. C'est fait, et dans les deux sens plutôt qu'un seul (§7.3bis) :
+
+| | côté droit | côté TV |
+|---|---|---|
+| mètre | 1,20 m | 0,70 m |
+| grille, largeur commune | 0,80 m | 0,50 m |
+| budget 0,68 m | **franchi 11 fois sur 15** | **refusé 13 fois sur 15** |
+| cause du verdict | largeur réelle | **la sur-projection, pas le budget** |
+
+Ce qui manque n'est pas une démonstration du budget, c'est **la capacité du
+patrouilleur à amener le robot dans le couloir**. Deux causes mesurées et
+distinctes, aucune des deux ne relevant de cette étape :
+
+- **L'élan insuffisant** (§7.3quater). `LANE=0` place l'axe dans la table ; il
+  faut 0,88 m de décalage, donc 2,4 m d'élan à `CROSS_MAX=0,35`, et il n'y en a
+  que 1,8 m entre `RETURN_TO` et la table. Le robot arrive l'erreur ouverte et
+  coupe le coin : 12,7 % de poses avec le corps dans le mobilier.
+- **La sémantique symétrique de `LANE`** (ci-dessus). Le navigateur ne sait pas
+  représenter une voie décalée unique, donc la correction évidente n'existe pas
+  dans son vocabulaire.
+
+**Les deux sont des entrées de l'étape 4.** Ni `RETURN_TO` reculé ni l'étape 4
+n'ont été tentés pour atteindre le critère : ils traiteraient le patrouilleur,
+pas le budget.
+
+#### Acquis
 
 - [x] une seule grandeur exposée, `CLEARANCE`
 - [x] `LANE_SLACK`, `GAP_CLEAR`, `OBSTACLE_CLEAR` retirés de l'interface
+- [x] où appliquer la marge, tranché par la mesure : couche brute + inflation à
+      la requête (§3)
 - [x] couloir exigé journalisé en mètres au démarrage, robot compris
 - [x] laps et cellules occupées dans chaque mesure
 - [x] `lane_probe` et `nav_probe` exigent la même largeur que le navigateur,
       par assertion falsifiée
-- [x] raclages 0,0 % et clairance minimale +0,574 m sur la scène courante
-- [x] la largeur au mètre, rapprochée de la grille : 0,90 m contre 0,75 m,
-      **0,15 m de sur-projection**, dans la bande annoncée, non corrigée ici
-- [x] **le budget démontré dans les deux sens** sur la scène D : côté droit
-      0,80 m commun, franchi 11 fois sur 15 ; côté TV 0,50 m commun, refusé
-      13 fois sur 15 — et refusé **par la sur-projection**, pas par le budget
-      (§7.3bis)
-- [ ] **le couloir réel franchi par le robot** — non : la passe de
-      franchissement est une **régression** (54,2 % de marge entamée, 41,5 % de
-      corps dans le meuble, contre 0,0 % partout ailleurs). À diagnostiquer,
-      §7.3ter, et non à lire comme un critère manqué.
+- [x] **le budget démontré dans les deux sens**, un passage franchi et un
+      refusé, avec la cause du refus attribuée
+
+#### Non atteint, et renvoyé
+
+- [ ] **le robot amené dans le couloir par le patrouilleur.** Deux causes
+      mesurées, élan et sémantique de `LANE`, toutes deux entrées de l'étape 4.
+
+### 7.4bis Deux sujets ouverts, non traités ici
+
+**La sur-projection de 0,15 m.** La grille lit systématiquement 0,10 à 0,20 m de
+moins que le mètre, des deux côtés de la table. C'est elle qui refuse le côté TV
+— sans elle, 0,70 m contre 0,68 m demandés serait accepté (§7.3bis). Un défaut
+de perception, en amont du budget, qui décide aujourd'hui d'un verdict de
+navigation. À mesurer et corriger pour lui-même.
+
+**L'étape 3, le polygone effondré.** Mesuré à **88 % des messages** sous 1,0 m
+de profondeur, bord lointain oscillant de 2,06 à 5,24 m (§7.3quater). Sévère, et
+d'affichage : `self._roi` est écrit et relu nulle part, vérifié sur le code
+courant. Le navigateur ne le lit pas, donc ce n'est pas ce qui met le robot dans
+le mobilier — mais l'overlay, les captures et la comparaison suite en dépendent.
 
 ### 7.5 Un double comptage trouvé dans la sonde
 
