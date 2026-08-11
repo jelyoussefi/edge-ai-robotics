@@ -125,3 +125,78 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Etape 6: the bounds guard, on BOTH published representations.
+#
+# The recurring defect of this repository is a guard applied to one of two
+# paths. Three documented occurrences, and this case pins the two that are
+# testable off the hardware:
+#
+#   - clip_footprints protected the RECTANGLES with FOOTPRINT_X_MAX while
+#     nothing protected the GRID, which is what the navigator steers on.
+#     Measured "ground grid 1.2-7.8 m" in a room whose far wall is at 6.2 m.
+#   - the mirror of it: the grid gained a near guard, OBSTACLE_X_MIN, and
+#     clip_footprints never did, so a rectangle could be published at 1.0 m in
+#     front of a camera that cannot see the floor closer than 1.4 m.
+#
+# One mask, points at 1.0 m and 7.5 m, and BOTH outputs checked. A test that
+# checked one of them would have passed throughout the entire history of both
+# bugs, which is the whole point.
+# ---------------------------------------------------------------------------
+
+X_MIN, X_MAX = 1.4, 6.5
+
+
+def bounds_case() -> int:
+    """Points outside the arena must reach neither the grid nor the rectangles."""
+    from edgebot.floor import clip_footprints, grid_extent, in_band
+
+    # Three clusters: one too near, one legitimate, one past the far wall.
+    fwd = np.concatenate([np.full(400, 1.0), np.full(400, 3.5),
+                          np.full(400, 7.5)])
+    lat = np.concatenate([np.linspace(-0.3, 0.3, 400)] * 3)
+    sel = in_band(fwd, X_MIN, X_MAX)
+
+    occ = points_to_grid(fwd, lat, sel, GRID_CELL, GRID_BOUNDS)
+    ext = grid_extent(occ, GRID_CELL, GRID_BOUNDS)
+
+    # The rectangles the same points would produce, unguarded, then guarded by
+    # the SAME two numbers.
+    raw = [(0.9, 1.1, -0.3, 0.3), (3.4, 3.6, -0.3, 0.3), (7.4, 7.6, -0.3, 0.3)]
+    boxes = clip_footprints(raw, X_MAX, 0.0, x_min=X_MIN)
+
+    bad = []
+    print(f"arena {X_MIN}-{X_MAX} m; points at 1.0, 3.5 and 7.5 m")
+    print(f"  grid extent      {ext}")
+    if ext is None:
+        bad.append("the grid is empty: the legitimate cluster was dropped too")
+    else:
+        if ext[0] < X_MIN:
+            bad.append(f"grid starts at {ext[0]:.2f} m, inside {X_MIN} m")
+        if ext[1] > X_MAX:
+            bad.append(f"grid reaches {ext[1]:.2f} m, past {X_MAX} m")
+    print(f"  rectangles       {[tuple(round(v, 2) for v in b) for b in boxes]}")
+    if not boxes:
+        bad.append("every rectangle was dropped, including the legitimate one")
+    for b in boxes:
+        if b[0] < X_MIN - 1e-9:
+            bad.append(f"a rectangle starts at {b[0]:.2f} m, inside {X_MIN} m")
+        if b[1] > X_MAX + 1e-9:
+            bad.append(f"a rectangle reaches {b[1]:.2f} m, past {X_MAX} m")
+    # The legitimate obstacle must SURVIVE. A guard that drops everything
+    # passes every bounds check ever written and blinds the robot.
+    if not any(abs(b[0] - 3.4) < 1e-6 for b in boxes):
+        bad.append("the legitimate rectangle at 3.5 m did not survive")
+    if ext is not None and not (ext[0] <= 3.5 <= ext[1]):
+        bad.append("the legitimate cluster is missing from the grid")
+
+    for m in bad:
+        print(f"  FAIL: {m}")
+    print("  bounds case: " + ("FAILED" if bad else "passed"))
+    return 1 if bad else 0
+
+
+if __name__ == "__main__" and os.environ.get("PROBE_CASE") == "bounds":
+    raise SystemExit(bounds_case())

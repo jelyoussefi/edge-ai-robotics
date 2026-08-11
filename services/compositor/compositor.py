@@ -36,6 +36,7 @@ from edgebot import topics
 from edgebot.camera import stream_mode, stream_name
 from edgebot.floor import (GRID_BOUNDS, GRID_CELL, box_footprints,
                            clear_of_boxes, clearance_mode, clip_footprints,
+                           in_band,
                            grid_extent,
                            grid_shape, mask_footprints_xy,
                            mask_footprints, pack_grid, points_to_grid,
@@ -2161,7 +2162,7 @@ def _object_footprints(seg_mask, seg_mask_t, floor_det, depth_metres,
                      # pixel at floor height is floor, and one outside the
                      # reliable depth band is noise.
                      & (up > OBJECT_Z_MIN)
-                     & (f > OBSTACLE_X_MIN) & (f < FOOTPRINT_X_MAX))
+                     & in_band(f, OBSTACLE_X_MIN, FOOTPRINT_X_MAX))
             boxes, skipped, inst = mask_footprints_xy(
                 sm, f, l, valid, CLEARANCE,
                 max_rects=FOOTPRINT_MAX_RECTS, cell=FOOTPRINT_CELL)
@@ -2246,9 +2247,9 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
     # -- which is what the navigator actually steers on since OBSTACLE_REP
     # defaults to cells -- kept rasterising points past the wall and inside the
     # near field. The guard existed on one of the two paths only.
-    in_band = (f > OBSTACLE_X_MIN) & (f < FOOTPRINT_X_MAX)
-    sm_obj = sm & valid & (up > OBJECT_Z_MIN) & in_band
-    _out_of_band = int((sm & valid & (up > OBJECT_Z_MIN) & ~in_band).sum())
+    band = in_band(f, OBSTACLE_X_MIN, FOOTPRINT_X_MAX)
+    sm_obj = sm & valid & (up > OBJECT_Z_MIN) & band
+    _out_of_band = int((sm & valid & (up > OBJECT_Z_MIN) & ~band).sum())
     if _out_of_band:
         log.info("%d object px outside %.1f-%.1f m dropped from the grid",
                  _out_of_band, OBSTACLE_X_MIN, FOOTPRINT_X_MAX)
@@ -2338,7 +2339,8 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # red overlay shows exactly the floor the robot is given.
             _boxes, _how, _inst = _object_footprints(
                 seg_mask, seg_mask_t, det, depth_metres, detections)
-            _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, CLEARANCE)
+            _boxes = clip_footprints(_boxes, FOOTPRINT_X_MAX, CLEARANCE,
+                                     x_min=OBSTACLE_X_MIN)
             if _boxes:
                 mask = clear_of_boxes(mask, _boxes, _proj)
                 log.info("%d obstacle(s) removed from the floor (%s), "
@@ -2418,7 +2420,8 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
             # and a dropped box would shift every id after it.
             _pairs = []
             for _b, _iid in zip(blocked, _inst_pub):
-                _cb = clip_footprints([_b], FOOTPRINT_X_MAX, CLEARANCE)
+                _cb = clip_footprints([_b], FOOTPRINT_X_MAX, CLEARANCE,
+                                      x_min=OBSTACLE_X_MIN)
                 if _cb:
                     _pairs.append((_cb[0], _iid))
             blocked = [p_[0] for p_ in _pairs]

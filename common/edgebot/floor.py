@@ -476,8 +476,38 @@ def mask_footprints(mask, project, margin: float, min_px: int = 60,
     return out
 
 
-def clip_footprints(boxes, x_max: float, margin: float = 0.0):
+def in_band(fwd, x_min: float, x_max: float):
+    """Mask of points whose forward distance is inside the arena, both ends.
+
+    ONE expression, used by every path that has to reject a projected point for
+    being somewhere the room is not. It exists because this repository's most
+    expensive recurring bug is a guard applied to one of two paths:
+
+      - the footprint was computed twice and the far-wall guard fixed once
+      - clip_footprints protected the published RECTANGLES with FOOTPRINT_X_MAX
+        while nothing protected the GRID, which is what the navigator steers
+        on. Measured: "ground grid 1.2-7.8 m" in a room whose far wall is at
+        6.2 m
+      - and the mirror of it, still open when this was written: the grid gained
+        a near guard (OBSTACLE_X_MIN) and clip_footprints never did, so a
+        rectangle could still be published at 1.0 m in front of a camera that
+        cannot see the floor closer than 1.4 m
+
+    Two callers sharing this cannot drift apart. A third that writes the
+    comparison out by hand can, so do not.
+    """
+    return (np.asarray(fwd) > x_min) & (np.asarray(fwd) < x_max)
+
+
+def clip_footprints(boxes, x_max: float, margin: float = 0.0,
+                    x_min: float = 0.0):
     """Truncate footprints at the far wall, dropping any that start beyond it.
+
+    `x_min` is the same near guard the grid applies. Below it the camera has no
+    floor to project onto and a rectangle there describes nothing; it was
+    missing here for as long as the grid has had it, which is the asymmetry
+    etape 6 exists to find. Defaults to 0.0 so an existing caller that does not
+    pass it keeps its behaviour rather than silently gaining a filter.
 
     The projection through the ground plane has no idea where the room ends. A
     mask pixel a few rows above the true contact line lands arbitrarily far
@@ -498,10 +528,14 @@ def clip_footprints(boxes, x_max: float, margin: float = 0.0):
     """
     out = []
     limit = x_max + margin
+    near = x_min - margin if x_min > 0 else None
     for x0, x1, y0, y1 in boxes:
         if x0 >= limit:
             continue
-        out.append((x0, min(x1, limit), y0, y1))
+        if near is not None and x1 <= near:
+            continue
+        out.append((max(x0, near) if near is not None else x0,
+                    min(x1, limit), y0, y1))
     return out
 
 
