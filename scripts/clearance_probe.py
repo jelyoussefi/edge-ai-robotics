@@ -67,6 +67,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--clearance", type=float, default=0.12)
+    ap.add_argument("--corridor", type=float, nargs=4,
+                    metavar=("X0", "X1", "YLO", "YHI"),
+                    default=[2.0, 5.0, -4.0, 4.0],
+                    help="x range and y band to analyse slice by slice")
     ap.add_argument("--look", type=float, default=1.5,
                     help="corridor length for the lane comparison")
     args = ap.parse_args()
@@ -170,6 +174,82 @@ def main() -> int:
                   f"   {'PASSABLE' if min(runs) >= min_corridor(HALF_WIDTH, c) else 'narrowest is BELOW the budget'}")
         else:
             print(f"  x {x:.1f} m: no passage above 0.30 m")
+
+    # --- the check that actually decides: width AND axis drift -----------
+    #
+    # free_lane only ever tests a STRAIGHT corridor parallel to the x axis, so
+    # a passage that is wide everywhere but whose centre line slides sideways
+    # is not passable however wide each individual slice is. Measured on
+    # 2026-08-10: the corridor held 0.50-0.70 m at every slice while its centre
+    # drifted from -0.95 to -1.08 m between x=2.5 and 4.25, leaving 0.35 m of
+    # COMMON width for a 0.44 m robot. Width per slice said "fine"; the robot
+    # was right and the number was answering the wrong question.
+    #
+    # The quantity that matters is the intersection over slices: for each lane
+    # y, the largest half-width free at that y in EVERY slice at once.
+    x0, x1 = args.corridor[0], args.corridor[1]
+    ylo, yhi = args.corridor[2], args.corridor[3]
+    i0 = max(0, int((x0 - bounds[0]) / cell))
+    i1 = min(occ.shape[0], int((x1 - bounds[0]) / cell) + 1)
+    j_lo = max(0, int((ylo - bounds[2]) / cell))
+    j_hi = min(occ.shape[1], int((yhi - bounds[2]) / cell) + 1)
+    print()
+    print(f"corridor analysis over x {x0:.2f}..{x1:.2f} m, y {ylo:+.2f}"
+          f"..{yhi:+.2f} m, slice by slice:")
+    print(f"{'x':>7}{'free width':>12}{'centre y':>11}   run")
+    rows = []
+    for i in range(i0, i1):
+        row = occ[i, :]
+        runs, st = [], None
+        for j in range(j_lo, j_hi + 1):
+            free = j < j_hi and not row[j]
+            if free and st is None:
+                st = j
+            elif not free and st is not None:
+                runs.append((st, j))
+                st = None
+        if not runs:
+            print(f"{bounds[0] + i * cell:7.2f}{'BLOCKED':>12}")
+            rows.append(None)
+            continue
+        st, en = max(runs, key=lambda r: r[1] - r[0])
+        w = (en - st) * cell
+        a, b_ = bounds[2] + st * cell, bounds[2] + en * cell
+        c_y = (a + b_) / 2.0
+        rows.append((a, b_))
+        print(f"{bounds[0] + i * cell:7.2f}{w:12.2f}{c_y:+11.2f}   "
+              f"{a:+.2f}..{b_:+.2f}")
+
+    print()
+    if any(r is None for r in rows):
+        print("INTERSECTION: EMPTY -- at least one slice is fully blocked in "
+              "this band. No straight corridor exists here at any width.")
+    else:
+        lo = max(r[0] for r in rows)
+        hi = min(r[1] for r in rows)
+        common = max(0.0, hi - lo)
+        budget = min_corridor(HALF_WIDTH, c)
+        span = max(r[1] - r[0] for r in rows)
+        narrow = min(r[1] - r[0] for r in rows)
+        print(f"widest single slice   {span:.2f} m")
+        print(f"narrowest slice       {narrow:.2f} m")
+        print(f"COMMON to all slices  {common:.2f} m over y {lo:+.2f}..{hi:+.2f}")
+        print(f"budget                {budget:.2f} m")
+        drift = max(abs((r[0] + r[1]) / 2.0 - (rows[0][0] + rows[0][1]) / 2.0)
+                    for r in rows)
+        print(f"axis drift            {drift:.2f} m from the first slice")
+        if common >= budget:
+            print(f"\nPASSABLE in a straight line: {common:.2f} m of common "
+                  f"width against {budget:.2f} m demanded, centred "
+                  f"{(lo + hi) / 2.0:+.2f} m.")
+        else:
+            print(f"\nNOT PASSABLE IN A STRAIGHT LINE. Every slice is at "
+                  f"least {narrow:.2f} m wide but only {common:.2f} m is "
+                  f"common to all of them, against {budget:.2f} m demanded. "
+                  f"The axis drifts {drift:.2f} m. No value of CLEARANCE "
+                  f"fixes this -- free_lane tests straight corridors, and the "
+                  f"corridor is not straight. It needs a planner that can "
+                  f"follow a curve: etape 4, Nav2 and ITS.")
 
     ext = grid_extent(occ, cell, bounds)
     if ext:
