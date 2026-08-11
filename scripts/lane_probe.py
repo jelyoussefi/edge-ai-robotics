@@ -32,13 +32,18 @@ import numpy as np
 from edgebot import topics
 from edgebot.bus import Subscriber
 from edgebot.floor import (GRID_BOUNDS, GRID_CELL, corridor_blocked,
-                           grid_extent, unpack_grid)
+                           grid_extent, unpack_grid, assert_same_corridor,
+                           min_corridor, query_half, query_pad)
 
 HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
 # The margin already grown into the published cells. Adopted from the sim,
 # which itself adopts it from the grid publisher, so all three agree by
 # construction rather than by three people keeping three knobs equal.
 CLEARANCE = float(os.environ.get("CLEARANCE", "0.12"))
+CLEARANCE_MODE = os.environ.get("CLEARANCE_MODE", "query")
+# What the navigator said it demands. Compared against what this probe is
+# about to demand, by the machine, before a single number is printed.
+NAV_CORRIDOR = None
 DETOUR_MAX = float(os.environ.get("DETOUR_MAX", "1.8"))
 # The detour is a shift from the PATROL LANE, not from the world axis. On the
 # outbound leg the navigator holds -LANE, so the band it can ask for is
@@ -52,11 +57,13 @@ STOP_AT = float(os.environ.get("STOP_AT", "6.0"))
 
 
 def lane_reach(occ, x0: float, y: float, look: float, half: float,
-               cell: float, bounds, step: float = 0.10) -> float:
+               cell: float, bounds, step: float = 0.10,
+               pad: float = 0.0) -> float:
     """How far forward from x0 a corridor of half-width `half` stays clear."""
     reach = 0.0
     while reach < look:
-        if corridor_blocked(occ, x0, y, 1.0, reach + step, half, cell, bounds):
+        if corridor_blocked(occ, x0, y, 1.0, reach + step, half, cell, bounds,
+                            pad=pad):
             return reach
         reach += step
     return look
@@ -166,7 +173,7 @@ def adopt_live_knobs(sub, timeout_s: float = 4.0) -> None:
     drew conclusions about a patrol that was not running.
     """
     global LANE, DETOUR_MAX, RETURN_TO, STOP_AT, HALF_WIDTH, KNOB_SOURCE
-    global CLEARANCE
+    global CLEARANCE, CLEARANCE_MODE, NAV_CORRIDOR
     end = time.time() + timeout_s
     while time.time() < end:
         m = sub.recv(500)
@@ -181,6 +188,9 @@ def adopt_live_knobs(sub, timeout_s: float = 4.0) -> None:
         STOP_AT = float(nav.get("STOP_AT", STOP_AT))
         HALF_WIDTH = float(nav.get("ROBOT_HALF_WIDTH", HALF_WIDTH))
         CLEARANCE = float(nav.get("CLEARANCE", CLEARANCE))
+        CLEARANCE_MODE = nav.get("CLEARANCE_MODE", CLEARANCE_MODE)
+        NAV_CORRIDOR = {k: nav.get(k) for k in
+                        ("GRID_HALF", "GRID_PAD", "MIN_CORRIDOR")}
         KNOB_SOURCE = "LIVE from the sim"
         return
 
@@ -270,9 +280,16 @@ def main() -> int:
         print("the occupancy grid did not unpack")
         return 1
 
-    # Exactly what free_lane asks for: the grid already carries CLEARANCE,
-    # so nothing is added on top of the robot's own half-width.
-    half = HALF_WIDTH
+    # Exactly what the navigator asks the grid, from the SAME helper, then
+    # checked against what the navigator published. Not re-read by a person:
+    # every previous attempt to keep this probe in step with the robot by
+    # comparing two files failed, and each failure produced a confident report
+    # about a question the robot was not asking.
+    half = query_half(HALF_WIDTH, CLEARANCE, CLEARANCE_MODE)
+    pad = query_pad(CLEARANCE, CLEARANCE_MODE)
+    assert_same_corridor({"GRID_HALF": half, "GRID_PAD": pad,
+                          "MIN_CORRIDOR": min_corridor(HALF_WIDTH, CLEARANCE)},
+                         NAV_CORRIDOR, "lane_probe")
     roi = msg.get("roi") or []
     raw = msg.get("raw") or []
     blocked = msg.get("blocked") or []
@@ -282,10 +299,11 @@ def main() -> int:
     # running with other values, and the verdict contradicted the stack with
     # nothing on screen to show why.
     print("knobs %s: LANE=%.2f DETOUR_MAX=%.2f RETURN_TO=%.2f "
-          "STOP_AT=%.2f ROBOT_HALF_WIDTH=%.2f CLEARANCE=%.2f -> minimum corridor "
-          "%.2f m of real floor"
+          "STOP_AT=%.2f ROBOT_HALF_WIDTH=%.2f CLEARANCE=%.2f (%s) -> corridor "
+          "%.2f m of real floor, grid queried at %.2f m"
           % (KNOB_SOURCE, LANE, DETOUR_MAX, RETURN_TO, STOP_AT, HALF_WIDTH,
-             CLEARANCE, 2 * (HALF_WIDTH + CLEARANCE)))
+             CLEARANCE, CLEARANCE_MODE, min_corridor(HALF_WIDTH, CLEARANCE),
+             half))
     if KNOB_SOURCE.startswith("from THIS"):
         print("  WARNING: the sim published no configuration, so these are "
               "this container's defaults and may not be what is steering. "
@@ -323,7 +341,7 @@ def main() -> int:
     reaches = []
     for y in lanes:
         r = lane_reach(occ, args.from_x, float(y), args.look, half, cell,
-                       bounds)
+                       bounds, pad=pad)
         reaches.append(r)
         bar = "#" * int(round(r / 0.1))
         mark = ("  <- outside DETOUR_MAX"
@@ -340,9 +358,13 @@ def main() -> int:
     print()
     print("every free passage wider than %.2f m, per forward distance."
           % args.gaps_min)
-    print("a real corridor of W metres appears here as W - %.2f m: the grid "
-          "already carries CLEARANCE=%.2f m on each side."
-          % (2 * CLEARANCE, CLEARANCE))
+    if CLEARANCE_MODE == "dilate":
+        print("a real corridor of W metres appears here as W - %.2f m: the "
+              "cells were grown by CLEARANCE=%.2f m on each side."
+              % (2 * CLEARANCE, CLEARANCE))
+    else:
+        print("widths here are REAL FLOOR: the grid is a raw obstacle layer "
+              "and CLEARANCE=%.2f m is applied per query." % CLEARANCE)
     for x in np.arange(1.5, 5.51, 0.25):
         runs = free_runs(occ, float(x), cell, bounds,
                          min_width=args.gaps_min)

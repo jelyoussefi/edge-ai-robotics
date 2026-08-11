@@ -153,6 +153,25 @@ services:
       # etait repete dans trois services avec, dans chacun, un commentaire
       # demandant au lecteur suivant de les garder egaux.
       CLEARANCE: ${CLEARANCE:-0.12}
+      # OU la marge est appliquee. "query" : la grille publiee reste une carte
+      # BRUTE des obstacles et chaque requete de couloir demande
+      # demi-largeur + CLEARANCE. "dilate" : les cellules sont grossies a la
+      # construction et la requete demande la demi-largeur nue.
+      #
+      # Les deux exigent le MEME couloir de sol reel. Ils ne font pas le meme
+      # test pour autant : la dilatation est une somme de Minkowski avec une
+      # ELLIPSE, donc elle arrondit les coins et decrit un robot CIRCULAIRE,
+      # tandis que la requete grossit le rectangle balaye et decrit un robot
+      # RECTANGULAIRE. En diagonale apres un coin le disque est le plus
+      # permissif des deux.
+      #
+      # Et surtout la dilatation DETRUIT DE L'INFORMATION : une grille gonflee
+      # ne peut plus etre interrogee a une autre largeur, ce qui est le
+      # mecanisme par lequel la sonde et le navigateur ne pouvaient pas etre
+      # d'accord. Une couche d'obstacles brute avec l'inflation a la requete
+      # est aussi ce que fait Nav2, donc l'etape 4 en profite.
+      # Comparees sur la meme grille par scripts/clearance_probe.py.
+      CLEARANCE_MODE: ${CLEARANCE_MODE:-query}
       OBSTACLE_LOOK: ${OBSTACLE_LOOK:-3.5}
       DETOUR_MAX: ${DETOUR_MAX:-1.8}
       # Sur quoi le robot pilote : "grid" = cellules d'occupation au sol,
@@ -316,6 +335,25 @@ services:
       # Elle part sur PATROL_ROI sous la cle `clearance`, pour que le
       # consommateur n'ait pas a la deviner ni a en appliquer une seconde.
       CLEARANCE: ${CLEARANCE:-0.12}
+      # OU la marge est appliquee. "query" : la grille publiee reste une carte
+      # BRUTE des obstacles et chaque requete de couloir demande
+      # demi-largeur + CLEARANCE. "dilate" : les cellules sont grossies a la
+      # construction et la requete demande la demi-largeur nue.
+      #
+      # Les deux exigent le MEME couloir de sol reel. Ils ne font pas le meme
+      # test pour autant : la dilatation est une somme de Minkowski avec une
+      # ELLIPSE, donc elle arrondit les coins et decrit un robot CIRCULAIRE,
+      # tandis que la requete grossit le rectangle balaye et decrit un robot
+      # RECTANGULAIRE. En diagonale apres un coin le disque est le plus
+      # permissif des deux.
+      #
+      # Et surtout la dilatation DETRUIT DE L'INFORMATION : une grille gonflee
+      # ne peut plus etre interrogee a une autre largeur, ce qui est le
+      # mecanisme par lequel la sonde et le navigateur ne pouvaient pas etre
+      # d'accord. Une couche d'obstacles brute avec l'inflation a la requete
+      # est aussi ce que fait Nav2, donc l'etape 4 en profite.
+      # Comparees sur la meme grille par scripts/clearance_probe.py.
+      CLEARANCE_MODE: ${CLEARANCE_MODE:-query}
       # Idem cote compositor : les grilles sont construites ici et voyagent
       # sur PATROL_ROI a cote de `blocked`.
       OBSTACLE_REP: ${OBSTACLE_REP:-grid}
@@ -622,6 +660,25 @@ services:
       # ce qui est la garantie que OBSTACLE_MARGIN repete trois fois avec un
       # commentaire "gardez-les egaux" ne donnait pas.
       CLEARANCE: ${CLEARANCE:-0.12}
+      # OU la marge est appliquee. "query" : la grille publiee reste une carte
+      # BRUTE des obstacles et chaque requete de couloir demande
+      # demi-largeur + CLEARANCE. "dilate" : les cellules sont grossies a la
+      # construction et la requete demande la demi-largeur nue.
+      #
+      # Les deux exigent le MEME couloir de sol reel. Ils ne font pas le meme
+      # test pour autant : la dilatation est une somme de Minkowski avec une
+      # ELLIPSE, donc elle arrondit les coins et decrit un robot CIRCULAIRE,
+      # tandis que la requete grossit le rectangle balaye et decrit un robot
+      # RECTANGULAIRE. En diagonale apres un coin le disque est le plus
+      # permissif des deux.
+      #
+      # Et surtout la dilatation DETRUIT DE L'INFORMATION : une grille gonflee
+      # ne peut plus etre interrogee a une autre largeur, ce qui est le
+      # mecanisme par lequel la sonde et le navigateur ne pouvaient pas etre
+      # d'accord. Une couche d'obstacles brute avec l'inflation a la requete
+      # est aussi ce que fait Nav2, donc l'etape 4 en profite.
+      # Comparees sur la meme grille par scripts/clearance_probe.py.
+      CLEARANCE_MODE: ${CLEARANCE_MODE:-query}
       # Retours physiquement impossibles, ecartes avant toute construction.
       # Mesures sur le nuage : z descendait a -6,096 m et x montait a 14,378 m
       # alors que le mur du fond est a 6,2 m.
@@ -685,6 +742,25 @@ services:
       # ce qui est la garantie que OBSTACLE_MARGIN repete trois fois avec un
       # commentaire "gardez-les egaux" ne donnait pas.
       CLEARANCE: ${CLEARANCE:-0.12}
+      # OU la marge est appliquee. "query" : la grille publiee reste une carte
+      # BRUTE des obstacles et chaque requete de couloir demande
+      # demi-largeur + CLEARANCE. "dilate" : les cellules sont grossies a la
+      # construction et la requete demande la demi-largeur nue.
+      #
+      # Les deux exigent le MEME couloir de sol reel. Ils ne font pas le meme
+      # test pour autant : la dilatation est une somme de Minkowski avec une
+      # ELLIPSE, donc elle arrondit les coins et decrit un robot CIRCULAIRE,
+      # tandis que la requete grossit le rectangle balaye et decrit un robot
+      # RECTANGULAIRE. En diagonale apres un coin le disque est le plus
+      # permissif des deux.
+      #
+      # Et surtout la dilatation DETRUIT DE L'INFORMATION : une grille gonflee
+      # ne peut plus etre interrogee a une autre largeur, ce qui est le
+      # mecanisme par lequel la sonde et le navigateur ne pouvaient pas etre
+      # d'accord. Une couche d'obstacles brute avec l'inflation a la requete
+      # est aussi ce que fait Nav2, donc l'etape 4 en profite.
+      # Comparees sur la meme grille par scripts/clearance_probe.py.
+      CLEARANCE_MODE: ${CLEARANCE_MODE:-query}
       ARENA_X_MIN: ${ARENA_X_MIN:-1.2}
       ARENA_X_MAX: ${ARENA_X_MAX:-6.3}
       ARENA_Y_MIN: ${ARENA_Y_MIN:--2.8}

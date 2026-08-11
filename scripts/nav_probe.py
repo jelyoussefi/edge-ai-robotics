@@ -47,9 +47,12 @@ import time
 
 from edgebot import topics
 from edgebot.bus import Subscriber
-from edgebot.floor import unpack_grid
+from edgebot.floor import (assert_same_corridor, min_corridor, query_half,
+                           query_pad, unpack_grid)
 
 HALF_WIDTH = float(os.environ.get("ROBOT_HALF_WIDTH", "0.22"))
+CLEARANCE = float(os.environ.get("CLEARANCE", "0.12"))
+CLEARANCE_MODE = os.environ.get("CLEARANCE_MODE", "query")
 
 
 def grid_distance(x: float, y: float, occ, cell: float, bounds) -> float | None:
@@ -107,9 +110,17 @@ def main() -> None:
     ap.add_argument("--label", default="")
     args = ap.parse_args()
 
+    global HALF_WIDTH, CLEARANCE, CLEARANCE_MODE
+
     sub = Subscriber([topics.PATROL_ROI, topics.ROBOT_STATE,
                       topics.SIM_TELEMETRY])
     laps: list = []
+    # Filled from the first telemetry message, then checked. Until it is, no
+    # scrape verdict is printed: a scrape threshold is a width, and reporting
+    # one measured at a width the robot does not use is how this probe already
+    # reported 21 % of poses scraping against a representation nobody steers on.
+    nav_corridor = None
+    checked = False
     stalled_seen = 0
     occ = None
     gcell = 0.05
@@ -132,6 +143,19 @@ def main() -> None:
         topic, p = msg
         if topic == topics.SIM_TELEMETRY:
             nav = (p or {}).get("nav") or {}
+            if not checked and nav.get("MIN_CORRIDOR") is not None:
+                checked = True
+                HALF_WIDTH = float(nav.get("ROBOT_HALF_WIDTH", HALF_WIDTH))
+                CLEARANCE = float(nav.get("CLEARANCE", CLEARANCE))
+                CLEARANCE_MODE = nav.get("CLEARANCE_MODE", CLEARANCE_MODE)
+                nav_corridor = float(nav["MIN_CORRIDOR"])
+                assert_same_corridor(
+                    {"GRID_HALF": query_half(HALF_WIDTH, CLEARANCE,
+                                             CLEARANCE_MODE),
+                     "GRID_PAD": query_pad(CLEARANCE, CLEARANCE_MODE),
+                     "MIN_CORRIDOR": min_corridor(HALF_WIDTH, CLEARANCE)},
+                    {k: nav.get(k) for k in
+                     ("GRID_HALF", "GRID_PAD", "MIN_CORRIDOR")}, "nav_probe")
             if "lap" in nav:
                 laps.append(int(nav["lap"]))
             if nav.get("stalled"):
@@ -167,7 +191,13 @@ def main() -> None:
                 measured_against += "BUS -- this is not what the navigator uses)"
             if d is not None:
                 clearances.append(d)
-                if d < HALF_WIDTH:
+                # The SAME width the navigator asked the grid for. In dilate
+                # mode the cells already hold the clearance, so the threshold
+                # is the bare body; in query mode they do not, so it is body
+                # plus clearance. Getting this from query_half rather than
+                # rewriting it here is the point: the two used to be written
+                # out separately and drifted.
+                if d < query_half(HALF_WIDTH, CLEARANCE, CLEARANCE_MODE):
                     scrapes.append((x, y, d))
     sub.close()
 
@@ -207,7 +237,13 @@ def main() -> None:
         print(f"clearance to the nearest footprint: min {cl[0]:+.3f} m, "
               f"p05 {cl[max(0, int(0.05 * len(cl)))]:+.3f}, "
               f"median {statistics.median(cl):+.3f}")
-        print(f"scrapes (closer than ROBOT_HALF_WIDTH={HALF_WIDTH:.2f} m): "
+        _qh = query_half(HALF_WIDTH, CLEARANCE, CLEARANCE_MODE)
+        print(f"corridor demanded: {min_corridor(HALF_WIDTH, CLEARANCE):.2f} m "
+              f"of real floor, grid queried at {_qh:.2f} m "
+              f"(CLEARANCE {CLEARANCE:.2f} in {CLEARANCE_MODE} mode"
+              + (", CHECKED against the navigator)" if checked
+                 else ", NOT checked -- no sim telemetry seen)"))
+        print(f"scrapes (closer than {_qh:.2f} m): "
               f"{len(scrapes)} of {len(clearances)} poses "
               f"({100.0 * len(scrapes) / len(clearances):.1f} %)")
         if scrapes:

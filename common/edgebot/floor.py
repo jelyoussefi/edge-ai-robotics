@@ -532,6 +532,118 @@ def grid_shape(cell: float = GRID_CELL, bounds=GRID_BOUNDS):
     return max(1, int(round((x1 - x0) / cell))), max(1, int(round((y1 - y0) / cell)))
 
 
+# --------------------------------------------------------------- clearance
+#
+# WHERE the clearance is applied, and the two answers this project has given.
+#
+#   "dilate"  points_to_grid grows every occupied cell by CLEARANCE, and every
+#             corridor query then asks for the robot's bare half-width.
+#   "query"   the grid stays RAW -- obstacles and nothing else -- and every
+#             corridor query asks for half-width + CLEARANCE.
+#
+# Both demand the same corridor of real floor, and min_corridor() below is the
+# single expression that says how much. They are NOT the same test:
+#
+#   Dilation is a Minkowski sum with the structuring element, and ours is an
+#   ELLIPSE, so it rounds corners: the grown obstacle is what a CIRCULAR robot
+#   of that radius could not enter. The query test grows the swept rectangle
+#   instead, which is what a RECTANGULAR robot could not enter. Diagonally past
+#   a corner the ellipse is the more permissive of the two, and the difference
+#   is largest exactly where a robot rounds furniture.
+#
+#   Dilation also DESTROYS INFORMATION. Once the cells are grown there is no
+#   way to ask the grid a question at any other width -- so free_lane's own
+#   "how wide a lane WOULD have been clear" sweep, and every probe that tries
+#   to reproduce the navigator's decision, are answering about a grid that no
+#   longer describes the obstacles. That is the mechanism behind lane_probe and
+#   the navigator disagreeing, and no amount of keeping two knobs equal fixes
+#   it.
+#
+# A raw obstacle layer with the inflation applied at query time is also what
+# Nav2 does, which is why etape 4 gets cheaper if this is where we land.
+CLEARANCE_MODES = ("dilate", "query")
+
+
+def clearance_mode(value: str | None) -> str:
+    """Validate a mode name. A typo must not silently pick a behaviour."""
+    v = (value or "query").strip().lower()
+    if v not in CLEARANCE_MODES:
+        raise SystemExit(f"CLEARANCE_MODE={value!r} is not one of "
+                         f"{CLEARANCE_MODES}")
+    return v
+
+
+def query_half(robot_half: float, clearance: float, mode: str) -> float:
+    """Half-width to hand corridor_blocked, given where the margin lives.
+
+    THE one place that knows. Every corridor query in the navigator and in
+    every probe goes through this, so a probe cannot ask a different question
+    from the robot by getting the arithmetic subtly right in its own way.
+    """
+    return robot_half + clearance if clearance_mode(mode) == "query" else robot_half
+
+
+def query_pad(clearance: float, mode: str) -> float:
+    """Longitudinal inflation for a corridor query, given the mode.
+
+    The other half of query_half. Dilation grows an obstacle in EVERY
+    direction; widening the query corridor grows it across only. Without this,
+    query mode keeps the robot clear of a wall beside it and lets it walk into
+    the couch in front. Zero in dilate mode, where the cells already carry it
+    on both axes.
+    """
+    return clearance if clearance_mode(mode) == "query" else 0.0
+
+
+def min_corridor(robot_half: float, clearance: float) -> float:
+    """Narrowest gap of REAL FLOOR the robot will walk through, in metres.
+
+    Deliberately independent of the mode: choosing where to apply the margin
+    must not change how much margin there is. If these two ever disagree the
+    mode has become a tuning knob, which is the failure this replaces.
+    """
+    return 2.0 * (robot_half + clearance)
+
+
+def assert_same_corridor(mine: dict, published: dict | None,
+                         who: str = "this probe") -> None:
+    """Abort unless we ask the grid EXACTLY what the navigator asks it.
+
+    Checked rather than re-read. Every previous attempt to keep a probe and the
+    robot in step relied on a person comparing two files, and it failed every
+    time -- LANE_SLACK set in one container and not the other, DETOUR_MAX 1.8
+    against 2.4, a margin applied twice on one path and once on the other. A
+    number that must match should be compared by the machine, and the machine
+    should refuse to print anything if it does not.
+
+    What this does and does not catch. The probe adopts the navigator's knobs
+    off the bus first, so this is not a test that two environments agree -- it
+    is a test that, GIVEN the same inputs, the two arrive at the same question.
+    It therefore catches the thing that actually bites here: the shared helpers
+    below disagreeing between processes, because `common/edgebot` is BAKED into
+    the sim image and MOUNTED from the tree into a probe container. An edit to
+    this file that has not been rebuilt into the sim shows up as a mismatch
+    instead of as two plausible reports.
+
+    Compares the numbers that decide, not a summary: half-width and
+    longitudinal pad are what reach corridor_blocked, and two different
+    (half, pad) pairs can share a min_corridor.
+    """
+    if not published:
+        return
+    bad = [k for k, v in mine.items()
+           if published.get(k) is not None
+           and abs(float(v) - float(published[k])) > 1e-6]
+    if bad:
+        detail = ", ".join(f"{k}: {who} {mine[k]:.3f} vs navigator "
+                           f"{float(published[k]):.3f}" for k in bad)
+        raise SystemExit(
+            f"{who} would ask the grid a different question from the robot -- "
+            f"{detail}. Refusing to report numbers about a question the robot "
+            f"is not asking. Most likely common/edgebot is stale in one of the "
+            f"two images: rebuild with 'docker compose up -d --build sim'.")
+
+
 def points_to_grid(fwd, lat, sel, cell: float = GRID_CELL, bounds=GRID_BOUNDS,
                    margin: float = 0.0, passable: float = 0.0):
     """Rasterise selected world points onto the ground, with a real margin.
@@ -593,7 +705,8 @@ def unpack_grid(bits: bytes, nx: int, ny: int):
 
 def corridor_blocked(occ, x: float, y: float, dx: float, look: float,
                      half_width: float, cell: float = GRID_CELL,
-                     bounds=GRID_BOUNDS, behind: float = 0.15) -> bool:
+                     bounds=GRID_BOUNDS, behind: float = 0.15,
+                     pad: float = 0.0) -> bool:
     """Whether a straight corridor of the robot's width hits an occupied cell.
 
     `dx` is +1 or -1 along the world x axis, which is the only direction the
@@ -604,11 +717,20 @@ def corridor_blocked(occ, x: float, y: float, dx: float, look: float,
 
     `behind` starts the corridor slightly behind the robot so a footprint it is
     already standing in is not missed by a test that only looks forward.
+
+    `pad` extends the swept box ALONG the direction of travel, and exists so
+    that query-mode clearance is the same shape as dilate-mode clearance.
+    Widening half_width alone inflates the corridor across but not along, so
+    the robot would keep its margin from a wall beside it and none at all from
+    the couch in front of it. Measured before this was added: 61 lanes out of
+    4305 were clear for the query form and blocked for the dilate form, none
+    the other way round, all of them where an obstacle lay ahead rather than
+    beside. That is not a corner effect, it is a missing axis.
     """
     nx, ny = grid_shape(cell, bounds)
     gx0, _, gy0, _ = bounds
-    a = x - behind * dx
-    b = x + look * dx
+    a = x - (behind + pad) * dx
+    b = x + (look + pad) * dx
     lo, hi = (a, b) if a <= b else (b, a)
     i0 = int(np.floor((lo - gx0) / cell))
     i1 = int(np.ceil((hi - gx0) / cell))
@@ -630,7 +752,7 @@ def corridor_blocked(occ, x: float, y: float, dx: float, look: float,
 def free_lane(occ, x: float, y: float, dx: float, look: float,
               half_width: float, max_shift: float, prefer: float = 0.0,
               step: float = 0.05, cell: float = GRID_CELL,
-              bounds=GRID_BOUNDS):
+              bounds=GRID_BOUNDS, pad: float = 0.0):
     """Smallest sideways shift of the lane whose corridor ahead is clear.
 
     Answers the question the rectangle detour could only approximate: not "how
@@ -658,7 +780,7 @@ def free_lane(occ, x: float, y: float, dx: float, look: float,
     cands.sort(key=lambda s_: (round(abs(y + s_ - prefer), 6), abs(s_), -s_))
     for s in cands:
         if not corridor_blocked(occ, x, y + s, dx, look, half_width,
-                                cell, bounds):
+                                cell, bounds, pad=pad):
             return float(s), True
     # Nothing clear. Report the shift that reaches furthest, which is what the
     # robot should hold while it says so, rather than snapping back to zero.
@@ -668,7 +790,7 @@ def free_lane(occ, x: float, y: float, dx: float, look: float,
         reach = 0.0
         while reach < look:
             if corridor_blocked(occ, x, y + s, dx, reach + coarse, half_width,
-                                cell, bounds):
+                                cell, bounds, pad=pad):
                 break
             reach += coarse
         if reach > best_reach:
@@ -678,7 +800,8 @@ def free_lane(occ, x: float, y: float, dx: float, look: float,
 
 def nearest_free(occ, x: float, y: float, half_width: float,
                  max_reach: float = 3.0, step: float = 0.05,
-                 cell: float = GRID_CELL, bounds=GRID_BOUNDS):
+                 cell: float = GRID_CELL, bounds=GRID_BOUNDS,
+                 pad: float = 0.0):
     """Shortest sideways move that puts the robot on unoccupied cells.
 
     Sideways only, for the reason the rectangle escape gave: leaving through
@@ -689,13 +812,13 @@ def nearest_free(occ, x: float, y: float, half_width: float,
     in the robot currently is, or (None, 0.0) when it is already clear.
     """
     if not corridor_blocked(occ, x, y, 1.0, 0.0, half_width, cell, bounds,
-                            behind=0.0):
+                            behind=0.0, pad=pad):
         return None, 0.0
     n = int(max_reach / step)
     for k in range(1, n + 1):
         for s in (k * step, -k * step):
             if not corridor_blocked(occ, x, y + s, 1.0, 0.0, half_width,
-                                    cell, bounds, behind=0.0):
+                                    cell, bounds, behind=0.0, pad=pad):
                 return float(s), float(k * step)
     return None, 0.0
 
@@ -712,7 +835,8 @@ def grid_extent(grid, cell: float = GRID_CELL, bounds=GRID_BOUNDS):
 
 def clear_reach(occ, x: float, y: float, dx: float, look: float,
                 half_width: float, step: float = 0.10,
-                cell: float = GRID_CELL, bounds=GRID_BOUNDS) -> float:
+                cell: float = GRID_CELL, bounds=GRID_BOUNDS,
+                pad: float = 0.0) -> float:
     """How far ahead the robot's CURRENT line stays clear, in metres.
 
     Distinct from free_lane, which answers where the robot should be. This
@@ -723,7 +847,7 @@ def clear_reach(occ, x: float, y: float, dx: float, look: float,
     reach = 0.0
     while reach < look:
         if corridor_blocked(occ, x, y, dx, reach + step, half_width,
-                            cell, bounds, behind=0.0):
+                            cell, bounds, behind=0.0, pad=pad):
             return reach
         reach += step
     return look

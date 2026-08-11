@@ -35,7 +35,8 @@ from OpenGL import GL
 from edgebot import topics
 from edgebot.camera import stream_mode, stream_name
 from edgebot.floor import (GRID_BOUNDS, GRID_CELL, box_footprints,
-                           clear_of_boxes, clip_footprints, grid_extent,
+                           clear_of_boxes, clearance_mode, clip_footprints,
+                           grid_extent,
                            grid_shape, mask_footprints_xy,
                            mask_footprints, pack_grid, points_to_grid,
                            polygon_from_mask, shrink, straighten)
@@ -1461,11 +1462,30 @@ def _warn_if_calibration_stale() -> None:
 # grid, because the only honest source for "how much margin is in these cells"
 # is the process that put it there.
 #
-# Was CLEARANCE, which was one of three margins that stacked without
+# Was OBSTACLE_MARGIN, which was one of three margins that stacked without
 # anyone adding them up. See navigator.py: the other two were LANE_SLACK and
 # GAP_CLEAR, and the two code paths that used them demanded 0.84 m and 0.88 m
 # of corridor for the same robot in the same room.
 CLEARANCE = float(os.environ.get("CLEARANCE", "0.12"))
+# WHERE it is applied. "query" keeps the published grid RAW and leaves the
+# inflation to whoever asks it a question; "dilate" grows the cells here. See
+# the block comment in edgebot/floor.py -- the two are not the same test on
+# corners, and only one of them leaves a grid that can still be asked about
+# another width. Both are published so the consumer never has to guess.
+#
+# THE RECTANGLES ARE DELIBERATELY NOT AFFECTED. `blocked` carries CLEARANCE in
+# both modes, and so do clip_footprints and the floor-mask cut that consume it.
+# That is a decoupling, stated here because failing to state it is this
+# repository's recurring bug: topics.py documents `blocked` as published with
+# the margin applied, the suite comparison in docs/ETAPE-C-RESULTS.md measures
+# our footprints against Intel's on that basis, and the navigator's rects path
+# adds only its own half-width for the same reason. Switching the grid to a
+# raw layer does not change what a rectangle means; it changes what a CELL
+# means, and only the grid path reads cells.
+CLEARANCE_MODE = clearance_mode(os.environ.get("CLEARANCE_MODE"))
+# The margin actually grown into the cells, which is the number the grid is
+# published with. Zero in query mode is the whole point of query mode.
+GRID_MARGIN = 0.0 if CLEARANCE_MODE == "query" else CLEARANCE
 # Bound each footprint by the object's own measured depth rather than by the
 # ground-plane projection of its silhouette. 0 restores the projection.
 FOOTPRINT_FROM_DEPTH = os.environ.get("FOOTPRINT_FROM_DEPTH", "1") != "0"
@@ -2237,8 +2257,10 @@ def _ground_grids(seg_mask, seg_mask_t, floor_det, depth_metres, floor_mask):
                  "%d at floor height returned to the floor",
                  int(sm.sum()), int(sm_obj.sum()), OBJECT_Z_MIN,
                  int(on_floor.sum()))
+    # GRID_MARGIN, not CLEARANCE: zero in query mode, where the inflation is
+    # the consumer's job and this layer stays a plain map of obstacles.
     occ = points_to_grid(f, l, sm_obj, GRID_CELL, GRID_BOUNDS,
-                         margin=CLEARANCE, passable=GRID_PASSABLE)
+                         margin=GRID_MARGIN, passable=GRID_PASSABLE)
     flr = None
     if floor_mask is not None and floor_mask.any():
         # Every FLOOR_STRIDE-th pixel in each direction, on the mask rather
@@ -2416,12 +2438,14 @@ def _publish_free_floor(pub, floor_det, depth_metres, floor_paint_cpu,
                              "flr": pack_grid(_fg) if _fg is not None else b"",
                              "gnx": _nx, "gny": _ny, "gcell": GRID_CELL,
                              "gbounds": list(GRID_BOUNDS),
-                             # How much margin is already grown into these
-                             # cells. The consumer tests at its own half-width
-                             # and adds nothing; this is what lets it convert
-                             # a grid width back into metres of real floor,
-                             # and what stops it applying a second margin.
-                             "clearance": CLEARANCE}
+                             # The clearance in force and WHERE it lives. Both,
+                             # because either alone is unusable: the metres say
+                             # how much corridor the robot needs, the mode says
+                             # whether these cells already contain it. A
+                             # consumer that guesses either applies the margin
+                             # twice or not at all, and both look plausible.
+                             "clearance": CLEARANCE,
+                             "clearance_mode": CLEARANCE_MODE}
             pub.send(topics.PATROL_ROI,
                      {**_grid_msg, "roi": roi_cached, "blocked": blocked,
                       # Which detected object each rectangle belongs to.
