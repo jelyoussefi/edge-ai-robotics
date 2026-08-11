@@ -237,6 +237,23 @@ robot repart à chaque fois.
 C'est un **résultat**, pas un échec, et il ne tient ni au budget de marge ni à
 un réglage.
 
+### 7.0 Les quatre scènes, pour qui arrive ici
+
+Le mobilier a bougé quatre fois pendant cette étape. **Les chiffres d'une scène
+ne se comparent à ceux d'une autre sous aucun prétexte**, et chaque mesure
+ci-dessous nomme la sienne.
+
+| scène | mobilier | cellules occupées | ce qu'elle a servi à établir |
+|---|---|---|---|
+| **A** | aucune table ; ce que j'ai pris pour un couloir était un renfoncement du canapé | 2095–2187 | la ligne de base, et une leçon de méthode (§6.0) |
+| **B** | table posée, non centrée | 2540–3332 | le couloir échoue par **dérive de l'axe** : 0,27 m, 0,35 m communs |
+| **C** | table recentrée, 0,90 m dégagés | ~2637–3444 | même verdict, **cause opposée** : droit et trop étroit |
+| **D** | table décalée : 1,20 m à droite et derrière, 0,70 m côté TV | 3251–3716 | **le budget démontré dans les deux sens**, et la régression |
+
+Le compte de cellules ne suffit pas à distinguer deux scènes — il oscille de
+±800 d'une trame à l'autre, plus que l'écart entre B et C. L'identité de scène
+est établie sur la **géométrie** : extension occupée et structure des travées.
+
 ### 7.1 Largeur : la grille contre le mètre
 
 Scène C, table recentrée à **3,20 m** du pied de la caméra, **0,90 m** libres sur
@@ -610,12 +627,19 @@ Corrigé : `min_corridor()` est la seule expression autorisée à répondre.
 
 ## 8. Commits
 
-| commit | contenu |
-|---|---|
-| `ff29720` | un seul `CLEARANCE`, `LANE_SLACK` et `GAP_CLEAR` retirés, couloir journalisé en mètres |
-| `7b16859` | couche d'obstacles brute, inflation à la requête, `pad` longitudinal, assertions sonde/robot, `clearance_probe` |
-| `8d4494f` | premier compte rendu, avant la scène |
-| `79b7d00` | ligne de base scène A, double comptage de `lane_probe` corrige |
+| commit | contenu | scène |
+|---|---|---|
+| `ff29720` | un seul `CLEARANCE` ; `LANE_SLACK`, `GAP_CLEAR`, `OBSTACLE_CLEAR` retirés ; couloir journalisé en mètres | — |
+| `7b16859` | couche d'obstacles brute, inflation à la requête, `pad` longitudinal, assertions sonde/robot, `clearance_probe` | — |
+| `8d4494f` | premier compte rendu, avant toute scène | — |
+| `79b7d00` | ligne de base, et le double comptage de `lane_probe` corrigé | **A** |
+| `fa50481` | le couloir n'est pas droit : dérive de 0,27 m, 0,35 m communs ; `--corridor` ajouté | **B** |
+| `9ec66cb` | même verdict, cause opposée : trop étroit et non tordu ; colonne mètre remplie ; agrégation `--frames` ; verdict de l'outil corrigé | **C** |
+| `93f93e1` | budget démontré dans les deux sens ; la régression consignée ; `nav_probe` sépare marge entamée et corps dans le meuble | **D** |
+| `37bbb92` | diagnostic : carte saine, polygone effondré à 88 %, ni l'un ni l'autre la cause ; la décision du navigateur publiée sur le bus | **D** |
+| `97bde1b` | **le plancher `START_VX` plafonne le frein d'élan** au lieu d'être écrasé par lui | **D** |
+| `ede25a0` | clôture : budget démontré, patrouilleur renvoyé à l'étape 4 ; `LANE=−0,88` testé et réfuté | **D** |
+| `86ca4ab` | étape 6, hors de cette étape mais issu du même audit : garde de bornes unique et partagé | — |
 
 ## 9. Reproduire
 
