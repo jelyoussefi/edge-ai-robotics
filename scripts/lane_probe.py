@@ -334,9 +334,17 @@ def main() -> int:
     print()
 
     # Lane scan, at exactly the width free_lane asks for.
-    print("lane reach from x=%.2f m, corridor %.2f m in the grid = %.2f m "
-          "of real floor, look %.1f m:"
-          % (args.from_x, 2 * half, 2 * (half + CLEARANCE), args.look))
+    #
+    # 2 * half IS the real corridor in query mode -- the grid is raw, so the
+    # inflation is already inside `half`. Adding CLEARANCE again printed
+    # "0.68 m in the grid = 0.92 m of real floor" for a robot demanding 0.68,
+    # which is the very double-count this etape exists to remove, committed in
+    # the tool that measures it. min_corridor() is the one expression allowed
+    # to answer this, in either mode.
+    print("lane reach from x=%.2f m, corridor %.2f m of REAL FLOOR "
+          "(grid queried at %.2f m half-width, %s mode), look %.1f m:"
+          % (args.from_x, min_corridor(HALF_WIDTH, CLEARANCE), half,
+             CLEARANCE_MODE, args.look))
     lanes = np.arange(-2.6, 2.6 + 1e-6, args.lane_step)
     reaches = []
     for y in lanes:

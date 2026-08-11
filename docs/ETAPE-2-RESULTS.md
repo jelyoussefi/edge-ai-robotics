@@ -1,10 +1,10 @@
 # Étape 2 : un seul budget de marge
 
-**État : partie architecture close et mesurée, partie recette EN ATTENTE DE LA
-SCÈNE.** Le critère central — un couloir réel mesuré au mètre, franchi — exige
-que la table basse soit placée et mesurée, ce que ce document ne peut pas faire.
-Ce qui suit sépare strictement les deux : §§1-6 sont mesurés, §7 est la liste de
-ce qui manque et ne revendique rien.
+**État : architecture close et mesurée, ligne de base prise sur la scène figée,
+critère du couloir NON DÉMONTRÉ.** Il ne l'est pas pour deux raisons qui ne sont
+ni l'une ni l'autre le budget de marge : la patrouille s'arrête 1,4 m avant la
+table, et la grille referme le couloir 0,30 m après son entrée. Le §7 les
+détaille et dit ce qu'il faut pour les lever. Rien n'y est revendiqué.
 
 ---
 
@@ -173,61 +173,119 @@ demi-largeur pour la même raison.
 **Le mode change ce que signifie une CELLULE**, et seul le chemin grille lit des
 cellules. Les deux représentations exigent le même couloir de 0,68 m.
 
-## 6. Ce qui est mesuré à ce jour
+## 6. La scène figée, et la ligne de base dessus
 
-Passe de 60 s, contre la grille, code en mode `query`, **sur la scène telle
-qu'elle est aujourd'hui, sans le couloir à démontrer** :
+Table basse placée pour former le couloir, mobilier figé, 2026-08-11.
 
-| | ligne de base (`97f2445`, mode dilate) | maintenant (mode query) |
-|---|---|---|
-| poses / mises à jour ROI | 3457 / 59 | 3502 / 60 |
-| **laps couverts** | **252 à 254** | **4 à 7** |
-| **raclages** | **0 / 3438 = 0,0 %** | **0 / 3495 = 0,0 %** |
-| **clairance minimale** | **+0,433 m** | **+0,410 m** |
-| clairance p05 / médiane | +0,727 / +1,438 m | +0,683 / +1,195 m |
-| distance parcourue | 2,27 m avant, 1,22 m latéral | 2,05 m avant, 1,27 m latéral |
-| couloir exigé | 0,68 m (non journalisé) | **0,68 m, journalisé, vérifié** |
+**Largeur réelle au mètre : NON RENSEIGNÉE.** La consigne portait `X,XX m`, resté
+en gabarit. C'est le seul chiffre manquant du compte rendu et il n'est pas
+substituable : tout le §7 se joue sur la comparaison entre ce nombre et ce que la
+grille mesure.
 
-**Ces deux colonnes ne se comparent pas et ne doivent pas être lues comme un
-avant/après.** La scène a changé entre les deux : la session du 2026-08-10 a été
-interrompue, l'affichage X est passé de `:0` à `:1`, et le mobilier n'a pas été
-figé. Le compte des cellules occupées le dit :
+### Ligne de base, 60 s, contre la grille
 
-| | cellules occupées |
+| | valeur |
 |---|---|
-| 2026-08-10, mode dilate | 2624 / 2656 / 2744 |
-| 2026-08-11, mode query, grille **brute** | 2005 à 2473, médiane 2249 sur 297 échantillons |
+| poses / mises à jour ROI | 3489 / 59 |
+| **laps couverts** | **43 à 46** |
+| **cellules occupées (grille brute)** | **2095 à 2187**, médiane 2168 |
+| **raclages** | **0 / 3432 = 0,0 %** |
+| **clairance minimale** | **+0,633 m** |
+| clairance p05 / médiane | +0,763 m / +1,469 m |
+| distance parcourue | 2,05 m avant, 1,19 m latéral |
+| empreintes publiées | médiane 24 (23 à 24) |
+| couloir exigé | **0,68 m de sol réel**, journalisé, vérifié par assertion |
+| sol libre | 4444 cellules = 11,11 m2 |
 
-Et ces deux lignes ne sont pas non plus comparables entre elles : **une grille
-brute et une grille dilatée n'ont pas le même nombre de cellules par
-construction** — mesuré, x1,33 sur la même trame. Le contrôle d'identité de
-scène demandé doit donc se faire **à mode égal**, et la bande de référence en
-mode `query` est celle de la deuxième ligne.
-
-## 7. Ce qui manque, et pourquoi
-
-Trois critères sur quatre ne sont pas satisfaits, et aucun ne l'est par le code :
-ils exigent tous une intervention physique sur la pièce.
-
-- [ ] **La table basse placée pour former le couloir à démontrer, et sa largeur
-      mesurée au mètre.** Je ne peux ni déplacer un meuble ni tendre un mètre.
-      Sans cela il n'y a pas de couloir à franchir : `clearance_probe` ne trouve
-      aujourd'hui aucun passage sous 1,75 m dans cette pièce.
-- [ ] **La ligne de base de l'étape 0 refaite sur cette scène figée**, avec les
-      laps. Elle doit être prise **après** le placement, sinon elle décrit une
-      autre pièce.
-- [ ] **Le couloir réel franchi**, contre la grille.
-- [ ] **Raclages et clairance minimale au moins aussi bons que cette base.**
-
-Le mobilier doit être figé avant la ligne de base et ne plus bouger jusqu'au
-compte rendu. Chaque mesure reportera son nombre de cellules occupées ; deux
-passes qui s'écartent de plus que la bande du §6 ne portent pas sur la même
+Bande d'identité de scène pour la suite : **2095 à 2187 cellules occupées, en
+mode `query`, grille brute.** Toute passe hors de cette bande porte sur une autre
 scène et la base sera refaite plutôt que comparée.
 
-**Arithmétique en attendant, qui n'est pas une mesure.** Un couloir de 0,90 m
-passe le budget de 0,68 m avec 0,11 m par côté, là où les deux anciens chemins le
-passaient de 0,03 m et de -0,02 m. C'est ce que la mesure doit confirmer ou
-démentir, pas ce qu'elle remplace.
+C'est aussi la meilleure ligne de base de la série : clairance minimale +0,633 m
+contre +0,433 m et +0,410 m aux deux précédentes, et le nombre d'empreintes ne
+bouge plus que de 23 à 24 au lieu de 21 à 39.
+
+### Ce que la grille mesure du couloir
+
+Le couloir table–canapé, côté y négatif, largeur libre par tranche de 0,05 m :
+
+```
+  x=4.30   une seule travee de 5.35 m   (la table n'est pas encore la)
+  x=4.35   1.25 m  de y -1.35 a -0.10
+  x=4.45   1.20 m  de y -1.30 a -0.10
+  x=4.55   1.05 m  de y -1.20 a -0.15
+  x=4.60   1.05 m  de y -1.20 a -0.15
+  x=4.65   ferme : 0.10 / 0.20 / 0.35 m en trois morceaux
+  x=4.80   plus rien
+```
+
+**Le couloir fait 1,05 à 1,25 m de large, très au-dessus du budget de 0,68 m, et
+il ne fait que 0,30 m de long.** Il se referme à x = 4,65 m.
+
+Conséquence directe, vérifiée : aucune voie ne le traverse, à aucune largeur.
+
+```
+cote table-canape (y de -1.4 a 0.0), largeur la plus etroite qui passerait :
+  0.20 m -> 0 voie      0.50 m -> 0 voie
+  0.30 m -> 0 voie      0.55 m -> 0 voie
+  0.40 m -> 0 voie      0.68 m -> 0 voie
+  AUCUNE, jusqu'a 0.20 m : la grille dit que ce cote est bouche.
+```
+
+Les seules voies qui franchissent x = 3,5 → 5,2 m au budget de 0,68 m sont à
+**y +1,90 à +2,40 m**, c'est-à-dire en contournant la table par la droite, pas
+par le couloir.
+
+## 7. Le critère du couloir : ce qui bloque, et ce n'est pas le budget
+
+Trois obstacles, dans l'ordre où ils comptent. Aucun n'est le budget de marge :
+1,20 m de couloir contre 0,68 m demandés, il y a 0,26 m de reste par côté.
+
+### 7.1 La patrouille ne va pas jusqu'au couloir
+
+`STOP_AT = 3,10 m`. La table est à **x = 4,5 m**. Le robot fait demi-tour
+1,4 m avant de l'atteindre et ne s'en approche jamais — les 60 s ci-dessus le
+montrent, la course va de 0,73 à 2,78 m. **Même un couloir parfait ne serait pas
+franchi.** Il faut porter `STOP_AT` au-delà du couloir, vers 5,0 m.
+
+### 7.2 La grille referme le couloir à 4,65 m
+
+Et c'est le point qui a besoin du mètre. Deux lectures possibles, exclusives :
+
+- **Le couloir se termine vraiment là.** Il longe le canapé et le canapé
+  ressort à x = 4,65 m ; ce n'est pas un passage traversant dans la pièce non
+  plus. Alors la grille a raison et c'est la scène qu'il faut réarranger, pour
+  que le couloir débouche le long de l'axe de patrouille.
+- **Le couloir est réellement ouvert et c'est la perception qui le ferme.**
+  Alors le défaut n'est pas dans le budget de marge mais en amont, et l'étape 2
+  n'est pas l'endroit où le corriger.
+
+**Votre mesure au mètre tranche.** Si le mètre dit que le passage continue
+au-delà de 4,65 m, c'est la seconde lecture.
+
+### 7.3 Restent, une fois 7.1 et 7.2 levés
+
+- [ ] le couloir réel franchi, contre la grille
+- [ ] raclages et clairance minimale au moins aussi bons que **0,0 % et
+      +0,633 m**, sur une passe dans la bande 2095–2187 cellules
+
+Ce qui est déjà acquis et ne dépend plus de rien :
+
+- [x] une seule grandeur exposée, `CLEARANCE`
+- [x] `LANE_SLACK`, `GAP_CLEAR` et `OBSTACLE_CLEAR` retirés de l'interface
+- [x] le couloir exigé journalisé en mètres au démarrage, robot compris
+- [x] la plage de laps et le compte de cellules dans chaque mesure
+- [x] `lane_probe` et `nav_probe` exigent la même largeur que le navigateur,
+      par assertion falsifiée et non par relecture
+
+### 7.4 Un double comptage trouvé dans la sonde en préparant ceci
+
+`lane_probe` imprimait `corridor 0.68 m in the grid = 0.92 m of real floor` pour
+un robot qui en demande 0,68. En mode `query` la grille est brute, donc
+`2 x half` **est déjà** le sol réel, et rajouter `CLEARANCE` le comptait deux
+fois — exactement le défaut que cette étape supprime, commis dans l'outil qui le
+mesure. Corrigé : `min_corridor()` est la seule expression autorisée à répondre,
+dans les deux modes.
 
 ## 8. Commits
 
@@ -235,6 +293,7 @@ démentir, pas ce qu'elle remplace.
 |---|---|
 | `ff29720` | un seul `CLEARANCE`, `LANE_SLACK` et `GAP_CLEAR` retirés, couloir journalisé en mètres |
 | `7b16859` | couche d'obstacles brute, inflation à la requête, `pad` longitudinal, assertions sonde/robot, `clearance_probe` |
+| `8d4494f` | premier compte rendu, avant la scène |
 
 ## 9. Reproduire
 
