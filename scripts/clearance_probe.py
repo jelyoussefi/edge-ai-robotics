@@ -67,6 +67,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=float, default=20.0)
     ap.add_argument("--clearance", type=float, default=0.12)
+    ap.add_argument("--frames", type=int, default=10,
+                    help="grids to aggregate; one frame is noise")
     ap.add_argument("--corridor", type=float, nargs=4,
                     metavar=("X0", "X1", "YLO", "YHI"),
                     default=[2.0, 5.0, -4.0, 4.0],
@@ -76,16 +78,17 @@ def main() -> int:
     args = ap.parse_args()
 
     sub = Subscriber([topics.PATROL_ROI])
-    msg = None
+    msgs = []
     t0 = time.time()
-    while time.time() - t0 < args.seconds and msg is None:
+    while time.time() - t0 < args.seconds and len(msgs) < args.frames:
         got = sub.recv(500)
         if got and got[1].get("occ"):
-            msg = got[1]
+            msgs.append(got[1])
     sub.close()
-    if msg is None:
+    if not msgs:
         print("no occupancy grid on the bus; is the stack running?")
         return 1
+    msg = msgs[-1]
 
     nx, ny = int(msg["gnx"]), int(msg["gny"])
     cell = float(msg.get("gcell", GRID_CELL))
@@ -220,6 +223,56 @@ def main() -> int:
         print(f"{bounds[0] + i * cell:7.2f}{w:12.2f}{c_y:+11.2f}   "
               f"{a:+.2f}..{b_:+.2f}")
 
+    # The same analysis on EVERY frame collected, because one is noise. Two
+    # consecutive single-frame runs of this gave 0.50 m and 0.40 m of common
+    # width -- 0.10 m apart on the quantity the verdict turns on. The per-slice
+    # table above is the last frame, for shape; these are the numbers to quote.
+    agg = []
+    for mm in msgs:
+        o = unpack_grid(mm["occ"], nx, ny)
+        if o is None:
+            continue
+        rr = []
+        for i in range(i0, i1):
+            row = o[i, :]
+            rs_, st = [], None
+            for j in range(j_lo, j_hi + 1):
+                free = j < j_hi and not row[j]
+                if free and st is None:
+                    st = j
+                elif not free and st is not None:
+                    rs_.append((st, j))
+                    st = None
+            if not rs_:
+                rr = None
+                break
+            a2, b2 = max(rs_, key=lambda r: r[1] - r[0])
+            rr.append((bounds[2] + a2 * cell, bounds[2] + b2 * cell))
+        if rr is None:
+            agg.append((0.0, 0.0, 0.0))
+            continue
+        lo2 = max(r[0] for r in rr)
+        hi2 = min(r[1] for r in rr)
+        agg.append((max(0.0, hi2 - lo2),
+                    min(r[1] - r[0] for r in rr),
+                    max(r[1] - r[0] for r in rr)))
+    if agg:
+        com = sorted(a[0] for a in agg)
+        nar = sorted(a[1] for a in agg)
+        wid = sorted(a[2] for a in agg)
+        med = lambda v: v[len(v) // 2]
+        print()
+        print(f"over {len(agg)} frames, not one:")
+        print(f"  common width   median {med(com):.2f} m  "
+              f"({com[0]:.2f} to {com[-1]:.2f})")
+        print(f"  narrowest      median {med(nar):.2f} m  "
+              f"({nar[0]:.2f} to {nar[-1]:.2f})")
+        print(f"  widest         median {med(wid):.2f} m  "
+              f"({wid[0]:.2f} to {wid[-1]:.2f})")
+        print(f"  budget         {min_corridor(HALF_WIDTH, c):.2f} m, "
+              f"cleared in {sum(1 for v in com if v >= min_corridor(HALF_WIDTH, c))}"
+              f" of {len(com)} frames")
+
     print()
     if any(r is None for r in rows):
         print("INTERSECTION: EMPTY -- at least one slice is fully blocked in "
@@ -243,13 +296,35 @@ def main() -> int:
                   f"width against {budget:.2f} m demanded, centred "
                   f"{(lo + hi) / 2.0:+.2f} m.")
         else:
-            print(f"\nNOT PASSABLE IN A STRAIGHT LINE. Every slice is at "
-                  f"least {narrow:.2f} m wide but only {common:.2f} m is "
-                  f"common to all of them, against {budget:.2f} m demanded. "
-                  f"The axis drifts {drift:.2f} m. No value of CLEARANCE "
-                  f"fixes this -- free_lane tests straight corridors, and the "
-                  f"corridor is not straight. It needs a planner that can "
-                  f"follow a curve: etape 4, Nav2 and ITS.")
+            # WHY it fails matters more than THAT it fails, and the two causes
+            # want opposite responses. If the common width is close to the
+            # narrowest slice, the corridor is essentially straight and simply
+            # too narrow -- widen the gap, or accept the robot cannot fit. If
+            # the common width is far below the narrowest slice, every slice is
+            # wide enough and the corridor still fails, which is drift: no gap
+            # widening helps and it needs a planner that can follow a curve.
+            #
+            # An earlier version printed "not straight" for both, which was
+            # simply wrong the first time the drift came out at 0.08 m.
+            lost = narrow - common
+            if lost < 0.10:
+                print(f"\nTOO NARROW. The narrowest slice is {narrow:.2f} m "
+                      f"and {common:.2f} m survives the intersection, so the "
+                      f"corridor is effectively straight ({drift:.2f} m of "
+                      f"drift) and simply narrower than the {budget:.2f} m "
+                      f"demanded. Lowering CLEARANCE to "
+                      f"{max(0.0, common / 2.0 - HALF_WIDTH):.2f} m would let "
+                      f"the robot in with nothing to spare; whether that is "
+                      f"wise is a different question from whether it fits.")
+            else:
+                print(f"\nNOT PASSABLE IN A STRAIGHT LINE, and not because it "
+                      f"is narrow. Every slice is at least {narrow:.2f} m wide "
+                      f"but only {common:.2f} m is common to all of them -- "
+                      f"{lost:.2f} m lost to an axis that drifts {drift:.2f} m. "
+                      f"No value of CLEARANCE fixes this: free_lane tests "
+                      f"straight corridors and this one is not straight. It "
+                      f"needs a planner that can follow a curve: etape 4, "
+                      f"Nav2 and ITS.")
 
     ext = grid_extent(occ, cell, bounds)
     if ext:

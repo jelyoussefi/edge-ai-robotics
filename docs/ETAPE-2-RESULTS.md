@@ -234,66 +234,95 @@ robot repart à chaque fois.
 C'est un **résultat**, pas un échec, et il ne tient ni au budget de marge ni à
 un réglage.
 
-### 7.1 Largeur : la grille, seule
+### 7.1 Largeur : la grille contre le mètre
 
-Votre mesure au mètre était restée en gabarit (`___ m`), donc la colonne « mètre »
-est vide et le rapprochement demandé au point 1 **n'est pas fait**. Ce que la
-grille mesure, et qui est directement du sol réel puisqu'en mode `query` la
-grille est brute :
+Scène C, table recentrée à **3,20 m** du pied de la caméra, **0,90 m** libres sur
+ses trois côtés dégagés. Mesures agrégées sur **15 trames**, pas une.
 
 | | grille | mètre |
 |---|---|---|
-| travée la plus large | 0,90 m (x = 3,10) | — |
-| travée typique | 0,55 à 0,65 m | — |
-| travée la plus étroite | 0,40 m (x = 4,50) | — |
-| position du couloir | x 3,10 à 4,55 m, y −1,35 à −0,35 | — |
+| travée la plus large | **0,75 m** (0,70 à 0,85) | **0,90 m** |
+| travée la plus étroite | **0,45 m** (0,05 à 0,55) | 0,90 m |
+| position du couloir | x 3,10 à 4,45 m, y −1,30 à −0,55 | table à x = 3,20 m |
 
-Donnez le chiffre et je remplis la colonne. Un manque résiduel de 10 à 15 cm
-serait de la sur-projection du canapé, pas un défaut de budget, et ne sera pas
-corrigé ici.
+**Manque résiduel de 0,15 m** au plus large : 0,75 m contre 0,90 m. C'est très
+exactement la bande que vous aviez annoncée pour de la sur-projection du canapé,
+et ce n'est pas un défaut de budget. **Noté, non corrigé ici.**
 
-### 7.2 Longueur et dérive de l'axe : ce qui décide
+Au plus étroit l'écart est de 0,45 m, mais ce point est à x = 4,45 m, soit
+1,25 m derrière la table : il n'appartient pas au dégagement de 0,90 m que le
+mètre décrit et ne doit pas être compté contre lui.
+
+**Ce que la grille ne permet pas d'affirmer.** Le couloir mesuré court de 3,10 à
+4,45 m, soit 1,35 m de long, ce qui est plus qu'une table basse. Je ne peux pas
+établir depuis la grille seule que ce passage EST le dégagement de 0,90 m que
+vous avez mesuré, plutôt qu'un couloir entre le canapé et autre chose qui
+commencerait au niveau de la table. Le rapprochement du tableau ci-dessus est
+donc fait sur la position et la largeur, pas sur une identification certaine.
+
+## 7.2 Longueur et dérive de l'axe : recalculé sur la scène C
 
 Largeur libre **et** centre du couloir, par tranche de 0,05 m :
 
 ```
       x  largeur   centre        x  largeur   centre
-   3.10     0.90    -0.80      3.90     0.55    -0.97
-   3.20     0.65    -0.92      4.00     0.60    -1.00
-   3.40     0.65    -0.92      4.10     0.55    -1.02
-   3.50     0.55    -0.92      4.20     0.60    -1.05
-   3.60     0.55    -0.92      4.30     0.55    -1.07
-   3.70     0.55    -0.92      4.40     0.50    -1.05
-   3.80     0.55    -0.97      4.50     0.40    -1.05
+   3.10     0.70    -0.95      3.90     0.60    -0.95
+   3.20     0.75    -0.92      4.00     0.60    -0.95
+   3.30     0.70    -0.95      4.10     0.60    -1.00
+   3.40     0.75    -0.92      4.20     0.60    -1.00
+   3.50     0.70    -0.95      4.30     0.55    -1.02
+   3.60     0.70    -0.95      4.40     0.55    -1.02
+   3.80     0.65    -0.97      4.45     0.50    -1.00
 ```
 
-| | |
-|---|---|
-| travée la plus large | 0,90 m |
-| travée la plus étroite | 0,40 m |
-| **commune à toutes les tranches** | **0,35 m**, sur y −1,20 à −0,85 |
-| budget exigé | **0,68 m** |
-| dérive de l'axe | **0,27 m** |
+Sur 15 trames :
 
-**Chaque tranche fait au moins 0,40 m, mais seules 0,35 m sont communes à toutes
-à la fois, contre 0,68 m demandés.** L'axe du couloir glisse de −0,92 à −1,07 m
-entre x = 3,2 et 4,3.
+| | scène B | **scène C** | budget |
+|---|---|---|---|
+| travée la plus large | 0,90 m | **0,75 m** (0,70–0,85) | |
+| travée la plus étroite | 0,40 m | **0,45 m** (0,05–0,55) | |
+| **commune à toutes les tranches** | **0,35 m** | **0,45 m** (0,05–0,55) | **0,68 m** |
+| **dérive de l'axe** | **0,27 m** | **0,10 m** | |
+| trames où le budget passe | — | **0 sur 15** | |
 
-C'est le motif du 2026-08-10 reproduit presque à l'identique — l'axe glissait
-alors de −0,95 à −1,08 m pour 0,35 m de largeur commune, exactement le même
-chiffre.
+**Le verdict tient, mais sa cause a changé, et c'est le point de ce recalcul.**
 
-`free_lane` ne teste que des couloirs **rectilignes parallèles à l'axe x**. Une
-largeur par tranche dit « ça passe » ; l'intersection dit que non. **Aucune
-valeur de `CLEARANCE` ne change cela** : même à 0, le budget serait 0,44 m contre
-0,35 m communs. Le couloir n'est pas trop étroit, il n'est pas droit.
+En scène B le couloir échouait par **dérive** : chaque tranche faisait au moins
+0,40 m et l'axe glissait de 0,27 m, ne laissant que 0,35 m communs. En scène C
+l'axe ne dérive plus que de 0,10 m et la largeur commune, 0,45 m, est
+pratiquement la tranche la plus étroite : **le couloir est droit et simplement
+trop étroit.**
+
+Ce sont deux diagnostics opposés qui appellent des réponses opposées : élargir le
+passage sert dans un cas et ne sert à rien dans l'autre. Recopier le verdict de
+la scène B aurait donné la bonne conclusion pour la mauvaise raison.
+
+**Correction d'outil, trouvée en le recalculant.** `clearance_probe` imprimait
+« NOT PASSABLE IN A STRAIGHT LINE » dès que la largeur commune passait sous le
+budget, quelle qu'en soit la cause. Faux dès la première dérive à 0,10 m. Il
+distingue maintenant les deux : largeur commune proche de la tranche la plus
+étroite = trop étroit ; largeur commune très en dessous = dérive.
 
 ### 7.3 Conséquence
 
-Le franchissement de ce couloir demande un planificateur capable de suivre une
-courbe. **C'est l'étape 4, Nav2 et ITS**, et c'est aussi la raison pour laquelle
-la couche d'obstacles brute du §3 était le bon choix : c'est la forme d'entrée
-que ce planificateur voudra.
+Sur la scène C, le couloir mesure **0,45 m de largeur commune contre 0,68 m
+demandés**, sur les 15 trames, sans exception. Le robot ne passe pas, et il a
+raison de ne pas passer : il fait 0,44 m d'épaule.
+
+Trois issues, et aucune n'est un réglage de cette étape :
+
+- **Élargir le passage** de 0,25 m. C'est la seule qui rende ce couloir
+  franchissable en ligne droite.
+- **Descendre `CLEARANCE` à 0,01 m**, ce que la sonde calcule et affiche. Le
+  robot entrerait avec 1 cm de reste par côté. Ce n'est pas proposé : le budget
+  existe pour absorber l'erreur de suivi et l'erreur de perception, dont
+  précisément les 0,15 m de sur-projection du §7.1.
+- **Un planificateur qui suit une courbe** — étape 4, Nav2 et ITS. Utile en
+  général, mais il ne fait pas passer 0,44 m de robot dans 0,45 m de couloir
+  avec une marge : il traite la dérive, pas l'étroitesse.
+
+La couche d'obstacles brute du §3 reste le bon choix pour l'étape 4, c'est la
+forme d'entrée que ce planificateur voudra.
 
 Le travail de franchissement — `STOP_AT` au-delà du couloir, vérification de
 `DETOUR_MAX`, passe de 60 s — **n'est pas fait**, et il ne le sera pas sur cette
@@ -309,9 +338,12 @@ peut pas faire.
 - [x] `lane_probe` et `nav_probe` exigent la même largeur que le navigateur,
       par assertion falsifiée
 - [x] raclages 0,0 % et clairance minimale +0,574 m sur la scène courante
-- [ ] **le couloir réel franchi** — établi comme **hors de portée du suivi
-      rectiligne**, renvoyé à l'étape 4
-- [ ] la largeur au mètre, pour le rapprochement du §7.1
+- [x] la largeur au mètre, rapprochée de la grille : 0,90 m contre 0,75 m,
+      **0,15 m de sur-projection**, dans la bande annoncée, non corrigée ici
+- [ ] **le couloir réel franchi** — **0,45 m de largeur commune contre 0,68 m
+      demandés, sur 15 trames sur 15**. Le couloir est droit et trop étroit pour
+      un robot de 0,44 m plus sa marge. Ni un réglage ni l'étape 4 n'y changent
+      quoi que ce soit : il faut élargir le passage.
 
 ### 7.5 Un double comptage trouvé dans la sonde
 
