@@ -121,6 +121,7 @@ def main() -> None:
     # reported 21 % of poses scraping against a representation nobody steers on.
     nav_corridor = None
     checked = False
+    trace: list = []
     stalled_seen = 0
     occ = None
     gcell = 0.05
@@ -144,6 +145,11 @@ def main() -> None:
         topic, p = msg
         if topic == topics.SIM_TELEMETRY:
             nav = (p or {}).get("nav") or {}
+            if nav:
+                trace.append(("nav", time.time() - t0,
+                              nav.get("lane"), nav.get("last_lane"),
+                              bool(nav.get("stalled")), bool(nav.get("blocked")),
+                              nav.get("lap")))
             if not checked and nav.get("MIN_CORRIDOR") is not None:
                 checked = True
                 HALF_WIDTH = float(nav.get("ROBOT_HALF_WIDTH", HALF_WIDTH))
@@ -163,6 +169,23 @@ def main() -> None:
                 stalled_seen += 1
             continue
         if topic == topics.PATROL_ROI:
+            # Per SAMPLE, not once at the end. "The grid emptied" and "the
+            # polygon collapsed" look identical in a summary and are different
+            # defects: one is the map the robot steers on, the other is a
+            # picture. Recording both every time is the only way to tell which
+            # moved, and when relative to the robot going somewhere it should
+            # not have.
+            _roi_pts = [(float(a), float(b)) for a, b in (p.get("roi") or [])]
+            _cells = None
+            if p.get("occ") and p.get("gnx"):
+                _g = unpack_grid(p["occ"], int(p["gnx"]), int(p["gny"]))
+                _cells = int(_g.sum()) if _g is not None else None
+            trace.append(("roi", time.time() - t0, _cells,
+                          (min(q[0] for q in _roi_pts),
+                           max(q[0] for q in _roi_pts),
+                           min(q[1] for q in _roi_pts),
+                           max(q[1] for q in _roi_pts)) if _roi_pts else None,
+                          None, None, None))
             if p.get("occ") and p.get("gnx"):
                 occ = unpack_grid(p["occ"], int(p["gnx"]), int(p["gny"]))
                 gcell = float(p.get("gcell", gcell))
@@ -266,6 +289,35 @@ def main() -> None:
                   f"clearance {worst[2]:+.3f} m")
     else:
         print("clearance: no footprints were published while the robot moved")
+
+    # ---- what moved, and when -------------------------------------------
+    rois = [t for t in trace if t[0] == "roi"]
+    navs = [t for t in trace if t[0] == "nav"]
+    if rois:
+        cells = [t[2] for t in rois if t[2] is not None]
+        boxes = [t[3] for t in rois if t[3] is not None]
+        print()
+        if cells:
+            cs = sorted(cells)
+            print(f"occupied cells per ROI message: median {cs[len(cs) // 2]}, "
+                  f"range {cs[0]}-{cs[-1]} over {len(cs)} samples")
+        if boxes:
+            depth = sorted(b[1] - b[0] for b in boxes)
+            far = sorted(b[1] for b in boxes)
+            print(f"ROI polygon depth: median {depth[len(depth) // 2]:.2f} m, "
+                  f"range {depth[0]:.2f}-{depth[-1]:.2f}; far edge median "
+                  f"{far[len(far) // 2]:.2f} m, range {far[0]:.2f}-{far[-1]:.2f}")
+            collapsed = sum(1 for b in boxes if b[1] - b[0] < 1.0)
+            print(f"ROI collapsed (< 1.0 m deep) in {collapsed} of "
+                  f"{len(boxes)} samples ({100.0 * collapsed / len(boxes):.0f} %)")
+    if navs:
+        lanes = [t[3] for t in navs if t[3] is not None]
+        if lanes:
+            ls = sorted(lanes)
+            print(f"lane held by the navigator: median {ls[len(ls) // 2]:+.2f} m,"
+                  f" range {ls[0]:+.2f} to {ls[-1]:+.2f}")
+        st = [t for t in navs if t[4]]
+        print(f"STALLED in {len(st)} of {len(navs)} telemetry samples")
 
     if poses:
         xs = [p[0] for p in poses]

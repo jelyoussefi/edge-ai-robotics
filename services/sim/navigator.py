@@ -394,7 +394,17 @@ class Navigator:
                 # A 60 s window can straddle a stall, and two runs that report
                 # the same numbers over different laps are not the same run.
                 "lap": self._laps,
-                "stalled": self._stalled}
+                "stalled": self._stalled,
+                # The DECISION, not just the configuration. An excursion is a
+                # lane the navigator chose; without the chosen lane on the bus
+                # a probe can only see where the robot ended up and has to
+                # guess why, which is how "it scraped" and "it was sent there"
+                # became indistinguishable.
+                "lane": self.lane,               # patrol lane, converged
+                "last_lane": self._last_lane,    # absolute lane held, + detour
+                "blocked": self._blocked,
+                "stop_at": self._stop_at,
+                "outbound": self._outbound}
 
     def set_floor(self, roi: list, blocked: list, inst: list | None = None) -> None:
         """Take the walkable floor and the obstacle footprints from perception.

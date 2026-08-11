@@ -412,6 +412,101 @@ meuble, séparés de `CLEARANCE` soit 0,12 m. Une traversée d'un couloir de 0,9
 ressortait à 41,9 % de « raclage » alors que le corps ne touchait rien : vrai,
 alarmant, et la mauvaise alarme. Les deux sont désormais rapportés séparément.
 
+### 7.3quater Diagnostic de la régression
+
+Ordre du moins cher au plus cher, et les trois réponses sont nettes.
+
+#### 1. La grille ou le polygone ? — **le polygone, et lui seul**
+
+`nav_probe` enregistre désormais, à **chaque** échantillon, le nombre de cellules
+occupées et la boîte du ROI. Sur 59 messages :
+
+| | |
+|---|---|
+| cellules occupées | médiane **3491**, plage 2272–3882 |
+| profondeur du polygone ROI | médiane **0,64 m**, plage 0,44–3,62 |
+| bord lointain du ROI | médiane 2,26 m, plage 2,06–5,24 |
+| **ROI effondré (< 1,0 m de profondeur)** | **52 échantillons sur 59 = 88 %** |
+
+**La carte est saine, le polygone est cassé.** Les cellules restent dans leur
+bande pendant que le polygone s'effondre 88 % du temps, et son bord lointain
+oscille de 2,06 à 5,24 m d'un message à l'autre. C'est le clignotement de
+l'étape 3 : `polygon_from_mask` ne conserve que la plus grande composante
+connexe, et la table coupe le sol en morceaux dont le plus grand change de
+message en message.
+
+#### 2. Le navigateur consomme-t-il le ROI ? — **non, toujours pas**
+
+Revérifié sur le code courant, `pad` longitudinal compris :
+
+```
+services/sim/navigator.py:287   self._roi: list = []      declaration
+services/sim/navigator.py:417   self._roi = roi           ecriture
+                                (aucune lecture)
+services/sim/navigator.py:299   self._flr = None          declaration
+services/sim/navigator.py:464   self._flr = unpack_grid   ecriture
+                                (aucune lecture)
+```
+
+Toutes les requêtes de couloir — `free_lane`, `corridor_blocked`, `clear_reach`,
+`nearest_free` — lisent `self._occ` et rien d'autre.
+
+**Conséquence, et elle contredit l'hypothèse de départ : le polygone qui
+clignote n'est PAS la cause de la régression.** Il ne peut pas l'être, le
+navigateur ne le lit jamais. La condition « si la cause est le polygone, l'étape
+3 devient prioritaire » **ne se déclenche pas**. L'étape 3 reste un défaut
+d'affichage — sévère, mesuré ici à 88 %, mais d'affichage.
+
+#### 3. L'excursion à y = +2,13 — **non reproduite**
+
+| | passe du §7.3ter | passe de diagnostic |
+|---|---|---|
+| marge entamée | 54,2 % | **23,6 %** |
+| corps dans le meuble | 41,5 % | **12,7 %** |
+| clairance minimale | −0,024 m | −0,023 m |
+| étendue latérale | **2,80 m** | **1,78 m** |
+| y atteint | **+2,13 m** | +0,50 m |
+| `STALLED` | 10 | **0** |
+| **voie tenue par le navigateur** | non enregistrée | **−0,62 m** (−0,63 à −0,61) |
+
+La voie choisie est **constante à −0,62 m**, du côté du couloir. **Le navigateur
+n'a envoyé le robot nulle part d'anormal.** L'excursion et les 10 `STALLED` ne se
+reproduisent pas ; le sim ayant été redémarré entre les deux, la piste la plus
+probable est la convergence de la voie de patrouille — `self.lane` part de
+`LANE=0` et converge sur le balayage mesuré des demi-tours, que la table
+perturbe. Non établi, faute de l'avoir revu.
+
+#### Ce qui reste, et c'est réel
+
+**12,7 % de poses avec le corps dans le mobilier, contre 0,0 % partout
+ailleurs.** La pire est à **(2,87 ; −0,03)** — sur l'axe, au coin d'attaque de la
+table, exactement comme dans la passe précédente à (3,38 ; −0,02).
+
+La cause est géométrique et déjà chiffrée : `LANE=0` place l'axe de patrouille
+**dans** la table, occupée en continu de x = 2,8 à 4,4 m à y = 0. Le robot doit
+donc se décaler de 0,88 m avant d'atteindre 2,8 m. Avec `CROSS_MAX = 0,35` rad il
+lui faut 0,88 / tan(0,35) ≈ **2,4 m d'élan**, et entre `RETURN_TO = 1,0` et la
+table il n'y en a que **1,8 m**. Il arrive l'erreur encore ouverte et coupe le
+coin. Le journal le disait déjà : `0.56 m of lateral error needs 2.46 m of
+run-up and only 0.50 m is clear`.
+
+Ce n'est pas un défaut de l'étape 2 : le budget de marge est correct et vérifié,
+c'est la consigne de patrouille qui est infaisable sur cette scène.
+
+**Interaction secondaire, mesurée et plus faible qu'attendu.** `RUNUP_MIN = 0,7 x
+CRUISE_VX = 0,6` demande 0,42 m/s et le plancher `START_VX = 0,45` de l'étape 5
+le relève à 0,45 : **le plancher écrête le frein d'élan**, de 3 cm/s. Réel, à
+corriger — `START_VX` devrait plafonner le frein plutôt que l'inverse — mais ce
+n'est pas la cause.
+
+#### Les trois issues
+
+- **`LANE = −0,88`** : patrouiller le long du couloir au lieu de le traverser.
+  Testable en une passe.
+- **`RETURN_TO` reculé** pour dégager les 2,4 m d'élan, au prix de la longueur
+  de patrouille.
+- **Étape 4**, un planificateur qui n'a pas à rejoindre une voie en ligne droite.
+
 ### 7.4 État des critères
 
 - [x] une seule grandeur exposée, `CLEARANCE`
