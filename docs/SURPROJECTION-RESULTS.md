@@ -152,3 +152,105 @@ docker compose run --rm --no-deps --entrypoint python3 \
 DEPTH_FILTERS=0 docker compose up -d source      # puis relancer la sonde
 docker compose up -d source                      # retour au defaut
 ```
+
+---
+
+# Partie II : rendre le biais explicite — mesuré, et la réponse est non
+
+Objectif : si le biais pire cas est **borné et connu**, `CLEARANCE` peut en tenir
+compte et le budget cesse de contenir une marge invisible. La prémisse a été
+testée avant d'être utilisée, et **elle ne tient pas**.
+
+## 7. Correction : ma référence à 0,005 m était fausse
+
+La partie I chiffrait la quantification à **+0,220 m** en comparant la grille
+livrée à une grille de 0,005 m. Cette référence n'est pas valide.
+
+Densité mesurée du nuage d'objet : 104 753 points sur 2881 cellules de 0,05 m,
+soit ~14 400 points/m², soit **8 mm entre points**. Une grille de 5 mm est donc
+**plus fine que le nuage** : l'objet s'y troue tout seul, chaque intervalle entre
+deux points devient une cellule libre, et la « largeur libre » qu'elle rapporte
+est du bruit d'échantillonnage, pas du sol.
+
+C'est visible dans le tableau de la partie I, que je n'avais pas su lire :
+0,750 → 0,760 → 0,800 → 0,850 quand la cellule descend de 0,05 à 0,005. Le saut
+est dans les deux dernières lignes, celles qui passent sous l'espacement du
+nuage.
+
+**Le chiffre de +0,220 m de la partie I est donc surestimé.** Les mesures
+ci-dessous le remplacent.
+
+## 8. Le biais, contre une référence valide
+
+706 paires de travées appariées sur 6 trames, chaque travée fine comparée à celle
+de la grille livrée qui la contient.
+
+| référence | n | moyen | médiane | p90 | p99 | pire | valide ? |
+|---|---|---|---|---|---|---|---|
+| **0,020 m** | 706 | **+0,076** | **+0,060** | +0,170 | +0,430 | **+0,500** | oui, cellule > espacement |
+| 0,010 m | 590 | +0,120 | +0,090 | +0,250 | +0,460 | +0,490 | oui, à la limite |
+| 0,005 m | 473 | +0,137 | +0,110 | +0,265 | +0,465 | +0,490 | **non**, plus fine que le nuage |
+
+**Le biais typique est petit : 0,060 m de médiane, 0,076 m de moyenne.** Loin des
+0,22 m annoncés en partie I.
+
+**Mais la queue n'est pas bornée : p99 à +0,430 m, pire cas +0,500 m.** La borne
+théorique de deux cellules, 0,100 m, est dépassée dans une travée sur trois.
+
+### Pourquoi la borne théorique ne tient pas
+
+« Un objet grossit d'au plus une cellule de chaque côté » décrit le déplacement
+d'un **bord**. Ce n'est pas ce qui arrive à une travée étroite : une travée réelle
+de 0,15 m tombe à zéro dans une grille de 0,05 m dès que ses deux bords tombent
+dans la même cellule ou dans deux cellules adjacentes. La travée n'est pas
+rétrécie de 0,10 m, elle est **supprimée**. Ces cas-là peuplent la queue.
+
+Le mécanisme que j'avais supposé — des points isolés remplissant des cellules
+entières — est écarté par la mesure : seules **4,3 %** des cellules occupées
+tiennent à un seul point et 8,1 % à deux ou moins, la médiane étant de 19 points
+par cellule. Les cellules sont bien peuplées ; c'est la géométrie des travées
+étroites qui produit la queue, pas le bruit.
+
+## 9. Conséquence : ne pas replier ce biais dans `CLEARANCE`
+
+La prémisse du sujet était « si le biais pire cas est borné et connu ». Il n'est
+ni l'un ni l'autre.
+
+Ajouter une constante à `CLEARANCE` serait juste en moyenne et **faux exactement
+là où le budget décide** : dans les passages étroits, qui sont ceux dont la queue
+est faite. Un budget explicite fondé sur une moyenne serait moins honnête que la
+marge cachée qu'il remplace, parce qu'il aurait l'air d'être une garantie.
+
+## 10. Le coût de 0,02 m, mesuré avant de l'écarter
+
+L'intuition du §6 de l'étape 5 se vérifie : c'est `points_to_grid` qui domine, pas
+la taille de grille.
+
+| cellule | grille | `points_to_grid` | dilatation | cellules | grille sur le bus |
+|---|---|---|---|---|---|
+| **0,05 m** (livrée) | 160x160 | **1,45 ms** | 0,009 ms | 2881 | 3,1 ko |
+| **0,02 m** | 400x400 | **1,98 ms** | 0,030 ms | 13 012 | 19,5 ko |
+| 0,01 m | 800x800 | 1,98 ms | 0,085 ms | 31 076 | 78,1 ko |
+
+**+0,53 ms et +16 ko**, payés à la fréquence de publication du ROI, mesurée à
+0,99 Hz. C'est 0,05 % du temps. La morphologie reste négligeable à 0,030 ms, et
+`points_to_grid` ne bouge presque pas parce que son coût est dans le nombre de
+**points**, pas dans le nombre de cellules.
+
+À 0,02 m le biais médian tomberait de 0,060 m à ce que la référence 0,02 m
+mesure, c'est-à-dire à peu près rien, et la queue serait divisée par 2,5 sur le
+même raisonnement géométrique — une travée doit alors être sous 0,06 m pour
+disparaître, au lieu de 0,15 m.
+
+## 11. Recommandation, et ce qui n'est pas fait
+
+**Rastériser à 0,02 m plutôt que replier le biais dans `CLEARANCE`.** Le coût est
+mesuré et négligeable, la queue est traitée à la source au lieu d'être compensée
+en moyenne, et le budget de marge reste ce qu'il dit être.
+
+**Rien n'est appliqué.** `GRID_CELL` est une constante de module dans
+`common/edgebot/floor.py`, pas un réglage : la changer touche le compositeur, le
+navigateur, les deux ponts suite et toutes les sondes, et invalide toutes les
+mesures de grille des documents précédents. Cela mérite son propre passage, avec
+une nouvelle ligne de base.
+
