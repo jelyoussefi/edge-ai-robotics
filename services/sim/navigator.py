@@ -305,6 +305,7 @@ class Navigator:
         # update, which reads as indecision and costs distance.
         self._last_lane = 0.0
         self._runup_logged = 1.0
+        self._runup_floored = False
         # Stall watchdog state. See _watch_stall.
         self._stalled = False
         self._stall_t0 = 0.0
@@ -630,6 +631,38 @@ class Navigator:
         if reach >= need:
             return 1.0
         cap = max(self.RUNUP_MIN, reach / max(1e-6, need))
+        # THE FLOOR CAPS THE BRAKE, HERE, WHERE THE BRAKE IS DECIDED.
+        #
+        # Before this, _runup_cap could ask for any speed it liked and _smooth
+        # silently lifted anything under START_VX back up. The two knobs fought
+        # one line apart with nothing saying so: RUNUP_MIN 0.7 x CRUISE_VX 0.6
+        # asks for 0.42 m/s, START_VX 0.45 returns 0.45, and the brake's bottom
+        # 3 cm/s simply did not exist. Small here, but the size is an accident
+        # of three numbers -- RUNUP_MIN 0.4 would have lost 0.21 m/s of braking
+        # authority the same silent way.
+        #
+        # The relationship is not symmetric and that is why it belongs here.
+        # Below START_VX the policy stops walking altogether (etape 5: START
+        # 0.42, STOP 0.26, measured), so a brake that asks for less is not
+        # braking, it is stopping -- and stopping in front of an obstacle it is
+        # still drifting away from is the deadlock RUNUP_MIN exists to prevent.
+        # The floor therefore wins, but it wins EXPLICITLY, with the arithmetic
+        # written down and a line in the log when it binds.
+        floor_cap = self.START_VX / max(1e-6, self.CRUISE_VX)
+        if cap < floor_cap:
+            if not self._runup_floored:
+                self._runup_floored = True
+                log.info("run-up brake floored: %.2f of cruise would be "
+                         "%.2f m/s, below the %.2f m/s the policy needs to "
+                         "keep walking, so it holds at %.2f (%.2f m/s). "
+                         "Braking authority is CRUISE_VX %.2f down to "
+                         "START_VX %.2f, not down to RUNUP_MIN %.2f.",
+                         cap, cap * self.CRUISE_VX, self.START_VX,
+                         floor_cap, self.START_VX, self.CRUISE_VX,
+                         self.START_VX, self.RUNUP_MIN)
+            cap = floor_cap
+        else:
+            self._runup_floored = False
         if abs(cap - self._runup_logged) > 0.15:
             self._runup_logged = cap
             log.info("easing to %.0f %% of cruise: %.2f m of lateral error "
@@ -1490,6 +1523,14 @@ class Navigator:
             # start. See START_VX -- the floor the rest of the code uses is the
             # speed that keeps a walking robot walking, 0.16 m/s below the one
             # that gets a stopped one going.
+            #
+            # This remains the LAST line of defence and not the place the
+            # run-up brake is arbitrated: _runup_cap now caps itself at
+            # START_VX / CRUISE_VX, so a braking command arrives here already
+            # above the floor and this max() is a no-op for it. Anything else
+            # that ever asks for a crawl still gets lifted, which is the point
+            # of a funnel; it just no longer silently undoes a deliberate
+            # decision taken sixty lines up.
             vx_des = max(vx_des, self.START_VX)
         self._vx += float(np.clip(vx_des - self._vx, -self.VX_SLEW * dt,
                                   self.VX_SLEW * dt))
