@@ -299,7 +299,12 @@ services:
       DISPLAY: ${DISPLAY:-:0}
       # The RealSense spatial/temporal/hole-filling filters. Set to 0 to see the
       # raw depth, which is full of holes on glossy floors.
-      DEPTH_FILTERS: "1"
+      # Reglable, contrairement a ce que la valeur en dur laissait croire :
+      # le commentaire ci-dessus dit "mettre a 0 pour voir la profondeur
+      # brute" et ce n'etait pas possible sans editer ce fichier. Trouve en
+      # voulant chiffrer la part des filtres dans la sur-projection de
+      # 0,15 m, qui se mesure precisement en les eteignant.
+      DEPTH_FILTERS: ${DEPTH_FILTERS:-1}
     volumes:
       - ./config:/config
       # Necessaire au calibrage assiste : `calibrate.py --dump-frame` ecrit les
