@@ -380,3 +380,78 @@ faites jusqu'ici, y compris les miennes, sont à lire avec cette réserve.
 
 Les 0,10 m d'écart résiduel côté droit ne sont pas expliqués. Les filtres en
 valent 0,05 m d'après la partie I ; le reste ne l'est pas.
+
+---
+
+# Partie IV : donner au critère une forme utilisable
+
+Le §15bis a montré que le taux de chevauchement sur 60 s n'est pas exploitable.
+C'est pourtant le critère de plusieurs étapes du plan. Mesuré avant d'y adosser
+quoi que ce soit : `scripts/criterion_probe.py`, **12 fenêtres de 60 s
+consécutives**, scène et configuration figées, laps 4 à 38.
+
+## 17. Ce que valent les cinq grandeurs candidates
+
+| grandeur | médiane | plage sur 12 fenêtres | dispersion |
+|---|---|---|---|
+| taux de chevauchement | 14,68 % | 8,86 à 18,34 | **65 % de la médiane** |
+| taux de raclage | 23,82 % | 18,16 à 25,77 | 32 % |
+| clairance **minimale** | −0,009 m | −0,010 à −0,003 | 73 % |
+| clairance **p05** | 0,054 m | −0,001 à 0,133 | **248 %** |
+| clairance **médiane** | 0,567 m | 0,537 à 0,655 | **21 %** |
+
+## 18. Combien de fenêtres : la résolution d'une comparaison
+
+Largeur de l'intervalle bootstrap à 90 % de la médiane, calculée sur n fenêtres.
+**Une différence plus petite que ce nombre ne peut pas être revendiquée**, quoi
+qu'en dise le plan.
+
+| n fenêtres | durée | chevauchement | raclage | clairance médiane |
+|---|---|---|---|---|
+| **1** | 1 min | **9,5 points** | 7,6 points | 0,118 m (20,8 %) |
+| 2 | 2 min | 6,6 | 5,8 | 0,087 m |
+| 3 | 3 min | 6,7 | 6,4 | 0,091 m |
+| **5** | **5 min** | **4,7 points** | 4,7 | **0,082 m (14,5 %)** |
+| 8 | 8 min | 4,2 | 3,3 | 0,057 m |
+| **12** | 12 min | **3,7 points** | 2,8 | **0,045 m (7,9 %)** |
+| 20 | 20 min | 3,0 | 1,2 | 0,025 m |
+
+**La médiane ne « se stabilise » pas à un n particulier** : elle converge
+lentement, en 1/√n, et il n'y a pas de coude. La question utile n'est donc pas
+« combien de fenêtres faut-il » mais **« quelle différence veut-on pouvoir
+affirmer »** :
+
+- affirmer **5 points** de taux de chevauchement : **5 fenêtres, 5 minutes**
+- affirmer **3 points** : 12 à 20 fenêtres, soit 12 à 20 minutes
+- affirmer **2 points** : au-delà de 20 fenêtres — hors de portée en pratique
+
+Une passe unique de 60 s, telle que la pratiquait le plan, ne résout que
+**9,5 points**. Les écarts de 12,7 contre 19,5 discutés plus haut sont donc
+**sous la résolution de la mesure qui les a produits**.
+
+## 19. Laquelle mérite d'être le critère
+
+**Pas la clairance minimale, malgré son apparente stabilité.** Sa plage,
+−0,010 à −0,003 m, est trompeuse : **−0,010 m est exactement −0,5 × la cellule**,
+c'est-à-dire le plancher mécanique de la grandeur. Elle est stable parce qu'elle
+est **saturée**. Elle dit « le robot a touché une cellule au moins une fois » et
+rien de plus : elle ne distingue pas un effleurement d'un labour, et sa valeur
+change si la cellule change, indépendamment du robot. C'était l'hypothèse posée
+en ouvrant la mesure, et elle est confirmée.
+
+**Pas la p05 non plus** : 248 % de dispersion, la pire des cinq.
+
+**La clairance médiane.** Dispersion relative de 21 % contre 65 % pour le taux,
+non saturée, exprimée en mètres donc comparable à un mètre-ruban, et sa
+résolution à 5 fenêtres — 0,082 m — est du même ordre que les grandeurs que ce
+projet manipule (`CLEARANCE` 0,12 m, sur-projection 0,15 m).
+
+Le **taux de chevauchement reste utile comme garde-fou binaire** : « aucune pose
+dans le mobilier » est un énoncé sur lequel la dispersion n'a pas de prise. C'est
+comme grandeur continue à comparer qu'il ne vaut rien.
+
+## 20. Conséquence pour le plan
+
+Reportée dans `docs/CLAUDE-CODE-PROMPT-simplification.md`, pas seulement ici :
+les critères des étapes restantes doivent être formulés sur une grandeur dont la
+stabilité est connue, avec le nombre de fenêtres écrit dans le critère.

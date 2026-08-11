@@ -89,7 +89,8 @@ Exposer **une seule** grandeur, par exemple `CLEARANCE`, calculée une fois et
 consommée partout. Supprimer `LANE_SLACK` et `GAP_CLEAR` de l'interface. Logger
 au démarrage le couloir minimal exigé en mètres, en toutes lettres.
 
-Critère : `nav_probe` sur 60 s, raclages et clairance minimale au moins aussi
+Critère (RÉVISÉ, voir « Sur la forme des critères » plus bas) :
+`nav_probe` sur 60 s, raclages et clairance minimale au moins aussi
 bons que la ligne de base, et un couloir réel de 0,9 m franchi.
 
 ---
@@ -219,3 +220,42 @@ LANE=0 DETOUR_MAX=2.4 RETURN_TO=1.2 STOP_AT=4.0 RUNUP_MIN=0.7 \
 `make full` ajoute les quatre briques suite avec `GF_DEPTH_RELIABLE=1` et
 `OBSTACLE_SOURCE=union`. Après simplification, cette ligne doit être plus
 courte, pas plus longue.
+
+
+---
+
+## Sur la forme des critères — ajouté le 2026-08-11
+
+**Un critère formulé sur une grandeur dont la stabilité est inconnue ne décide
+rien.** Mesuré sur 12 fenêtres de 60 s consécutives, scène et configuration
+figées, laps 4 à 38 (`scripts/criterion_probe.py`, détail dans
+`docs/SURPROJECTION-RESULTS.md` partie IV) :
+
+| grandeur | dispersion sur 12 fenêtres | résolution à 5 fenêtres |
+|---|---|---|
+| taux de chevauchement | 65 % de la médiane | 4,7 points |
+| taux de raclage | 32 % | 4,7 points |
+| clairance minimale | 73 % — **saturée à −0,5 × cellule** | 0,001 m, sans valeur |
+| clairance p05 | 248 % | 0,059 m |
+| **clairance médiane** | **21 %** | **0,082 m** |
+
+Trois règles qui en découlent, et qui s'appliquent aux étapes 3 et 4 restantes :
+
+1. **Une passe de 60 s ne résout que 9,5 points de taux de chevauchement.**
+   Toute comparaison de ce taux fondée sur une passe unique — et le plan en
+   demandait plusieurs — affirme moins que son propre bruit. Le minimum
+   praticable est **5 fenêtres, soit 5 minutes**, pour 4,7 points.
+
+2. **La clairance médiane est la grandeur à préférer** : trois fois moins
+   dispersée que le taux, non saturée, en mètres donc comparable au ruban.
+   La clairance **minimale** est à proscrire comme critère continu : elle est
+   stable parce qu'elle est plaquée sur −0,5 × la cellule, elle ne distingue pas
+   un effleurement d'un labour, et elle change avec `GRID_CELL` sans que le
+   robot ait bougé.
+
+3. **Le taux de chevauchement reste bon comme garde-fou binaire** — « aucune
+   pose dans le mobilier » — sur lequel la dispersion n'a pas de prise.
+
+Tout critère écrit désormais nomme sa grandeur, son nombre de fenêtres et la
+différence qu'il prétend affirmer. Un critère qui ne les nomme pas est à
+reformuler avant d'être appliqué.
